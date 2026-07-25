@@ -1,0 +1,329 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+  <meta charset="UTF-8">
+  <title>求职联系助手</title>
+  <link rel="stylesheet" href="sidepanel.css">
+</head>
+<body>
+  <div class="app">
+    <header class="top">
+      <div class="top-row">
+        <h1>求职联系助手</h1>
+        <div class="top-right">
+          <span class="plat-pill" id="platPill">Boss</span>
+          <span class="usage-pill" id="usagePill" title="当前平台今日已联系 / 每日上限">今日 —/—</span>
+        </div>
+      </div>
+      <p class="sub" id="subLine">扫描 → 勾选 → 仅联系已选 · Boss 直聘</p>
+      <p class="trusteeship-status" id="trusteeshipStatus" role="status" aria-live="polite">托管已关闭</p>
+      <p class="login-banner hidden" id="loginBanner">尚未检测到登录态。请先登录对应招聘网站后再扫描。</p>
+    </header>
+
+    <main class="pages">
+      <section class="page" id="page-setup" data-page="setup">
+        <div class="subtabs" role="tablist" aria-label="配置分组">
+          <button type="button" class="subtab active" role="tab" aria-selected="true" data-setup="platform">平台</button>
+          <button type="button" class="subtab" role="tab" aria-selected="false" data-setup="api">API</button>
+          <button type="button" class="subtab" role="tab" aria-selected="false" data-setup="filter">求职设置</button>
+          <button type="button" class="subtab" role="tab" aria-selected="false" data-setup="trusteeship">AI 托管</button>
+        </div>
+
+        <div class="setup-pane" id="setup-platform">
+          <p class="hint" style="margin-top:0">同一时间只跑一个平台。切换会清空审核勾选。</p>
+          <div class="plat-cards" id="platCards">
+            <button type="button" class="plat-card active" data-platform="boss">
+              <strong>Boss</strong>
+              <span>可用</span>
+            </button>
+            <button type="button" class="plat-card" data-platform="zhilian">
+              <strong>智联</strong>
+              <span>可用</span>
+            </button>
+            <button type="button" class="plat-card" data-platform="liepin">
+              <strong>猎聘</strong>
+              <span>即将支持</span>
+            </button>
+          </div>
+          <div class="soft-box" id="platDetail"></div>
+          <button type="button" class="btn-primary" id="btnToApi">下一步：API →</button>
+        </div>
+
+        <div class="setup-pane hidden" id="setup-api">
+          <h2 class="pane-title">API 连接</h2>
+          <p class="hint" style="margin-top:0">只配置模型服务。求职意向与简历材料请到「求职设置」。</p>
+          <label for="provider">服务商（全平台共用）</label>
+          <select id="provider">
+            <option value="deepseek">DeepSeek（deepseek-v4-flash）</option>
+            <option value="openai_compatible">OpenAI 兼容</option>
+          </select>
+          <label for="apiKey">API Key（BYOK，仅本地存储）</label>
+          <input type="password" id="apiKey" placeholder="sk-… 你自己的 Key，可留空用规则分">
+          <div id="baseUrlRow" class="hidden">
+            <label for="baseUrl">Base URL</label>
+            <input type="text" id="baseUrl" placeholder="如 https://api.openai.com/v1 或兼容网关">
+            <p class="hint">仅 OpenAI 兼容模式需要；DeepSeek 使用官方默认地址。</p>
+          </div>
+          <p class="hint" id="deepseekHint">DeepSeek 使用官方地址与 deepseek-v4-flash，无需填写其它地址。</p>
+          <button type="button" class="btn-ghost" id="btnTestApi">测试连接</button>
+          <span id="apiTestMsg" class="hint"></span>
+          <button type="button" class="btn-primary" id="saveApi">保存 API 配置</button>
+          <button type="button" class="btn-primary" id="btnToJob">下一步：求职设置 →</button>
+        </div>
+
+        <div class="setup-pane hidden" id="setup-trusteeship">
+          <h2 class="pane-title">AI 对话托管</h2>
+          <p class="hint">全局默认开启；每个已登记岗位仍需单独开启才会被低频检查。未完成 API / 回复依据 / 飞书测试前不会真正监控。</p>
+          <label class="check-row" for="trusteeshipEnabled"><input type="checkbox" id="trusteeshipEnabled" checked> 开启 AI 对话托管</label>
+          <div class="row">
+            <div class="col">
+              <label for="trusteeshipInterval">检查间隔</label>
+              <select id="trusteeshipInterval">
+                <option value="5">5 分钟</option>
+                <option value="10" selected>10 分钟</option>
+                <option value="15">15 分钟</option>
+              </select>
+            </div>
+            <div class="col">
+              <label for="autoReplyDailyLimit">每日自动回复上限</label>
+              <input type="number" id="autoReplyDailyLimit" value="10" min="1" max="20">
+            </div>
+          </div>
+          <label class="check-row" for="quietHoursEnabled"><input type="checkbox" id="quietHoursEnabled"> 静默时段内只收集消息</label>
+          <div class="row">
+            <div class="col"><label for="quietHoursStart">静默开始</label><input type="time" id="quietHoursStart" value="22:00"></div>
+            <div class="col"><label for="quietHoursEnd">静默结束</label><input type="time" id="quietHoursEnd" value="08:00"></div>
+          </div>
+          <hr class="form-divider">
+          <section class="setup-section" aria-labelledby="secHrFaq">
+            <h3 class="section-title" id="secHrFaq">HR 常用问答</h3>
+            <p class="hint">可与「求职设置 → 简历要点」二选一或同时填写。先勾选基础问题并填写你的答法；也可再添加自定义问答。自动回复只会引用已填写内容，不会编造。薪资/面试等到岗等敏感问题仍进待确认。</p>
+            <div id="hrFaqPresets" class="hr-faq-presets" aria-label="基础问题预设"></div>
+            <p class="hint" style="margin-top:10px">自定义补充（可选）</p>
+            <div id="hrFaqList" class="hr-faq-list" aria-live="polite"></div>
+            <button type="button" class="btn-ghost" id="btnAddHrFaq">添加自定义问答</button>
+          </section>
+          <hr class="form-divider">
+          <h3>飞书通知（Phase 1）</h3>
+          <label class="check-row" for="feishuEnabled"><input type="checkbox" id="feishuEnabled"> 启用飞书待确认通知</label>
+          <label for="feishuWebhook">飞书 Webhook 地址</label>
+          <div class="sensitive-row"><input type="password" id="feishuWebhook" autocomplete="off"><button type="button" class="btn-mini" id="btnToggleFeishuWebhook" aria-pressed="false" aria-controls="feishuWebhook" aria-label="暂时显示飞书 Webhook" data-sensitive-name="飞书 Webhook">暂时显示</button></div>
+          <label for="feishuSigningSecret">签名密钥（可选）</label>
+          <div class="sensitive-row"><input type="password" id="feishuSigningSecret" autocomplete="off"><button type="button" class="btn-mini" id="btnToggleFeishuSecret" aria-pressed="false" aria-controls="feishuSigningSecret" aria-label="暂时显示签名密钥" data-sensitive-name="签名密钥">暂时显示</button></div>
+          <p class="risk-note">Webhook、签名密钥和 API Key 只保存在浏览器本地，不是系统钥匙链。自动化仍可能触发平台风控/封号；飞书 Phase 1 只通知，确认仍在插件内完成。</p>
+          <button type="button" class="btn-ghost" id="btnTestFeishu">发送飞书测试通知</button>
+          <button type="button" class="btn-primary" id="btnSaveTrusteeship">保存托管设置</button>
+          <button type="button" class="btn-go" id="btnRunTrusteeshipNow">立即检查已登记岗位</button>
+          <p class="hint" id="trusteeshipConfigMsg" aria-live="polite"></p>
+          <h3>已登记岗位</h3>
+          <p class="hint">联系成功会自动登记；也可打开 Boss 聊天页中的目标会话后，从当前页登记并托管。</p>
+          <label class="check-row" for="registerActiveEnable"><input type="checkbox" id="registerActiveEnable" checked> 登记后立即托管此岗位</label>
+          <button type="button" class="btn-ghost" id="btnRegisterActiveConversation">从当前 Boss 聊天页登记</button>
+          <div id="managedConversations" class="managed-conversations"><p class="empty">暂无具有可靠会话标识的已登记岗位。</p></div>
+        </div>
+
+        <div class="setup-pane hidden" id="setup-filter">
+          <div class="soft-box" id="filterPlatBanner" style="margin-top:0">
+            <div class="job-title" id="filterPlatTitle">当前平台：Boss</div>
+            <div class="job-sub" id="filterPlatHint">意向、材料、节奏均按平台独立保存；切换平台会换一套配置。</div>
+          </div>
+
+          <section class="setup-section" aria-labelledby="secIntent">
+            <h3 class="section-title" id="secIntent">求职意向</h3>
+            <p class="hint">告诉助手你想找什么岗位，扫描会按此打开对应网站列表。</p>
+            <label for="keyword">目标岗位 / 关键词</label>
+            <input type="text" id="keyword" placeholder="如：前端 / 数据分析">
+            <label for="city">城市</label>
+            <input type="text" id="city" placeholder="如：杭州 / 北京">
+            <label for="includeKeywords">包含词（逗号分隔，可选）</label>
+            <input type="text" id="includeKeywords" placeholder="React, TypeScript">
+            <label for="excludeKeywords">排除词（逗号分隔）</label>
+            <input type="text" id="excludeKeywords" placeholder="外包, 驻场">
+          </section>
+
+          <section class="setup-section" aria-labelledby="secResume">
+            <h3 class="section-title" id="secResume">简历材料</h3>
+            <p class="hint">有 API Key 时用于 AI 筛选与招呼语。开启 AI 托管时：简历要点与「AI 托管 → HR 常用问答」至少填一项。图片可选，联系时发给 HR。</p>
+            <label for="resumeText">简历要点</label>
+            <textarea id="resumeText" rows="5" placeholder="技能、项目、年限、城市偏好…建议按行写要点"></textarea>
+            <label for="resumeImg">简历图片（可选）</label>
+            <input type="file" id="resumeImg" accept="image/*">
+            <div id="imgPrevWrap" class="img-prev-wrap hidden">
+              <div id="imgPrev" class="img-prev"></div>
+              <button type="button" class="img-clear" id="btnClearResumeImg" aria-label="清除已上传图片" title="清除图片">×</button>
+            </div>
+          </section>
+
+          <section class="setup-section" aria-labelledby="secPlatFilter">
+            <h3 class="section-title" id="secPlatFilter">平台条件</h3>
+            <div id="fields-boss">
+              <label class="check-row"><input type="checkbox" id="filterInactive" checked> 过滤不活跃 Boss（推荐）</label>
+              <label for="activityMaxDays">活跃要求</label>
+              <select id="activityMaxDays">
+                <option value="1">今日/在线</option>
+                <option value="3">3 日内</option>
+                <option value="7" selected>7 日内</option>
+                <option value="14">两周内</option>
+                <option value="0">不限</option>
+              </select>
+            </div>
+            <div id="fields-zhilian" class="hidden">
+              <label for="experience">工作经验（智联）</label>
+              <input type="text" id="experience" placeholder="如：3-5年">
+              <label for="education">学历（智联）</label>
+              <input type="text" id="education" placeholder="如：本科">
+              <p class="hint">投递前请在智联设置好默认简历。</p>
+            </div>
+            <div id="fields-liepin" class="hidden">
+              <label for="salaryYearMin">年薪下限（万，猎聘）</label>
+              <input type="number" id="salaryYearMin" placeholder="如：30">
+              <label for="salaryYearMax">年薪上限（万，猎聘）</label>
+              <input type="number" id="salaryYearMax" placeholder="如：50">
+              <label class="check-row"><input type="checkbox" id="preferUrgent"> 急聘优先</label>
+              <p class="hint">猎聘打招呼与主动私信限额不同；建议少主动发消息。</p>
+            </div>
+          </section>
+
+          <section class="setup-section" aria-labelledby="secGreeting">
+            <h3 class="section-title" id="secGreeting">招呼语</h3>
+            <label for="greetingTemplate">招呼语模板（本平台独立）</label>
+            <textarea id="greetingTemplate" rows="3" placeholder="您好，我对贵司岗位很感兴趣…">您好，我对这个岗位很感兴趣，方便聊聊吗？</textarea>
+          </section>
+
+          <section class="setup-section" aria-labelledby="secPace">
+            <h3 class="section-title" id="secPace">扫描与联系节奏</h3>
+            <p class="hint">控制扫多少、每天联系上限，以及拟人化间隔，降低风控风险。</p>
+            <div class="row">
+              <div class="col">
+                <label for="count">扫描数量</label>
+                <input type="number" id="count" value="20" min="1" max="100">
+              </div>
+              <div class="col">
+                <label for="dailyLimit">每日上限（本平台）</label>
+                <input type="number" id="dailyLimit" value="20" min="1" max="50">
+              </div>
+            </div>
+            <p class="usage-line" id="usageLine">本平台今日已联系 <strong id="usageCount">0</strong> / <strong id="usageLimit">20</strong></p>
+            <div class="row">
+              <div class="col">
+                <label for="intervalMinSec">间隔最短(秒)</label>
+                <input type="number" id="intervalMinSec" value="10" min="5" max="120">
+              </div>
+              <div class="col">
+                <label for="intervalMaxSec">间隔最长(秒)</label>
+                <input type="number" id="intervalMaxSec" value="25" min="6" max="180">
+              </div>
+            </div>
+            <div class="row">
+              <div class="col">
+                <label for="batchSize">批次大小</label>
+                <input type="number" id="batchSize" value="5" min="1" max="20">
+              </div>
+              <div class="col">
+                <label for="batchRestMinSec">批次休息最短(秒)</label>
+                <input type="number" id="batchRestMinSec" value="45" min="15" max="600">
+              </div>
+            </div>
+            <label for="batchRestMaxSec">批次休息最长(秒)</label>
+            <input type="number" id="batchRestMaxSec" value="90" min="20" max="900">
+          </section>
+
+          <button type="button" class="btn-go" id="btnScan">保存并扫描</button>
+          <p class="hint" id="scanHint">将保存本页设置后开始扫描；扫描不会自动联系，完成后请到「审核」勾选。</p>
+        </div>
+      </section>
+
+      <section class="page hidden" id="page-review" data-page="review">
+        <div class="review-head">
+          <span id="reviewCount">尚未扫描</span>
+          <div class="review-actions">
+            <button type="button" class="btn-mini" id="btnSelectHigh">全选高分</button>
+            <button type="button" class="btn-mini" id="btnClearSel">清空选择</button>
+          </div>
+        </div>
+        <p class="hint review-hint">点职位名可在站点打开详情；点其余区域勾选。仅显示当前平台结果。</p>
+        <div id="reviewList" class="review-list"><div class="empty">先到「配置 → 求职设置」填写意向并扫描岗位</div></div>
+        <button type="button" class="btn-go" id="btnContact" disabled>请先勾选岗位</button>
+      </section>
+
+      <section class="page hidden" id="page-approvals" data-page="approvals">
+        <div class="approval-head"><h2>待确认</h2><span class="approval-badge" id="approvalBadge" aria-label="待确认 0 条">0</span></div>
+        <p class="hint">重要问题不会自动发送。请核对上下文后再处理。</p>
+        <p class="hint" id="approvalStatus" aria-live="polite"></p>
+        <div class="approval-list" id="approvalList"></div>
+        <p class="empty" id="approvalEmpty">当前没有待确认消息。</p>
+      </section>
+
+      <section class="page hidden" id="page-run" data-page="run">
+        <div class="status-row">
+          <span id="phaseText">未开始</span>
+          <span id="progText"></span>
+        </div>
+        <div class="recovery-card hidden" id="recoveryCard" role="alert">
+          <div class="recovery-head">
+            <strong>任务已安全停机</strong>
+            <code id="recoveryCode">RUN_BLOCKED</code>
+          </div>
+          <p id="recoveryReason">自动操作已停止。</p>
+          <p><strong>下一步：</strong><span id="recoveryNextAction">核对招聘平台状态后重新扫描</span></p>
+          <button type="button" class="btn-ghost" id="btnRecovery">返回审核或配置</button>
+        </div>
+        <div class="ctrl">
+          <button type="button" id="btnPause" disabled>暂停</button>
+          <button type="button" id="btnStop" disabled>停止</button>
+          <button type="button" id="btnReset">重置会话</button>
+        </div>
+        <div class="log-h">
+          <span>日志</span>
+          <button type="button" class="btn-mini" id="clearLog">清空</button>
+        </div>
+        <div class="log" id="log" role="log" aria-live="polite" aria-relevant="additions"></div>
+      </section>
+    </main>
+
+    <nav class="tabs" role="tablist" aria-label="主导航">
+      <button type="button" class="tab active" role="tab" aria-selected="true" data-tab="setup">配置</button>
+      <button type="button" class="tab" role="tab" aria-selected="false" data-tab="review">审核</button>
+      <button type="button" class="tab" role="tab" aria-selected="false" data-tab="run">执行</button>
+      <button type="button" class="tab" role="tab" aria-selected="false" data-tab="approvals">待确认 <span class="approval-badge-inline" id="approvalTabBadge" aria-label="待确认 0 条">0</span></button>
+    </nav>
+  </div>
+
+  <div class="modal hidden" id="riskModal">
+    <div class="modal-card" role="dialog" aria-modal="true" aria-labelledby="riskTitle">
+      <h2 id="riskTitle">使用前须知</h2>
+      <p>自动化操作可能违反招聘网站用户协议，存在限权/封号风险。本工具仅为半自动辅助：<strong>必须人工勾选后才会联系</strong>；遇验证码或次数上限会立即停止。</p>
+      <p>API Key 仅保存在本机浏览器，不上传自有服务器。</p>
+      <button type="button" class="btn-primary" id="riskOk">我已知晓并继续</button>
+    </div>
+  </div>
+
+  <div class="modal hidden" id="deliveryModal">
+    <div
+      class="modal-card delivery-card"
+      role="dialog"
+      aria-modal="true"
+      aria-labelledby="deliveryTitle"
+      aria-describedby="deliveryDescription"
+    >
+      <h2 id="deliveryTitle">确认本次联系计划</h2>
+      <p id="deliveryDescription">只需确认这一个批次；系统仍会在执行每个岗位前逐项校验。</p>
+      <div class="delivery-summary" id="deliverySummary"></div>
+      <ul class="delivery-jobs" id="deliveryJobs" aria-label="将联系的岗位"></ul>
+      <p class="delivery-note">时间估算仅含联系间隔和批次休息，页面加载可能增加总时长。</p>
+      <div class="modal-actions">
+        <button type="button" class="btn-ghost" id="btnCancelDelivery">返回审核</button>
+        <button type="button" class="btn-go" id="btnConfirmDelivery">确认联系</button>
+      </div>
+    </div>
+  </div>
+
+  <script src="platform/search-filters.js"></script>
+  <script src="platform/registry.js"></script>
+  <script src="platform/config.js"></script>
+  <script src="run-safety.js"></script>
+  <script src="api-permissions.js"></script>
+  <script src="delivery-guard.js"></script>
+  <script src="sidepanel.js"></script>
+</body>
+</html>

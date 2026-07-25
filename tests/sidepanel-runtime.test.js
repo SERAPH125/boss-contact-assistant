@@ -1,0 +1,413 @@
+const test = require('node:test');
+const assert = require('node:assert/strict');
+const fs = require('node:fs');
+const path = require('node:path');
+const vm = require('node:vm');
+
+const script = fs.readFileSync(path.join(__dirname, '..', 'src/sidepanel.js'), 'utf8');
+
+function loadController() {
+  const start = script.indexOf('// TRUSTEESHIP_UI_CONTROLLER_START');
+  const end = script.indexOf('// TRUSTEESHIP_UI_CONTROLLER_END');
+  assert.ok(start >= 0 && end > start, 'sidepanel must expose the small trusteeship UI controller');
+  const context = { globalThis: {}, Promise };
+  vm.runInNewContext(script.slice(start, end), context);
+  return context.globalThis.TrusteeshipSidepanel.createController;
+}
+
+test('restores the global toggle after a failed save', async () => {
+  const createController = loadController();
+  const calls = [];
+  const controller = createController({
+    send: async () => ({ ok: false, code: 'MISSING_PREREQUISITE' }),
+    setEnabled: (value) => calls.push(['enabled', value]),
+    status: (value) => calls.push(['status', value]),
+    guide: () => calls.push(['guide'])
+  });
+
+  const result = await controller.saveSettings({ settings: { enabled: true } }, false);
+  assert.equal(result.ok, false);
+  assert.deepEqual(calls, [
+    ['enabled', false],
+    ['status', '保存失败：请补全开启托管的前置条件'],
+    ['guide']
+  ]);
+});
+
+test('guides missing prerequisites to their corresponding UI targets', async () => {
+  const createController = loadController();
+  const focused = [];
+  const controller = createController({
+    send: async () => ({ ok: false, code: 'MISSING_PREREQUISITE', missing: ['replyEvidence'] }),
+    setEnabled() {}, status() {},
+    guide: (target) => focused.push(target)
+  });
+  await controller.saveSettings({ settings: { enabled: true } }, false);
+  assert.deepEqual(focused, [['replyEvidence']]);
+});
+
+test('reports every missing prerequisite in stable order while preserving the complete guide list', async () => {
+  const createController = loadController();
+  const focused = [];
+  const messages = [];
+  const controller = createController({
+    send: async () => ({ ok: false, code: 'TRUSTEESHIP_PREREQUISITE_FAILED', missing: ['riskAccepted', 'feishuTest', 'replyEvidence', 'api'] }),
+    setEnabled() {}, status: (value) => messages.push(value), guide: (targets) => focused.push(targets)
+  });
+  await controller.saveSettings({ settings: { enabled: true } }, false);
+  assert.deepEqual(messages, ['保存失败：请完成：API 配置与测试、简历要点或 HR 常用问答、飞书测试通知、平台风险确认']);
+  assert.deepEqual(focused, [['riskAccepted', 'feishuTest', 'replyEvidence', 'api']]);
+});
+
+test('keeps ordinary failed approval cards editable while unknown and successful resolutions refresh', async () => {
+  const createController = loadController();
+  const calls = [];
+  let response = { ok: false, code: 'CONVERSATION_NOT_REGISTERED' };
+  const controller = createController({
+    send: async (message) => { calls.push(message); return response; },
+    disableCard: (id, value) => calls.push(['disabled', id, value]),
+    status: (value) => calls.push(['status', value]),
+    refreshApprovals: async () => calls.push(['refresh'])
+  });
+  const card = { id: 'a-1', draft: '保留的草稿' };
+
+  await controller.resolveApproval(card, 'SEND_EDITED');
+  assert.equal(card.draft, '保留的草稿');
+  assert.equal(calls.some((entry) => entry[0] === 'refresh'), false);
+  assert.deepEqual(calls[0], ['disabled', 'a-1', true]);
+  assert.equal(calls[1].draft, '保留的草稿');
+  assert.equal(calls.some((entry) => Array.isArray(entry) && entry[0] === 'disabled' && entry[2] === false), true);
+
+  calls.length = 0;
+  response = { ok: false, status: 'SEND_RESULT_UNKNOWN', code: 'SEND_RESULT_UNKNOWN' };
+  await controller.resolveApproval(card, 'SEND_EDITED');
+  assert.equal(calls.some((entry) => Array.isArray(entry) && entry[0] === 'disabled' && entry[2] === false), false);
+  assert.equal(calls.some((entry) => entry[0] === 'refresh'), true);
+
+  calls.length = 0;
+  response = { ok: true };
+  await controller.resolveApproval(card, 'NO_REPLY');
+  assert.deepEqual({ ...calls[1] }, { type: 'TRUSTEESHIP_RESOLVE_APPROVAL', approvalId: 'a-1', action: 'NO_REPLY' });
+  assert.deepEqual(calls.slice(-2), [['disabled', 'a-1', false], ['refresh']]);
+
+  calls.length = 0;
+  response = { ok: false, code: 'raw-error-CANARY-sidepanel-298e' };
+  await controller.resolveApproval(card, 'SEND_EDITED');
+  assert.equal(JSON.stringify(calls).includes('raw-error-CANARY-sidepanel-298e'), false);
+});
+
+test('restores an individual conversation switch when its update fails', async () => {
+  const createController = loadController();
+  const calls = [];
+  const controller = createController({
+    send: async () => ({ ok: false, code: 'CONVERSATION_NOT_REGISTERED' }),
+    setConversationEnabled: (id, value) => calls.push([id, value]),
+    status: (value) => calls.push(value)
+  });
+  const result = await controller.setConversation('c-1', true, false);
+  assert.equal(result.ok, false);
+  assert.deepEqual(calls, [['c-1', false], '更新失败：该会话不可托管']);
+});
+
+class FakeClassList {
+  constructor() { this.values = new Set(); }
+  add(...values) { values.forEach((value) => this.values.add(value)); }
+  remove(...values) { values.forEach((value) => this.values.delete(value)); }
+  toggle(value, enabled) { if (enabled) this.add(value); else this.remove(value); return !!enabled; }
+  contains(value) { return this.values.has(value); }
+}
+
+class FakeElement {
+  constructor(tagName, id) {
+    this.tagName = tagName.toUpperCase(); this.id = id || ''; this.children = [];
+    this.dataset = {}; this.classList = new FakeClassList(); this.listeners = {};
+    this.attributes = {}; this.style = {}; this.value = ''; this.textContent = '';
+    this.checked = false; this.disabled = false; this.hidden = false; this.type = '';
+  }
+  setAttribute(name, value) { this.attributes[name] = String(value); if (name.startsWith('data-')) this.dataset[name.slice(5).replace(/-([a-z])/g, (_, c) => c.toUpperCase())] = String(value); }
+  getAttribute(name) { return this.attributes[name] || null; }
+  appendChild(child) { this.children.push(child); return child; }
+  append(...children) { children.forEach((child) => this.appendChild(child)); }
+  replaceChildren(...children) { this.children = children; }
+  addEventListener(type, listener) { (this.listeners[type] ||= []).push(listener); }
+  async trigger(type, event) {
+    if (type === 'click' && this.disabled) return;
+    for (const listener of this.listeners[type] || []) await listener(event || { target: this, preventDefault() {}, stopPropagation() {} });
+  }
+  focus() { this.focused = true; }
+  querySelectorAll(selector) { return findDescendants(this, selector); }
+  querySelector(selector) { return this.querySelectorAll(selector)[0] || null; }
+}
+
+function findDescendants(root, selector) {
+  const all = [];
+  (function walk(node) { (node.children || []).forEach((child) => { all.push(child); walk(child); }); })(root);
+  if (selector === 'button, textarea') return all.filter((item) => item.tagName === 'BUTTON' || item.tagName === 'TEXTAREA');
+  const data = selector.match(/\[data-([\w-]+)="([^"]+)"\]/);
+  if (data) return all.filter((item) => item.dataset[data[1].replace(/-([a-z])/g, (_, c) => c.toUpperCase())] === data[2]);
+  if (selector === 'button') return all.filter((item) => item.tagName === 'BUTTON');
+  if (selector === 'textarea') return all.filter((item) => item.tagName === 'TEXTAREA');
+  return [];
+}
+
+async function loadFullSidepanel(options) {
+  const html = fs.readFileSync(path.join(__dirname, '..', 'src/sidepanel.html'), 'utf8');
+  const ids = {};
+  for (const match of html.matchAll(/<([\w-]+)[^>]*\bid="([^"]+)"[^>]*>/g)) ids[match[2]] = new FakeElement(match[1], match[2]);
+  const pages = ['setup', 'review', 'run', 'approvals'].map((name) => { const el = ids['page-' + name]; el.dataset.page = name; return el; });
+  const tabs = ['setup', 'review', 'run', 'approvals'].map((name) => { const el = new FakeElement('button'); el.classList.add('tab'); el.dataset.tab = name; return el; });
+  const subtabs = ['platform', 'api', 'filter', 'trusteeship'].map((name) => { const el = new FakeElement('button'); el.classList.add('subtab'); el.dataset.setup = name; return el; });
+  const document = {
+    activeElement: null,
+    getElementById(id) { return ids[id] || null; },
+    createElement(tag) { return new FakeElement(tag); },
+    createTextNode(text) { const node = new FakeElement('#text'); node.textContent = text; return node; },
+    querySelectorAll(selector) { if (selector === '.page') return pages; if (selector === '.tab') return tabs; if (selector === '.subtab') return subtabs; return []; },
+    querySelector(selector) { if (selector.startsWith('#managedConversations')) return ids.managedConversations.querySelector(selector); if (selector.startsWith('#approvalList')) return ids.approvalList.querySelector(selector); return null; },
+    addEventListener() {}
+  };
+  const state = options.state;
+  const approvals = options.approvals;
+  const sent = [];
+  const chrome = {
+    runtime: {
+      lastError: null,
+      sendMessage(message, callback) {
+        sent.push(message);
+        if (message.type === 'TRUSTEESHIP_GET_STATE') callback({ ok: true, ...state });
+        else if (message.type === 'TRUSTEESHIP_LIST_APPROVALS') {
+          if (options.listApprovals) options.listApprovals(message, callback);
+          else callback({ ok: true, approvals });
+        }
+        else if (message.type === 'TRUSTEESHIP_RESOLVE_APPROVAL') callback(options.resolve ? options.resolve(message) : { ok: true });
+        else if (message.type === 'TRUSTEESHIP_SET_CONVERSATION') callback({ ok: false, code: 'CONVERSATION_NOT_REGISTERED' });
+        else if (message.type === 'GET_STATE') callback({ phase: 'idle' });
+        else callback({ ok: true });
+      }, onMessage: { addListener() {} }
+    },
+    storage: { local: { set() {} }, onChanged: { addListener() {} } }, tabs: { query() {} }
+  };
+  const context = {
+    globalThis: null, document, window: { confirm: () => true }, chrome,
+    PlatformConfig: { ensureMigrated: async () => ({ activePlatform: 'boss', byPlatform: {} }), savePlatformFields: async () => {}, setActivePlatform: async () => {} },
+    RunSafety: { canSwitchPlatform: () => true, canResetRun: () => true },
+    ApiPermissions: { ensure: async () => ({ ok: true }) }, DeliveryGuard: {},
+    getPlatform: () => ({ short: 'Boss', name: 'Boss', ready: true, tabQuery: [] }), defaultPlatformCfg: () => ({}),
+    setTimeout, clearTimeout, FileReader: function () {}
+  };
+  context.globalThis = context;
+  vm.runInNewContext(script, context);
+  await Promise.resolve(); await Promise.resolve();
+  return { ids, tabs, sent, context };
+}
+
+test('full sidepanel wiring keeps unknown outcomes visible and disables unsafe retries', async () => {
+  const unknown = { approvalId: 'a-unknown', conversationId: 'conv-1', company: '甲'.repeat(40), position: '前端', hrName: '李', status: 'SEND_RESULT_UNKNOWN', stage: 'PAUSED', reasonCode: 'SEND_RESULT_UNKNOWN', messages: ['请核对发送结果'], fieldsNeeded: [], draft: '保留草稿' };
+  const h = await loadFullSidepanel({
+    state: { settings: { enabled: true, paused: false }, managedConversations: {}, pendingApprovalCount: 1 }, approvals: [unknown]
+  });
+  assert.ok(h.sent.some((item) => item.type === 'TRUSTEESHIP_GET_STATE'));
+  assert.equal(h.ids.trusteeshipStatus.textContent, '等待确认 1 条');
+  await h.tabs.find((tab) => tab.dataset.tab === 'approvals').trigger('click');
+  const card = h.ids.approvalList.children[0];
+  assert.match(card.children.find((child) => child.tagName === 'P').textContent, /人工核对/);
+  assert.equal(findDescendants(card, 'button').some((button) => button.textContent === '修改并确认发送'), false);
+  assert.equal(findDescendants(card, 'button').filter((button) => button.textContent === '打开 Boss 会话')[0].disabled, false);
+});
+
+test('full sidepanel preserves a real unknown resolve draft and refreshes only a successful resolve', async () => {
+  const approvals = [{ approvalId: 'a-pending', conversationId: 'conv-1', company: '甲公司', position: '前端', hrName: '李', status: 'PENDING', stage: 'WAITING_CONFIRMATION', reasonCode: 'HARD_RISK_SALARY', messages: ['请说明薪资期望'], fieldsNeeded: [], draft: '保留草稿' }];
+  let resolveCount = 0;
+  const h = await loadFullSidepanel({
+    state: { settings: { enabled: true, paused: false }, managedConversations: {}, pendingApprovalCount: 1 }, approvals,
+    resolve() {
+      resolveCount += 1;
+      if (resolveCount === 1) { approvals[0].status = 'SEND_RESULT_UNKNOWN'; return { ok: false, status: 'SEND_RESULT_UNKNOWN', errorCode: 'SEND_RESULT_UNKNOWN' }; }
+      approvals.length = 0; return { ok: true };
+    }
+  });
+  const approvalsTab = h.tabs.find((tab) => tab.dataset.tab === 'approvals');
+  await approvalsTab.trigger('click');
+  let card = h.ids.approvalList.children[0];
+  const draft = findDescendants(card, 'textarea')[0];
+  draft.value = '编辑后保留';
+  await findDescendants(card, 'button').find((button) => button.textContent === '修改并确认发送').trigger('click');
+  assert.match(h.ids.approvalList.children[0].children.find((child) => /发送结果未知/.test(child.textContent)).textContent, /发送结果未知/);
+  assert.equal(draft.value, '编辑后保留');
+  await approvalsTab.trigger('click');
+  card = h.ids.approvalList.children[0];
+  assert.equal(findDescendants(card, 'button').some((button) => button.textContent === '修改并确认发送'), false);
+
+  approvals[0].status = 'PENDING';
+  await approvalsTab.trigger('click');
+  card = h.ids.approvalList.children[0];
+  await findDescendants(card, 'button').find((button) => button.textContent === '不回复').trigger('click');
+  assert.equal(h.ids.approvalList.children.length, 0);
+  assert.equal(h.ids.approvalEmpty.hidden, false);
+});
+
+test('full sidepanel immediately locks an unknown response while its durable refresh is pending', async () => {
+  const pending = { approvalId: 'a-pending', conversationId: 'conv-1', company: '甲公司', position: '前端', hrName: '李', status: 'PENDING', stage: 'WAITING_CONFIRMATION', reasonCode: 'HARD_RISK_SALARY', messages: ['请说明薪资期望'], fieldsNeeded: [], draft: '保留草稿' };
+  const unknown = { ...pending, status: 'SEND_RESULT_UNKNOWN', stage: 'PAUSED', reasonCode: 'SEND_RESULT_UNKNOWN' };
+  let listCalls = 0;
+  let releaseRefresh;
+  const h = await loadFullSidepanel({
+    state: { settings: { enabled: true, paused: false }, managedConversations: {}, pendingApprovalCount: 1 }, approvals: [pending],
+    resolve: () => ({ ok: false, status: 'SEND_RESULT_UNKNOWN', code: 'SEND_RESULT_UNKNOWN' }),
+    listApprovals(_message, callback) {
+      listCalls += 1;
+      if (listCalls === 1) callback({ ok: true, approvals: [pending] });
+      else releaseRefresh = () => callback({ ok: true, approvals: [unknown] });
+    }
+  });
+  await h.tabs.find((tab) => tab.dataset.tab === 'approvals').trigger('click');
+  const oldCard = h.ids.approvalList.children[0];
+  const draft = findDescendants(oldCard, 'textarea')[0];
+  const send = findDescendants(oldCard, 'button').find((button) => button.textContent === '修改并确认发送');
+  const resolveAttempt = send.trigger('click');
+  await Promise.resolve(); await Promise.resolve();
+
+  assert.equal(draft.disabled, true);
+  assert.equal(draft.readOnly, true);
+  assert.deepEqual(findDescendants(oldCard, 'button').map((button) => button.disabled), [true, true, true, true]);
+  assert.match(h.ids.approvalStatus.textContent, /发送结果未知/);
+  await send.trigger('click');
+  assert.equal(h.sent.filter((message) => message.type === 'TRUSTEESHIP_RESOLVE_APPROVAL').length, 1);
+
+  releaseRefresh();
+  await resolveAttempt;
+  const durableCard = h.ids.approvalList.children[0];
+  assert.equal(findDescendants(durableCard, 'textarea')[0].readOnly, true);
+  assert.match(durableCard.children.find((child) => child.tagName === 'LABEL').textContent, /本次尝试草稿（只读）/);
+  assert.deepEqual(findDescendants(durableCard, 'button').map((button) => button.textContent), ['打开 Boss 会话']);
+});
+
+test('full sidepanel uses the global enabled gate and rolls back a confirmed conversation close', async () => {
+  const conversation = { conversationId: 'conv-1', company: '甲公司', position: '前端', hrName: '李', enabled: true, state: 'WAITING_HR', lastCheckedAt: 1234 };
+  const h = await loadFullSidepanel({ state: { settings: { enabled: false, paused: false }, managedConversations: { 'conv-1': conversation }, pendingApprovalCount: 1 }, approvals: [] });
+  assert.equal(h.ids.trusteeshipStatus.textContent, '托管已关闭');
+  h.context.applyTrusteeshipState({ settings: { enabled: true, paused: false }, managedConversations: {}, pendingApprovalCount: 0 });
+  assert.equal(h.ids.trusteeshipStatus.textContent, '正在托管 0 个岗位');
+  h.context.applyTrusteeshipState({ settings: { enabled: true, paused: true }, managedConversations: {}, pendingApprovalCount: 1 });
+  assert.equal(h.ids.trusteeshipStatus.textContent, '托管已暂停');
+  h.context.applyTrusteeshipState({ settings: { enabled: true, paused: false }, managedConversations: { 'conv-1': conversation }, pendingApprovalCount: 0 });
+  const checkbox = findDescendants(h.ids.managedConversations, '[data-conversation-id="conv-1"]')[0];
+  checkbox.checked = false;
+  await checkbox.trigger('change');
+  assert.equal(checkbox.checked, true);
+});
+
+test('full sidepanel gives stable Chinese recovery guidance for login and Boss verification pauses', async () => {
+  const h = await loadFullSidepanel({
+    state: {
+      settings: {
+        enabled: true,
+        paused: true,
+        pauseCode: 'LOGIN_REQUIRED'
+      },
+      managedConversations: {},
+      pendingApprovalCount: 0
+    },
+    approvals: []
+  });
+
+  assert.match(h.ids.trusteeshipConfigMsg.textContent, /重新登录 Boss/);
+  assert.match(h.ids.trusteeshipConfigMsg.textContent, /手动恢复/);
+
+  h.context.applyTrusteeshipState({
+    settings: {
+      enabled: true,
+      paused: true,
+      pauseCode: 'BOSS_BLOCKED'
+    },
+    managedConversations: {},
+    pendingApprovalCount: 0
+  });
+  assert.match(h.ids.trusteeshipConfigMsg.textContent, /验证码或风控/);
+  assert.match(h.ids.trusteeshipConfigMsg.textContent, /不要反复重试/);
+});
+
+test('full sidepanel gives manual recovery guidance for uncertain interrupted classification state', async () => {
+  const conversation = {
+    conversationId: 'conv-recovery',
+    company: '恢复测试公司',
+    position: '前端',
+    hrName: '李',
+    enabled: true,
+    state: 'PAUSED',
+    pauseCode: 'RECOVERY_STATE_UNCERTAIN',
+    lastCheckedAt: 0
+  };
+  const h = await loadFullSidepanel({
+    state: {
+      settings: { enabled: true, paused: false },
+      managedConversations: { 'conv-recovery': conversation },
+      pendingApprovalCount: 0
+    },
+    approvals: []
+  });
+
+  const card = h.ids.managedConversations.children[0];
+  const details = card.children.find((child) => child.tagName === 'P');
+  assert.match(details.textContent, /恢复状态无法确认/);
+  assert.match(details.textContent, /人工核对/);
+});
+
+test('full sidepanel gives stable manual guidance for normalized unknown processing pauses', async () => {
+  const h = await loadFullSidepanel({
+    state: {
+      settings: { enabled: true, paused: false },
+      managedConversations: {
+        'conv-fallback': {
+          conversationId: 'conv-fallback',
+          company: '恢复测试公司',
+          position: '前端',
+          hrName: '李',
+          enabled: true,
+          state: 'PAUSED',
+          pauseCode: 'UNKNOWN_PROCESSING_FAILURE',
+          lastCheckedAt: 0
+        }
+      },
+      pendingApprovalCount: 0
+    },
+    approvals: []
+  });
+
+  const details = h.ids.managedConversations.children[0].children
+    .find((child) => child.tagName === 'P');
+  assert.match(details.textContent, /处理状态异常/);
+  assert.match(details.textContent, /人工核对后重试/);
+});
+
+test('full sidepanel status and managed DOM mask unknown provider and credential-shaped pause canaries', async () => {
+  const canary = 'provider-raw-error-CANARY-sidepanel-4b92';
+  const h = await loadFullSidepanel({
+    state: {
+      settings: { enabled: true, paused: true, pauseCode: canary },
+      managedConversations: {
+        'conv-sensitive': {
+          conversationId: 'conv-sensitive',
+          company: '甲公司',
+          position: '前端',
+          hrName: '李',
+          enabled: true,
+          state: 'PAUSED',
+          pauseCode: canary,
+          lastCheckedAt: 0
+        }
+      },
+      pendingApprovalCount: 0
+    },
+    approvals: []
+  });
+
+  const visibleText = JSON.stringify(Object.fromEntries(
+    Object.entries(h.ids).map(([id, element]) => [id, element.textContent])
+  )) + JSON.stringify(h.ids.managedConversations.children.map((card) =>
+    card.children.map((child) => child.textContent)
+  ));
+  assert.equal(visibleText.includes(canary), false);
+  assert.equal(h.ids.trusteeshipStatus.textContent, '托管已暂停');
+  assert.match(h.ids.managedConversations.children[0].children[1].textContent, /人工核对/);
+});

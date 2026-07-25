@@ -1,0 +1,37 @@
+[
+  {
+    "id": "m1",
+    "direction": "outgoing",
+    "kind": "text",
+    "text": "您好",
+    "at": 1700000000000
+  },
+  {
+    "id": "m2",
+    "direction": "incoming",
+    "kind": "text",
+    "text": "还在看机会吗",
+    "at": 1700000060000
+  },
+  {
+    "id": "m3",
+    "direction": "outgoing",
+    "kind": "text",
+    "text": "还在看机会吗",
+    "at": 1700000120000
+  },
+  {
+    "id": "m4",
+    "direction": "incoming",
+    "kind": "text",
+    "text": "方便发一份简历吗",
+    "at": 1700000180000
+  },
+  {
+    "id": "m5",
+    "direction": "incoming",
+    "kind": "text",
+    "text": "我们可以先了解一下",
+    "at": 1700000240000
+  }
+]

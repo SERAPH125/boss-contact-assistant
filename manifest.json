@@ -1,0 +1,49 @@
+{
+  "manifest_version": 3,
+  "name": "求职联系助手",
+  "version": "0.3.6",
+  "description": "半自动多平台：Boss / 智联 / 猎聘。扫描 → 勾选 → 仅联系已选。拟人化降风险，BYOK。",
+  "icons": { "16": "icons/icon16.png", "48": "icons/icon48.png", "128": "icons/icon128.png" },
+  "action": { "default_title": "求职联系助手" },
+  "side_panel": { "default_path": "src/sidepanel.html" },
+  "permissions": ["storage", "tabs", "scripting", "sidePanel", "offscreen", "alarms"],
+  "optional_host_permissions": [
+    "https://*/*",
+    "http://localhost/*",
+    "http://127.0.0.1/*",
+    "http://[::1]/*"
+  ],
+  "host_permissions": [
+    "*://*.zhipin.com/*",
+    "*://*.zhaopin.com/*",
+    "*://*.liepin.com/*",
+    "https://api.deepseek.com/*",
+    "https://api.openai.com/*",
+    "https://dashscope.aliyuncs.com/*",
+    "https://open.feishu.cn/*"
+  ],
+  "background": { "service_worker": "src/background.js" },
+  "content_scripts": [
+    {
+      "matches": ["*://*.zhipin.com/web/geek/job*"],
+      "js": ["src/platform/boss/selectors.js", "src/humanize.js", "src/platform/boss/content-search.js"],
+      "run_at": "document_idle"
+    },
+    {
+      "matches": ["*://*.zhipin.com/web/geek/chat*"],
+      "js": ["src/platform/boss/selectors.js", "src/humanize.js", "src/message-send.js", "src/platform/boss/peer-identity.js", "src/platform/boss/conversation-reader.js", "src/platform/boss/content-chat.js"],
+      "run_at": "document_idle"
+    },
+    {
+      "matches": ["*://*.zhaopin.com/sou*", "*://www.zhaopin.com/sou*", "*://*.zhaopin.com/jobdetail/*"],
+      "js": ["src/platform/search-filters.js", "src/platform/zhilian/selectors.js", "src/humanize.js", "src/platform/zhilian/content-search.js"],
+      "run_at": "document_idle"
+    },
+    {
+      "matches": ["*://*.zhaopin.com/*"],
+      "js": ["src/platform/zhilian/selectors.js", "src/humanize.js", "src/message-send.js", "src/platform/zhilian/content-chat.js"],
+      "exclude_matches": ["*://*.zhaopin.com/sou*", "*://www.zhaopin.com/sou*"],
+      "run_at": "document_idle"
+    }
+  ]
+}

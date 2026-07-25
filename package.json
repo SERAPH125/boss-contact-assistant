@@ -1,0 +1,10 @@
+{
+  "name": "boss-contact-assistant",
+  "version": "0.3.6",
+  "private": true,
+  "scripts": {
+    "test": "node --test tests/*.test.js",
+    "test:boss": "node --test tests/boss-content-chat.test.js tests/boss-content-search-contract.test.js tests/conversation-reader.test.js tests/peer-identity.test.js tests/content-guard-contract.test.js tests/manifest.test.js tests/humanize-click.test.js tests/message-send.test.js tests/delivery-guard.test.js tests/run-safety.test.js tests/run-store.test.js tests/api-permissions.test.js tests/platform-config-api-test-binding.test.js tests/background-contract.test.js tests/background-runtime.test.js tests/sidepanel-contract.test.js tests/sidepanel-runtime.test.js tests/trusteeship-sidepanel-contract.test.js tests/trusteeship-background-contract.test.js tests/trusteeship-runtime.test.js tests/trusteeship-policy.test.js tests/trusteeship-integration-recovery.test.js tests/monitor-engine.test.js tests/conversation-store.test.js tests/reply-ai.test.js tests/feishu-notifier.test.js tests/privacy-contract.test.js",
+    "check": "npm test"
+  }
+}

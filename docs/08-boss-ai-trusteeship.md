@@ -1,0 +1,395 @@
+# Boss AI 对话托管
+
+## 已批准范围与非目标
+
+本功能仅为插件已经成功联系、且用户逐会话明确开启的 Boss 直聘岗位会话提供低频本地监控、低风险 AI 回复与人工确认。Chrome 和有效 Boss 登录态必须保持可用。
+
+不扫描全部 Boss 会话，不保证规避平台限制或账号风险；不做验证码破解、风控绕过、云端全天托管，也不存储 Boss Cookie、密码或验证码。
+
+## 默认安全边界
+
+- API 连通性测试结果与 `provider + API Key + baseUrl` 三元组及持久化 `apiConfigVersion` 绑定；其中任一项变化都会递增版本并立即清除旧成功状态，必须由相同版本的测试证明重新开启托管。旧用户缺少版本字段时安全兼容为版本 `0`。
+
+- 全局 `AI 对话托管` 默认关闭。
+- 每个岗位会话的 `托管此岗位` 默认关闭，必须由用户单独开启。
+- Phase 1 运行时已经实现，但只有两个开关均显式开启、所有前置证明有效且没有暂停原因时才会监控或发送；真实 Boss 与飞书外部链路仍未验收。
+
+## 公共契约
+
+| 类型 | 固定值 |
+| --- | --- |
+| 存储前缀 | `conversationTrusteeship`、`feishuNotification`、`managedConversations`、`pendingApprovals` |
+| Chrome alarm | `boss-ai-chat-monitor` |
+| 后台消息 | `TRUSTEESHIP_*` |
+| 飞书主机权限 | `https://open.feishu.cn/*` |
+
+`manifest.json` 仅新增 `alarms` 权限和飞书固定域名权限；没有新增常驻 `https://*/*` 主机权限。既有 `https://*/*` 仍是按需申请的 optional host permission，不改变其用途。
+
+## 回复政策与确定性风险门
+
+`src/conversation/trusteeship-policy.js` 是纯 UMD/CommonJS 策略模块；它不调用 AI、Chrome、Boss 或飞书。调用方必须先传入消息的确定性风险结果，`decide` 不修改任何输入，并始终返回稳定的 `reasonCode`。
+
+- 托管及静默开关默认关闭；检查间隔只接受 5、10、15 分钟，默认 10 分钟。
+- 自动回复日限默认 10，所有配置和决策都硬裁剪为 1–20。
+- 只有全局 `settings.enabled === true` 且会话 `conversationEnabled === true`，才可能返回 `AUTO_REPLY`；任一条件为 `false` 或缺失均进入人工确认。AI 置信度、依据、类别、待办、日限和静默检查不构成对这两个显式授权门的替代。
+- 在双开关已开启的前提下，只有 `still_looking`、`resume_permission`、`courtesy`、`please_wait`、`resume_fact` 五类，且 AI 置信度 `>= 0.85`、有非空简历/明确配置依据、无待确认任务、未到日限、非静默时段时，才返回 `AUTO_REPLY`。
+- 薪资、面试、到岗、离职原因、联系方式、经历补充、测评/作业/Offer/承诺均由文本规则先拦截；例如 `月薪`、`年薪`、`笔试`、`机试`、`测试题`、`工作经验`、`项目经验`。图片、附件、语音及任何非 `text` 类型也一律人工确认。AI 结果不能覆盖这些结论。
+- 英文薪资只匹配明确短语 `salary package` 和 `compensation package`；单独的 `package`（例如 `package manager`）不视为薪资风险。
+
+| 情形 | 稳定错误码 |
+| --- | --- |
+| 无风险文本 | `NO_HARD_RISK` |
+| 薪资 / 面试 / 到岗 / 离职 / 联系方式 | `HARD_RISK_SALARY` / `HARD_RISK_INTERVIEW` / `HARD_RISK_ARRIVAL` / `HARD_RISK_RESIGNATION` / `HARD_RISK_CONTACT` |
+| 经历补充 / 承诺类事项 | `HARD_RISK_EXPERIENCE` / `HARD_RISK_COMMITMENT` |
+| 图片、附件、语音或未知消息类型 | `NON_TEXT_MESSAGE` |
+| 全局托管关闭 / 会话未明确托管 | `TRUSTEESHIP_DISABLED` / `CONVERSATION_NOT_MANAGED` |
+| 静默、已有待办、已达日限 | `QUIET_HOURS` / `PENDING_APPROVAL_EXISTS` / `DAILY_AUTO_REPLY_LIMIT_REACHED` |
+| AI 不可用、类别非白名单、置信度不足、缺少依据 | `AI_UNAVAILABLE` / `CATEGORY_REQUIRES_CONFIRMATION` / `AI_CONFIDENCE_TOO_LOW` / `MISSING_RESUME_EVIDENCE` |
+| 通过所有确定性门 | `AUTO_REPLY_ALLOWED` |
+
+## AI 分类与草稿契约
+
+`src/conversation/reply-ai.js` 是纯 UMD/CommonJS 提示词与 JSON 契约模块；它不调用 LLM、Chrome、Boss、飞书或网络，也不决定是否发送。`TrusteeshipPolicy` 的确定性风险门始终具有最高优先级：即使 AI 给出低风险结论，薪资、面试、到岗、离职、联系方式、经历扩展、测评/Offer/承诺等重要事项也绝不可自动批准。
+
+- `buildClassificationMessages(input)` 与 `buildDraftMessages(input)` 只读取并序列化目标岗位身份（公司、岗位、HR、岗位 ID）、最近 20 条目标会话消息（按原时间顺序，每条最多 600 字符）和最多 40 条编号简历事实（每条最多 600 字符）。它们不会整体序列化调用对象，因此 API Key、飞书 Webhook/签名和任意配置字段不能进入 AI 输入。
+- 分类输出必须是且只能是一个 JSON 对象（可被一个完整的 `json` Markdown fence 包裹），字段严格为 `category`、`confidence`、`reasonCode`、`evidenceIds`、`fieldsNeeded`。类别仅允许 `still_looking`、`resume_permission`、`courtesy`、`please_wait`、`resume_fact`、`important`、`unknown`；置信度只能在 0–1；数组中的 ID/字段名必须为非空且不重复字符串。`resume_fact` 没有依据固定失败为 `AI_EVIDENCE_MISSING`。
+- 草稿输出字段严格为 `draft` 和 `evidenceIds`。草稿必须是非空字符串，最多 300 个 Unicode code points；依据 ID 必须为非空、唯一字符串数组。该解析器只验证“模型声明了依据”，不会断言 ID 确实属于当前简历；成员关系必须由后续引擎在发送门之前核验。
+- 非 JSON、对象外的解释文字、数组、重复 JSON 键、未知/缺失字段、越界值和畸形数组全部失败关闭。异常以稳定 `error.code`（例如 `AI_OUTPUT_INVALID`、`AI_OUTPUT_DUPLICATE_KEY`、`AI_CLASSIFICATION_INVALID`、`AI_DRAFT_INVALID`、`AI_EVIDENCE_MISSING`）交给后台转人工确认；错误消息不包含原始模型输出。
+
+当前 Task 3 验证：新增 `tests/reply-ai.test.js` 后先以缺少模块的 `MODULE_NOT_FOUND` 完成 TDD RED；实现后 `node --test tests/reply-ai.test.js` 为 9/9 通过，`npm test` 为 94/94 通过。审查修复另以“最早 20 条而非最近 20 条”的失败用例完成 RED，再以最新窗口实现完成 GREEN。
+
+## 持久状态机与存储模型
+
+`src/conversation/conversation-store.js` 是浏览器/Node 双环境 UMD/CommonJS 模块，只依赖注入的异步键值存储、时钟和 ID 生成器。它不调用 Chrome 页面、AI、Boss 或飞书。模块用 `WeakMap<storage, { queue, recoveryInitialized }>` 为同一 storage 对象共享 Promise 尾队列与恢复所有权；即使调用方创建多个 store 实例，公开读改写仍严格串行，且前序失败不会阻断后继操作。
+
+模块只读写以下四个顶层存储键，不创建第五个发送队列键：
+
+| 存储键 | 内容与边界 |
+| --- | --- |
+| `conversationTrusteeship` | 全局开关、检查间隔、自动回复日限、按本地日期归一化的日计数、静默时段、游标与全局暂停信息 |
+| `feishuNotification` | 飞书开关、Webhook、签名密钥和最近测试结果；凭证只允许存在于此独立设置对象 |
+| `managedConversations` | 已可靠登记的 Boss 会话、状态、最近消息、最近指纹、活动待办引用，以及当前一个有界 `sendIntent` |
+| `pendingApprovals` | 待办内容、状态、草稿和最多两次的安全通知结果；不保存原始通知错误或凭证 |
+
+可靠会话引用必须同时满足：`platform === "boss"`、非空且不含空白的稳定 `conversationId`、非空 `jobId`，以及 HTTPS 的 `*.zhipin.com` 主机和精确 `/web/geek/chat` 或 `/web/geek/chat/` 路径；任何更深子路径都拒绝。新登记会话一律为 `enabled: false`、`DISABLED`；返回值和快照均为深拷贝，调用方修改返回对象不会反向修改存储。
+
+```text
+DISABLED
+  └─ setManaged(true) → WAITING_HR
+
+WAITING_HR / WAITING_CONFIRMATION
+  └─ beginMessage(新指纹) → CLASSIFYING
+
+CLASSIFYING
+  └─ createOrMergeApproval → WAITING_CONFIRMATION
+
+WAITING_CONFIRMATION
+  ├─ 更多消息 → 合并进同一个活动待办
+  └─ createSendIntent → SENDING
+
+SENDING
+  ├─ completeSend(明确证据) → WAITING_HR；仅 AUTO intent 原子增加当日计数
+  └─ markSendUnknown / Worker 恢复 → PAUSED
+
+PAUSED
+  └─ resetConversation → WAITING_HR
+
+任意启用状态
+  └─ setManaged(false) → DISABLED
+```
+
+`beginMessage` 在持久化指纹和进入 `CLASSIFYING` 后才返回；它还原子保存上一可靠 `classificationBaseline` 和进入前的 `classificationOriginState`（只允许 `WAITING_HR` / `WAITING_CONFIRMATION`）。同一 storage 上即使多个 store 实例并发，竞态中也只有一个调用能成功。fresh Worker 会先检查任何会话态或 intent 态的 `SENDING`，并优先收束为 `SEND_RESULT_UNKNOWN`；只有不存在发送中断时，才允许进入 `CLASSIFYING` 恢复。证据一致的分类恢复还要求原始 baseline、来源状态、活动指纹、当前游标、去重窗口和活动待办全部一致；`WAITING_CONFIRMATION` 来源必须恰好存在一个同会话 `PENDING` 待办且 `pendingApprovalId` 精确链接它。空字符串 baseline 合法。legacy 缺字段、字段损坏、活动指纹矛盾、缺链/错链或重复活动待办都会持久进入 `PAUSED/RECOVERY_STATE_UNCERTAIN`，保留原 `lastIncomingFingerprint` 与有界去重证据，禁止读页、AI、通知和发送。恢复写失败不会取得恢复所有权，下一次读取会重试。
+
+同一会话最多保留最近 20 条目标消息和 20 个去重指纹，后到消息按原顺序合入同一个活动待办，超过上限只保留最新 20 条。合并前会重新验证 `pendingApprovalId` 必须指向同会话的 `PENDING` 待办；若旧数据已有重复活动待办，按 `createdAt`、再按 `approvalId` 确定性保留最旧项，其余写为 `CANCELLED_DUPLICATE`，绝不跨会话合并。关闭托管或重置会话不会信任 `pendingApprovalId`：它会清除链接，并只按 `conversationId` 确定性关闭真正属于目标会话的活动待办，外会话待办保持不变。已经见过的指纹继续保留在有界去重窗口中，避免重置后立即重放。approval、intent、terminal、disable、checkpoint、pause 与 reset 路径都会清理两项分类恢复元数据。
+
+## 两阶段发送与恢复语义
+
+用户确认待办后，`createSendIntent` 先把唯一 `intentId`、`mode: "MANUAL"`、`approvalId`、冻结草稿和 `SENDING` 状态原子写入对应会话的 `sendIntent`，调用方随后才能执行外部发送。引擎通过 `createAutoSendIntent(conversationId, fingerprint, draft)` 只允许当前 `CLASSIFYING` 的活动指纹创建 `mode: "AUTO"` 意图；同一原子读改写还会重验全局已启用、未暂停，并以 `autoReplyCount + 所有 SENDING AUTO 预留数` 对比日限。共享同一 storage 的多个 store/engine 实例因此不能越过日限或在运行中暂停后继续发送。仍为 `SENDING` 的旧意图不能覆盖，已终态意图可由后续新指纹替换。`completeSend` 的终态证据必须同时满足 `success === true`、`targetConversationId` 精确匹配当前会话、`sentFingerprint` 非空且 `observedAt` 是正有限数；`ok: false`、空证据或目标不匹配均拒绝，并保持意图与待办在 `SENDING`。同一意图一旦进入 `SENT` 或 `SEND_RESULT_UNKNOWN` 就不能再次消费；AUTO 的成功与未知结果都各自在终态持久写中消耗一次当日额度，MANUAL 不增加。
+
+Task 6 为状态机补充受限转换 API，而没有新增顶层存储键或通用更新方法：
+
+- `markConversationChecked(conversationId, { baseline })` 只在本轮读取批次全部处理完毕、且会话处于 `WAITING_HR` 或 `WAITING_CONFIRMATION` 时，使用 store 时钟写入 `lastCheckedAt` 和字符串基线；调用方附加字段不会落盘。
+- `pauseConversation(conversationId, code)` 只接受 `TARGET_UNCERTAIN`、`SELECTOR_UNAVAILABLE`、`SEND_RESULT_UNKNOWN`、`MESSAGE_ORDER_UNCERTAIN`、`CONVERSATION_UNAVAILABLE`、`RECOVERY_STATE_UNCERTAIN`，写入固定码并清空原始原因。
+- `resolveApprovalWithoutSend(approvalId)` 只消费当前活动的 `PENDING` 待办，将其置为终态 `NO_REPLY`、清除会话链接，并回到 `WAITING_HR` 或 `DISABLED`。
+- `recordNotificationAttempt(approvalId, operation)` 是唯一公开通知转换入口，只接受 `RESERVE`、`COMPLETE`、`CANCEL` 三个 phase；不再公开独立 reserve/complete 方法，也不接受旧版单阶段结果。
+- AUTO / MANUAL 的模式随 intent 持久化；损坏或旧版无模式意图按 MANUAL 归一化，避免历史人工发送错误增加自动计数。
+
+store 的公开方法预算固定为 15 个：`getSnapshot`、`saveSettings`、`registerConversation`、`setManaged`、`beginMessage`、`createOrMergeApproval`、`createSendIntent`、`createAutoSendIntent`、`completeSend`、`markSendUnknown`、`markConversationChecked`、`pauseConversation`、`resolveApprovalWithoutSend`、`recordNotificationAttempt`、`resetConversation`。
+
+Manifest V3 Service Worker 可能在发送请求与响应之间终止。恢复所有权属于当前加载的模块/Worker，而不是某个 store 实例：同一模块和 storage 上创建第二个 store 时不得把仍在执行的 `SENDING` 误判为中断；只有全新模块加载（即新 Worker）首次读取持久状态时，如发现会话或意图仍为 `SENDING`，才原地改写为下列终态。该分支优先于同一损坏快照上的 `CLASSIFYING` 恢复，不能回退到重新分类：
+
+```text
+conversation.state = PAUSED
+conversation.pauseCode = SEND_RESULT_UNKNOWN
+sendIntent.status = SEND_RESULT_UNKNOWN
+approval.status = SEND_RESULT_UNKNOWN
+```
+
+恢复写入成功后才把该模块中对应 storage 的 `recoveryInitialized` 标为完成；若第一次 `storage.set` 短暂失败，下一次调用会再次执行恢复。若肯定发送后的 `completeSend` 落盘失败，紧接着 `markSendUnknown` 也落盘失败，store 会重新置空恢复所有权；引擎最多触发一次有界 `getSnapshot`，使同模块下一次读取立即把仍持久化的 `SENDING` 收束为 `PAUSED / SEND_RESULT_UNKNOWN`。AUTO 额度只消耗一次，且任何路径都不会重发。普通同日 `getSnapshot` 不写 storage，只有实际的未知发送恢复或跨日计数归一化才在读取路径持久化。
+
+该意图永久不可重放，只能由用户核对 Boss 实际消息后重置会话。未知发送的意图原因、会话 `pauseCode` 和 `pauseReason` 固定为 `SEND_RESULT_UNKNOWN`，忽略调用方原始错误文本；其他持久 `pauseReason` 一律归一化为空。AUTO 额度在成功或未知终态中都只消费一次，即使首次恢复写失败后重试也不会重复增加。在 `SENDING` 期间禁用或重置也必须真实持久化这个固定值。飞书待办通知通过单一 `recordNotificationAttempt` 执行 `RESERVE → 外部通知 → COMPLETE`：`RESERVE` 在同一原子读改写中重验最新全局 enabled、paused、store 时钟、静默时段，以及 owner 会话仍启用、仍为 `WAITING_CONFIRMATION`、精确链接该待办且同会话恰好只有一个 `PENDING`。多 engine 并发只有一个能取得预留。引擎在预留后重读快照；Feishu client 完成时钟、签名、卡片回扫和请求序列化后只生成一个同步 fetch thunk，不直接出站。runtime 随后再次异步读取最新快照；background 保护层在入口只验证 API proof，在 runtime 提供同一份最新快照时先同步复核该 proof lease，再同步调用 engine 传入的全局、静默、飞书、owner、link 与唯一待办断言，最后在同一调用栈调用 thunk。包装层不得以 API-proof 断言替换调用方断言，也不得用没有快照的入口调用 owner 断言；最终组合断言与 `fetchFn` invocation 之间没有 `await`。仅首次已经落盘的已知失败 `FAILED` 允许一次补发；首次成功、未知结果、仍在 `SENDING`、终结写失败或第二次尝试都永久阻止自动重试。未出站前若二次门禁不再允许，`CANCEL` 删除 reservation；若签名期间才失效，当前 reservation 收束为安全 `UNKNOWN` 并永久阻止自动重试。待办只记录预留 ID、状态、次数、时间和固定通知码；不记录 Webhook、签名密钥、Token、原始异常或响应体。
+
+## 单轮监控引擎
+
+`src/conversation/monitor-engine.js` 是零 Chrome、零 DOM、零网络的 UMD/CommonJS 编排模块。`MonitorEngine.create(deps)` 在创建时验证 store、Boss reader、分类/草稿器、飞书 notifier、确定性 policy 和 clock 的全部必需方法；真实页面、LLM 和飞书访问只能由后续后台组合层通过依赖注入提供。`runCycle()` 只返回：
+
+```text
+{ checked, newMessages, autoSent, pending, skipped, errors: [稳定错误码] }
+```
+
+其中不包含聊天原文、简历、Webhook、API Key、发送证据或原始异常。全局关闭或全局暂停时，不调用 reader、分类/草稿器、`getResumeFacts` 或 notifier。逐会话 `PAUSED`、`DISABLED`、`CLASSIFYING` 和 `SENDING` 也不会进入页面读取。
+
+同一 `MonitorEngine` 实例的 `runCycle()` 和 `resolveApproval()` 共用一条操作队列，任何 reader、AI、notifier 或发送副作用都不会在该实例内交叠。单轮先对当前快照中已启用的 Boss 会话按 `conversationId` 稳定排序，再从持久化 `monitorCursor` 轮转选取最多 10 个；游标只按实际尝试的槽位推进，例如第一个槽位发现全局登录失效时只推进 1，而不是跳过整批 10 个。每个安全会话严格执行：
+
+```text
+读取并校验目标与增量批次
+→ 持久化 beginMessage 指纹
+→ 硬风险检测
+→ AI 分类
+→ 确定性策略决策
+→ 可选草稿
+→ 依据成员关系与策略二次复核
+→ 持久 AUTO intent 或本地待办
+→ 外部发送 / 待办通知
+→ 明确证据终态与读取 checkpoint
+```
+
+reader 返回值始终视为不可信：成功结果必须包含 `conversationRef.conversationId` 和 `conversationRef.url`；ID 与 URL 必须分别精确等于持久值，URL 还必须是规范化的 HTTPS `*.zhipin.com/web/geek/chat` 单一会话查询。可选顶层 `conversationId` 以及任一层出现的 URL、岗位、公司、HR、平台等身份字段都必须逐项与持久值一致。最多 20 条消息必须是严格归一化 incoming；非空批次的 `baseline` 必须等于最后一条消息指纹，空批次则必须等于请求时会话的 `lastIncomingFingerprint`，否则在 AI、发送和 cursor checkpoint 前失败关闭。`TARGET_UNCERTAIN` 和 `SELECTOR_UNAVAILABLE` 只暂停对应会话；`LOGIN_REQUIRED` 和 `BOSS_BLOCKED` 全局暂停并停止读取后续会话，同轮也不发送历史待办通知。任一未列入 reader allowlist 的外部错误统一映射为 `CONVERSATION_UNAVAILABLE`；分类、草稿抛错分别固定为 `AI_CLASSIFY_FAILED`、`AI_DRAFT_FAILED`，store/notifier 的未知错误也只映射到固定码，原始 `error.code` 不进入快照、摘要或通知载荷。
+
+可选的异步 `getResumeFacts()` 每轮最多调用一次。它的结果最多归一化为 100 条 `{ id, text, number }`，要求唯一非空 ID 和有界正文；缺失、抛错或空结果不是创建时错误，但强制转人工确认。分类和草稿必须满足 ReplyAI 的严格对象形状，且两者的非空 `evidenceIds` 都必须是本轮编号简历事实 ID 的子集。草稿最多 300 个 Unicode code points。硬风险、非文本、低于 0.85、AI/解析/依据失败、日限、静默、已有待办和未知内部失败都会先落本地待办，绝不自动发送；硬风险与非文本仍可保存一个经过相同依据校验的建议草稿。
+
+本地 `PENDING` 待办是通知事实源。只有非静默、全局未暂停、飞书已开启，且 owner 会话仍启用、处于 `WAITING_CONFIRMATION`、精确链接该待办、同会话恰好只有一个 `PENDING` 时才通知；通知尝试的 `SENDING` 预留落盘后，引擎还会立即读取最新快照，并以当前 clock/policy 重算全部门禁。任一门禁变化都先 `CANCEL` 且不出站；通过后 notifier 会在自己的异步快照读取之后、真实 client 调用之前同步重验一次。零次通知或首次已知失败的历史待办即使没有新消息也会被考虑；同一待办同轮最多尝试一次，首次失败只能在下一轮补一次。静默时段继续合并消息但不通知、不自动发送。
+
+Task 7 组合层必须保持一个后台 Worker、一个共享 storage 对象和一个共享 engine/store 组合实例；这是把“预留后快照复核”到 notifier 调用之间的剩余同步窗口收口到单一后台所有者的明确边界。不同 storage 包装对象或多个后台所有者不属于本任务已证明的原子域，不能据此宣称跨进程 exactly-once。
+
+`resolveApproval(input)` 只接受 `SEND_EDITED`、`NO_REPLY`、`DISABLE_CONVERSATION`。人工草稿会先 trim，要求非空且最多 300 个 Unicode code points；发送前立即重读并重新校验目标，随后持久化唯一 MANUAL intent，再执行一次发送。任何未知发送结果都调用 `markSendUnknown`，使 intent 永久终态并暂停会话；已消费、已解决或未知的 intent/待办不能再次发送。`notifyResolved` 只在本地终态已经持久化后调用，通知失败不反转本地处理结果。
+
+## Boss 可靠会话标识与增量读取
+
+托管主键对齐开源实践：以好友列表 API 的 **`encryptUid` 作为 canonical peerId**（存储字段名仍为 `conversationId`），打开 URL 统一为 `?uid=<peerId>`；DOM 上的 `conversationId`/`uid` 仅作 `aliases`。读消息与发回复仍走 DOM owned-scope，**不引入 MQTT / 内部发信协议**。好友列表不可用或无法唯一对齐时，登记失败关闭（`PEER_LIST_UNAVAILABLE` / `PEER_ID_UNRESOLVED`），不得用未验证 DOM ID 冒充稳定主键。
+
+`src/platform/boss/peer-identity.js` 负责纯函数解析：`resolvePeerIdentity({ domIds, friends, origin })` → `{ peerId, url, aliases, peerSource: 'encryptUid' }`。`src/platform/boss/conversation-reader.js` 仍是零 DOM、零网络模块，只从页面 URL / 活动链接 / dataset 抽取原始 `conversationId` 或 `uid`；公司、岗位、HR、预览文本不能生成会话 ID。
+
+- 页面和活动链接必须是 HTTPS 的 `*.zhipin.com`，原始路径必须精确为 `/web/geek/chat`；根域名、尾随/额外路径、点段、反斜杠、其他主机和不安全 ID 均拒绝。ID 接受 `[A-Za-z0-9_~-]{1,128}`（兼容开源实测含 `~` 的 encryptUid）。多个来源出现不同 ID 时返回 `null`。
+- DOM reader 输出 `{ conversationId, url }`；登记/托管前由 peer resolver 归一为 `{ conversationId: peerId, url: ?uid=peerId, aliases }`。
+- `normalizeMessages` 只处理数组或对象形式的 array-like 输入，最多检查最近 200 个原始项；方向必须明确为 `incoming` 或 `outgoing`，类型只允许 `text`、`image`、`attachment`、`voice`。文本最多 600 个 Unicode code points；非文本消息保留类型但清空文本，不保留附件、图片、语音或头像 URL。撤回、时间分隔、未知方向/类型全部忽略。
+- 指纹优先使用明确且安全的消息 ID；否则必须有有限、非负且不超过 `Number.MAX_SAFE_INTEGER` 的整数稳定时间，再以方向、类型、文本和时间做确定性非明文哈希。无 ID 且时间缺失/不安全的消息直接丢弃；同一批中任何重复或碰撞指纹的全部候选均丢弃，禁止反向猜测。输出 `at` 只能是该安全整数或 `null`。
+- `selectNewIncoming` 只返回基线之后的 incoming，保持页面顺序且每轮最多 20 条；找不到非空基线时返回空数组，不重放整段历史。纯 API 省略第二参数时仍只返回最后 20 条供显式初始化；传入明确空串表示“此前没有 incoming”，从第一条开始按 20 条分页。
+
+Boss chat content script 失败关闭的消息契约：
+
+| 消息 | 前置校验与结果 |
+| --- | --- |
+| `GET_ACTIVE_CONVERSATION_REF` | 要求恰好一个可见 active link 和一个可见 `.chat-message-list`，并通过相同 `conversationId`/`uid` dataset、`aria-controls` 或 `aria-labelledby` 之一证明归属；身份文本只读取唯一 active item 和 owned pane 内 header |
+| `CAPTURE_ACTIVE_CONVERSATION` / `PROBE_PEER_IDENTITY` | 在 owned 活动会话上读取 DOM ID，再请求 `getGeekFriendList.json` 唯一对齐 `encryptUid`；成功返回 canonical `?uid=` ref 与 aliases；失败不写 store |
+| `READ_ACTIVE_CONVERSATION` | 在上述校验外要求登记 peerId 或 aliases 命中当前 DOM ID，并要求调用对象自有的字符串 `lastFingerprint`；返回给 engine 的 ref 使用 canonical peerId/URL。没有 incoming 时 GET 返回空串（绝不返回 `null`），可原样传给 READ；遗漏/非字符串返回 `BASELINE_REQUIRED`，非空基线必须命中 incoming，否则返回 `BASELINE_NOT_FOUND` |
+| `SEND_MANAGED_REPLY` | Enter 和 fallback button 每次动作前同步重验 ref、身份和同一个 owned scope，证据后再次重验；fallback 还要求输入框与按钮都是最初对象且输入内容精确等于冻结草稿，任一变化都不点击；发送前记录 scoped outgoing 指纹，发送后只接受同目标 owned container 中新增且文案等于草稿的唯一 outgoing 气泡 |
+
+READ 每页最多返回最早的 20 条新增 incoming，并只把 cursor 推进到本页最后返回项；下一轮可继续读取余量，不跳到页面末尾。outgoing 指纹不能充当 incoming cursor。SEND 成功必须同时返回非空 `sentFingerprint`、精确 `targetConversationId` 和有限正数 `observedAt`。动作前目标已变化返回 `TARGET_UNCERTAIN` 且不触发动作；Enter 已触发后如 fallback 发现控件或草稿变化，以及其后发生目标变化、scoped read 失败或没有新匹配气泡，一律返回 `SEND_RESULT_UNKNOWN` 且不重试。
+
+固定选择器缺失或消息结构不能明确识别时返回 `SELECTOR_UNAVAILABLE`；ref、归属或身份不一致及多可见 link/container 时返回 `TARGET_UNCERTAIN`。managed 登录失效与页面阻止分别稳定返回 `LOGIN_REQUIRED` 和 `BOSS_BLOCKED`，所有 managed 失败都包含 `success: false` 与 `errorCode`。不得改用全页面任意 `.item`、任意文本节点或第一条会话兜底。既有 `SEND` / `SEND_ACTIVE` 行为保持：一次联系已有肯定发送结果后，只有 ref、身份和当前消息基线都可靠时才附加 `conversationRef` 与 `baselineIncomingFingerprint`；附加元数据失败不会追溯改变本次联系成功结果，只会使该会话不可登记托管。
+
+`tests/fixtures/boss-chat/*.json` 全部是脱敏的合成中间数据；`tests/boss-content-chat.test.js` 使用最小 VM/fake DOM 加载真实生产脚本并调用实际注册的 runtime handler，覆盖 hidden decoy、多可见容器、显式归属、baseline 分页、发送前/后切换目标及新 outgoing 证据。它们仍不代表当前 Boss DOM 已验收。当前仓库没有可核对 `conversationId` / `uid` 实际来源及消息 DOM 的脱敏页面快照，本任务也未获授权访问真实 Boss；因此固定选择器和稳定 ID/ownership 来源必须在后续测试账号中做只读验证。未验证前，任何不匹配都按不可托管处理，不扩大选择器。
+
+## 飞书通知、签名与凭证边界
+
+`src/conversation/feishu-notifier.js` 是零依赖 UMD/CommonJS 通知模块。它只构造通知并通过注入的 `fetch` 发送一次；它不读取 Chrome、不访问 Boss 页面，也不修改全局或逐会话托管开关。真实飞书请求不属于自动化测试范围。建议把机器人加入仅自己或受信任协作者可见的私人群；外发卡片也只允许安全岗位元数据、固定阶段、固定摘要、固定等待状态和受限 Boss URL。
+
+- Webhook 的原始字符串必须精确匹配 ASCII 形式 `https://open.feishu.cn/open-apis/bot/v2/hook/[A-Za-z0-9_-]+`；在 URL 归一化前即拒绝端口、认证信息、查询、片段、点段、百分号编码、反斜杠和额外路径。
+- 配置的 Webhook 和签名密钥仅应保存在独立的 `feishuNotification` 本地设置中。`chrome.storage.local` 不是系统钥匙串：用户应使用最小权限的机器人，并可随时在飞书端轮换或删除 Webhook。
+- 配置了签名密钥时，`timestamp` 为秒字符串；签名是以 `${timestamp}\n${secret}` 为 HMAC-SHA256 密钥、空字节消息计算后 Base64 编码的结果。未配置密钥时不发送 `timestamp` 或 `sign`。
+- 自动待办通知使用 `client.send(config, card, dispatchPrepared)`：client 完成所有异步签名和同步序列化后把一次性同步 fetch thunk 交给 runtime；runtime 在自己的最终持久状态复核后立即调用。显式 `TRUSTEESHIP_TEST_FEISHU` 和 notifier 独立单元调用不传第三个参数，保持直接发送一次的既有行为。
+- `buildApprovalCard` 的返回对象会深冻结并登记到模块私有 `WeakSet`；`send` 只接受该对象本身，任意重建、变造或外部输入均以 `FEISHU_CARD_INVALID` 拒绝，绝不触发 fetch。验证配置后、签名或 fetch 前，发送器还会序列化回扫整个已品牌卡片：完整 Webhook、提取的 Webhook token 和非空签名密钥均同时按原始文本及 `JSON.stringify(value).slice(1, -1)` 的转义文本精确匹配，任一形式出现即拒绝外发。卡片只接受安全的公司/岗位/HR 元数据、稳定阶段枚举、固定摘要、布尔等待状态和受限 Boss URL；调用方传入的 HR 对话、模型草稿、`fieldsNeeded`、`reasonCode`、任意自由文本 stage/summary/wait 都不会被序列化。卡片一律使用 `plain_text`，不接受 Markdown 链接/提及渲染；完整聊天上下文、Webhook、签名密钥、API Key 和未知输入字段一律不进入卡片。
+- Boss 链接只允许 HTTPS 子域名 `*.zhipin.com` 的精确 `/web/geek/chat`（可带尾斜杠）路径。点段、反斜杠和编码路径技巧被拒绝；DNS 主机名总长最多 253、每个标签 1–63 字符，最终重建 URL（即使无查询）最多 512 字符。输出 URL 只保留值符合 `[A-Za-z0-9_~-]{1,128}` 的 `conversationId`、`uid`、`jobId`、`encryptJobId` 查询项，片段和其余参数全部丢弃；不能构造安全 URL 时不显示打开按钮。
+- 从时钟、签名、fetch 到 `response.json()` 是同一个可中止的超时操作；超时会中止 fetch 并返回 `TIMEOUT`，晚到的 Promise 被观察但不会泄漏异常。注入时钟必须返回原始、有限且正数的毫秒值，且向下取整后的秒数必须大于 0；NaN、Infinity、字符串、包装 Number、零和负数均在签名/fetch 前返回 `UNKNOWN`。HTTP 非 2xx、飞书返回 `code !== 0`、网络和超时分别收束为稳定错误码，时钟/签名异常为 `UNKNOWN`。结果不包含 URL、响应体或原始异常；脱敏器会删除完整 Webhook、token、签名密钥、带引号的 Bearer/API-key 形式和任意 URL 查询串（循环对象也安全收束）。通知失败不会删除或改变本地待确认任务，仍由 `ConversationStore` 的有限重试语义控制。
+
+## Service Worker 调度与现有联系流程接入
+
+`src/background.js` 是唯一后台所有者，并按策略、store、ReplyAI、飞书、Boss reader、engine、runtime helper 的依赖顺序加载模块。它只创建一个 `ConversationStore`、一个 `MonitorEngine`、一个注入 `fetch` / Web Crypto 的飞书 client 和一个 `TrusteeshipRuntime` controller；不得创建第二个 storage wrapper 或 engine。它的 protected notifier 对 approval/resolved 通知都保留调用方断言：入口单独验证 API proof，最终快照上按 `API proof → caller assertion` 的同步顺序组合，非函数 caller 按未提供处理。`src/conversation/trusteeship-runtime.js` 是浏览器/Node 双环境组合助手，生产环境只接受这组后台单例，测试环境则注入 fake Chrome、fake engine 和 fake notifier，自动化测试不访问真实 Boss、LLM 或飞书。
+
+Chrome alarm 固定为 `boss-ai-chat-monitor`。Worker 初始化、`runtime.onInstalled`、`runtime.onStartup` 和成功保存托管配置后都会 reconcile：全局关闭或全局暂停时清除 alarm；只有开启且间隔为 5、10、15 分钟之一时，才用同名 alarm 创建对应 `delayInMinutes` / `periodInMinutes`。同名 `alarms.create` 替换旧配置，因此不会累积多个周期。alarm listener 忽略所有其他名称；alarm 与用户 `TRUSTEESHIP_RUN_NOW` 都进入同一个 runtime FIFO 和同一个 `MonitorEngine.runCycle()`，不会绕过 engine 的策略、日限、静默或 intent 门。
+
+所有 `TRUSTEESHIP_*` 用户消息、受控 API 配置保存 `SAVE_API_CONFIG`，以及会真实调用 LLM 并写入托管证明的 `TEST_API`，只接受无 `tab` / `frameId` 且 URL 精确等于本扩展 `/src/sidepanel.html` 的 sender；Boss content script、其他扩展页、外部扩展和畸形 sender 全部在副作用前以固定码拒绝。各消息还执行顶层与嵌套对象的 exact-key、长度、类型和 action 枚举校验。Alarm 不伪造用户消息，而是调用 controller 的内部调度入口。Worker 任一初始化步骤失败时会尽力持久化全局暂停、清除 alarm，之后所有托管用户入口、`SAVE_API_CONFIG` 和 `TEST_API` 只返回 `SERVICE_WORKER_INTERRUPTED`，alarm 不调用 engine、reader、AI、notifier 或 sender。即使暂停持久化持续失败，`onInstalled` / `onStartup` 也只重试 fail-closed/clear，绝不执行可创建 alarm 的普通 reconcile。
+
+后台消息固定为：
+
+| 消息 | 行为与安全边界 |
+| --- | --- |
+| `TRUSTEESHIP_GET_STATE` | 逐字段重建固定 allowlist 的托管设置、有界已登记会话、待办数量和遮罩后的飞书状态；不整体 clone 存储对象，不返回未知内部字段、raw pauseReason、Webhook 或签名密钥 |
+| `TRUSTEESHIP_SAVE_SETTINGS` | 只保存本地设置；间隔不是 5/10/15 时返回 `TRUSTEESHIP_INTERVAL_INVALID`；响应中的飞书只包含 `hasWebhook` / `hasSigningSecret` 与测试状态 |
+| `TRUSTEESHIP_TEST_FEISHU` | 唯一直接发送“测试卡片”的入口；只在用户显式消息触发后更新 `lastTestOk` / `lastTestAt`，返回稳定码且不返回凭证或响应体 |
+| `TRUSTEESHIP_SET_CONVERSATION` | 只接受单个已经可靠登记的 `conversationId` 和布尔 `enabled`；不存在“全部开启”协议 |
+| `TRUSTEESHIP_REGISTER_ACTIVE` | 用户显式操作：读取当前聚焦窗口中活动的 Boss 聊天页，捕获可靠会话标识与基线后登记；`enable: true` 时立即开启该岗位托管；不降低策略门，不打开新标签 |
+| `TRUSTEESHIP_LIST_APPROVALS` | 只返回最多 100 个本地 `PENDING` 待办；每个最多 20 条、每条 600 字符的上下文以及 300 code points 草稿，不含任何凭证 |
+| `TRUSTEESHIP_RESOLVE_APPROVAL` | 原样委托同一个 engine 的串行 `resolveApproval()` |
+| `TRUSTEESHIP_OPEN_CONVERSATION` | 只在用户显式操作时，从已登记记录取出并再次校验精确安全 URL，再以 `active: true` 新开标签 |
+| `TRUSTEESHIP_RUN_NOW` | 仅手动触发同一 engine 周期，不改变配置或降低任何策略门 |
+| `SAVE_API_CONFIG` | sidepanel 保存 API 设置的唯一支持入口；只接受固定 provider 与有界 `apiKey/baseUrl/resumeText`，调用注入的 `PlatformConfig.saveApi` 并与设置、周期、resolve、API 测试共用 controller FIFO |
+
+尝试把全局托管从关闭改为开启时，后台会以当前本地时钟检查全部前置条件：API Key 存在且 `TEST_API` 在 24 小时内成功、`resumeText` 非空、飞书已开启且配置有效并在 24 小时内测试成功、用户已经接受风险提示。任一条件缺失都不会开启或创建 alarm，而是返回：
+
+```json
+{
+  "ok": false,
+  "code": "TRUSTEESHIP_PREREQUISITE_FAILED",
+  "missing": ["api", "resumeText", "feishuTest", "riskAccepted"]
+}
+```
+
+既有 `TEST_API` 在开始时冻结规范化出站身份和 `apiConfigVersion`，只有模型返回去除首尾空白后大小写不敏感的精确 `ok`，且回写前后当前身份/版本都未变化时，才写 `apiLastTestOk`、`apiLastTestAt` 与同版本 `apiLastTestVersion`。晚到旧响应或 A→B→A 返回 `API_TEST_STALE`，旧 proof 保持不可用；空串、解释文字、网络或协议错误会写失败证明。证明写入异常只返回固定 `API_TEST_PERSIST_FAILED`，不产生未处理 rejection。成功/失败响应不返回模型原文、API Key 或供应商响应体。飞书测试复用后台唯一 client；Webhook 或签名密钥任一变化都会清除旧 `lastTestOk/lastTestAt`，必须对新凭据重新测试。自动通知继续由 engine 的通知 reservation 路径触发，不能调用测试消息绕过。
+
+API 证明采用共享后台所有权与三层连续失效边界，而不是只在侧边栏启用时检查一次：
+
+1. sidepanel 不再直接调用 `PlatformConfig.saveApi`。`SAVE_API_CONFIG` 由 background 校验受信 sender 和 exact schema 后调用 controller 的专用 `saveApiConfig()`；`TEST_API` 同样只通过专用 `runApiTest()` 进入 controller。两者与 `SAVE_SETTINGS`、run、scheduled、resolve 共用一条 FIFO：周期先取得所有权时，配置保存必须等周期退出；保存先取得所有权时，会先清 proof、停用/暂停并清 alarm，后续周期在 engine 前被拒绝。
+2. `TRUSTEESHIP_SAVE_SETTINGS` 在飞书配置写入等异步步骤之后重新读取 API/证明版本和全部前置条件，只有最新值仍满足时才提交 `enabled:true`；轮换竞态会固定返回 `TRUSTEESHIP_PREREQUISITE_FAILED`，持久化 `enabled:false / paused:true / PREREQUISITE_CHANGED` 并清除 alarm。
+3. `chrome.storage.onChanged` 只监听 `provider`、`apiKey`、`dsKey`、`baseUrl`、`apiConfigVersion` 的真实变化；listener 一进入即同步递增 Worker 内存中的 `apiProofEpoch`，再把幂等 `invalidateApiProof()` 排入 controller FIFO。暂停持久化失败仍会清 alarm；仅 `apiLastTestOk`、`apiLastTestAt`、`apiLastTestVersion` 的证明写入既不递增 epoch，也不误暂停。
+4. `loadCurrentProvenApiConfig()` 在任何异步读取之前冻结当前 epoch，返回 `{ cfg, epoch }` 租约；读取期间 epoch 已变化会直接拒绝。reader、sender、classifier、draft 与飞书 notifier 在各自每个真实 `tabs` / `sendMessage` / `fetch` / `client.send` 前同步 `assertLease()`，断言与真实 API 调用之间没有 `await`。classifier 使用同一租约的冻结 `cfg`，使 `callLLM`/`fetch` 在该 JS turn 发起；页面加载、store 快照或其他内部 await 期间发生外部轮换时，后续托管页面消息、Boss 发送及飞书 client 调用均为 0，并返回固定 `API_PROOF_STALE`。临时 tab 的 `finally` 关闭属于安全清理，不被旧租约阻止。
+
+`TRUSTEESHIP_RUN_NOW`、alarm 的内部 scheduled 入口与 `TRUSTEESHIP_RESOLVE_APPROVAL` 在进入 engine 前还会重新检查全部前置条件。AUTO/MANUAL intent 持久化前也使用相同证明门禁，因此 AI 已完成后再轮换不会留下可恢复发送意图。恢复必须先对当前 API 版本重新执行显式 `TEST_API`，再保存启用设置；成功启用会清除旧暂停码。
+
+Boss 页面适配器绝不查询、复用或导航任何既有标签。每次 reader 和 sender 都创建本轮独占的 `active: false` 临时标签，打开持久化的精确会话 URL，并在创建后、加载后、注入前后以及实际读写前通过 `tabs.get` 复核仍为 inactive；任一步发现用户接管都会立即拒绝。内容脚本会在 `READ_ACTIVE_CONVERSATION` / `SEND_MANAGED_REPLY` 入口以及每一次真实 Enter/click 动作前拒绝 `document.visibilityState === "visible"`，封住草稿填充和发送证据等待期间的接管窗口；若 Enter 已经实际尝试，之后发现接管只会收束为 `SEND_RESULT_UNKNOWN`，不会误称为“未发送”。后台等待 complete、PING 或按固定顺序注入 selectors / humanize / message-send / reader / content-chat 后才执行托管协议。临时标签 ID 在创建时记录，并只在本轮 `finally` 中关闭。tabs、scripting 与 alarms 共用 Chrome 调用包装器；每个 API 只调用一次并提供 callback，若同一次调用返回 Promise 也会观察该 Promise，callback/Promise 的先到结果由统一 settle guard 只提交一次，`runtime.lastError` 只在 callback 内读取；实现不再依赖真实 Chrome 绑定恒为 `0` 的 `Function.length`。sender 在内容消息出站前重读 store，要求同会话存在相同 `intentId`、`status: "SENDING"` 和冻结草稿，否则返回 `SEND_RESULT_UNKNOWN`，绝不发送。登录失效和页面阻止写入全局暂停；目标、选择器和未知发送只返回稳定码，原始页面错误不进入 runtime 响应。
+
+分类与草稿 adapter 只能调用 `ReplyAI.build*Messages`、既有 `callLLM` 和 `ReplyAI.parse*`，不会手工拼接 prompt，也不会把配置对象、API Key 或飞书凭证传给 ReplyAI。`getResumeFacts` 是 engine 的每轮一次 seam：每次调用只读取一份最新 `resumeText`，按非空行生成最多 100 条 `resume-line-N`，每条最多 600 code points；ReplyAI 仍按自身契约只选取 prompt 所需的有界窗口。
+
+既有 Boss `SEND_ACTIVE` 已明确成功后，只有同时返回可靠 `conversationRef` 和字符串 `baselineIncomingFingerprint` 时，后台才调用唯一 store 登记；新记录仍为 `enabled: false / DISABLED`，并只在首次登记时保存该基线（包括空字符串）。ref、基线或 store 校验失败不会追溯改变本轮联系成功，也不会产生可用托管开关。原有 `PREPARE_DELIVERY / CONFIRM_DELIVERY / CANCEL_DELIVERY` 保持不变，旧 `START_DELIVER` 仍以 `CONFIRMATION_REQUIRED` 拒绝。
+
+## 实现状态与验证记录
+
+当前状态：Task 9 release-review 的最后一个 gate-blocking P1（真实 background 包装丢失 owner 断言）已按 TDD 修复并完成新鲜自动化验证，等待新的 review-clean gate；无外部写入 Chrome 验收和分阶段实号验收仍未执行。真实 Boss 发送未验证。
+
+- 基线：`npm test` 通过，47 tests、0 failures。
+- TDD RED：新增 manifest 权限契约后，`node --test tests/manifest.test.js` 如预期因缺少 `alarms` 失败。
+- TDD GREEN：`node --test tests/manifest.test.js` 通过，4 tests、0 failures。
+- 完整验证：`npm test` 通过，48 tests、0 failures。
+- Manifest JSON 验证：`python3 -m json.tool manifest.json >/dev/null` 通过。
+- 本任务自动化测试不访问真实 Boss 或飞书服务，因此不构成真实聊天读取、发送或通知验收。
+- Task 1 TDD RED：`node --test tests/trusteeship-policy.test.js` 因策略模块尚不存在而以 `MODULE_NOT_FOUND` 失败，符合新模块缺失的预期。
+- Task 1 TDD GREEN：`node --test tests/trusteeship-policy.test.js` 通过，11 tests、0 failures；`npm test` 通过，59 tests、0 failures。
+- Task 1 审查修复 RED：新增双开关和关键词用例后，聚焦测试为 13 tests、11 passes、2 failures（`月薪` 未拦截、关闭全局托管仍自动回复）。
+- Task 1 审查修复 GREEN：最小修复后，`node --test tests/trusteeship-policy.test.js` 通过，13 tests、0 failures；`npm test` 通过，61 tests、0 failures。
+- Task 1 第二轮审查：省略 `settings` 与 `conversationEnabled` 的默认关闭回归用例在新增时已通过（覆盖补强，非 RED）；裸 `package manager` 用例如预期失败后收窄英文薪资短语。最终 `node --test tests/trusteeship-policy.test.js` 通过，15 tests、0 failures；`npm test` 通过，63 tests、0 failures。
+- Task 2 TDD RED：`node --test tests/conversation-store.test.js` 因持久状态模块尚不存在而以 `MODULE_NOT_FOUND` 失败，符合新模块缺失的预期。
+- Task 2 TDD GREEN：`node --test tests/conversation-store.test.js` 通过，13 tests、0 failures；覆盖四个固定键、可靠引用、非法转换、并发去重、有界待办、禁用/重置、发送意图终态、Worker 恢复、通知补发与凭证隔离。
+- Task 2 完整验证：`npm test` 通过，76 tests、0 failures。测试使用内存存储和注入时钟/ID，不访问真实 Chrome 页面、AI、Boss 或飞书，因此不构成外部发送验收。
+- Task 2 审查修复 RED：扩展聚焦测试后为 18 tests、9 passes、9 failures；失败分别证明 URL 子路径误接收、跨 store 实例竞态双成功、终态证据字段缺失/弱校验、任意原因/通知码落盘、恢复写失败后不再重试、普通读写放大，以及损坏待办引用导致跨会话合并。
+- Task 2 审查修复 GREEN：共享 storage 队列、恢复提交顺序、只在状态实际变化时写入、严格肯定证据、固定错误 allowlist、精确 URL 路径和确定性待办修复完成后，聚焦测试 18/18 通过；`npm test` 81/81 通过。
+- Task 2 第二轮审查 RED：聚焦测试扩展到 22 项后为 18 passes、4 failures；同 Worker 新 store 把 live `SENDING` 错误恢复为 `PAUSED`，禁用与重置遗漏本会话待办，且 SENDING 关闭把 `management_disabled_during_send` 真实写入 storage。
+- Task 2 第二轮审查 GREEN：恢复所有权与队列统一为模块级 storage 状态，fresh module 测试证明只有新 Worker 才恢复；禁用/重置按会话归属关闭活动待办并固定未知原因。聚焦测试 22/22 通过；`npm test` 85/85 通过。
+- Task 4 TDD RED：新增 `tests/feishu-notifier.test.js` 后，`node --test tests/feishu-notifier.test.js` 因通知模块尚不存在而以 `MODULE_NOT_FOUND` 失败，符合新模块缺失的预期。
+- Task 4 TDD GREEN：Web Crypto HMAC-SHA256 空消息签名、严格 Webhook/Boss URL、白名单有界卡片、注入式 fetch/超时及稳定脱敏结果实现后，聚焦测试 8/8 通过。审查补强先新增编码斜杠和根域名 Boss URL 两个失败用例（6/8 通过），再收紧 URL 校验，恢复为 8/8 通过；随后加入“fetch 忽略 AbortSignal”超时用例，先得到错误的 `OK`，再改为 `Promise.race` 加中止信号，恢复 8/8 通过；`npm test` 最终 102/102 通过，且 `node --check src/conversation/feishu-notifier.js` 通过。
+- Task 4 安全审查修复 RED：新增原始 Webhook 归一化绕过、Boss 查询/路径技巧、任意卡片外发、卡片变造、Markdown/凭证注入、签名/JSON 解析悬挂、时钟异常和循环/引号凭证脱敏用例后，聚焦测试 5/12 通过，明确暴露所有审查项。
+- Task 4 安全审查修复 GREEN：模块私有卡片品牌与深冻结、`plain_text` 脱敏卡片、原始 ASCII Webhook 规则、有界 Boss URL 重建和 clock→sign→fetch→JSON 单一超时竞速落地后，聚焦测试 12/12 通过；`npm test` 新鲜完整验证 106/106 通过。
+- Task 4 第二次复审 RED：新增精确不透明凭证回扫、超长 DNS 主机名和非原始/非正时钟值用例后，聚焦测试为 11/14 通过，三个失败分别证明卡片凭证仍可出站、超长主机名仍可入按钮、无效 clock 仍可触发请求。
+- Task 4 第二次复审 GREEN：在签名/fetch 前序列化检查完整 Webhook/token/非空 secret，增加 DNS 与最终 URL 上限，并验证 clock 的原始正有限毫秒及正秒数后，聚焦测试 14/14 通过；`npm test` 新鲜完整验证 108/108 通过。
+- Task 4 最终阻塞 RED：加入含双引号和反斜杠的签名密钥用例后，卡片 JSON 转义形式未被原始凭证回扫识别，且结构化错误中的同一转义值未被 `redactError` 替换；聚焦测试 14/16 通过。
+- Task 4 最终阻塞 GREEN：每个精确凭证统一派生去重的原始/JSON-string-content 转义形式，并在外发卡片回扫和错误脱敏共用；聚焦测试 16/16 通过，`npm test` 新鲜完整验证 110/110 通过。
+- Task 5 TDD RED：新增纯读取器、content 消息契约和 manifest 顺序测试后，聚焦命令如预期出现 `MODULE_NOT_FOUND`、三项 content 操作缺失和 reader 未加载三个失败。
+- Task 5 GREEN：纯读取器 8/8 通过，reader + content 契约 + manifest 聚焦测试 16/16 通过；自审再以点段 URL 和抛错 dataset getter 两个失败用例完成 RED，最小修复后纯读取器 9/9 通过。
+- Task 5 最终验证：`node --test tests/conversation-reader.test.js tests/content-guard-contract.test.js tests/manifest.test.js` 为 17/17 通过；`npm test` 为 121/121 通过；reader/content 语法检查和 manifest JSON 解析均通过。测试没有访问真实 Boss 或执行真实发送。
+- Task 5 审查修复 RED：reader 新增无稳定时间、unsafe time、碰撞指纹和空串 cursor 用例后为 9/11 通过；VM/fake DOM 真实 handler 测试初次为 1/9 通过，失败分别证明 document-wide hidden decoy 泄漏、多可见/无 ownership 未拒绝、baseline 未强制、cursor 跳过余量、managed 登录码不稳定、发送前后未重验及缺少 scoped outgoing 证据。
+- Task 5 审查修复 GREEN：reader 11/11、VM content 9/9、reader/content/message/contract/manifest 聚焦 32/32 通过；首次全量 `npm test` 为 132/132 通过。真实 Boss 与真实发送仍未执行。
+- Task 5 最终复审 RED：VM content 新增无 incoming 的 GET→READ 空基线往返、outgoing 基线拒绝、Enter 后替换控件不得 fallback 点击三个用例，旧实现为 9/12 通过。
+- Task 5 最终复审 GREEN：无 incoming 的基线统一为空串；READ 非空基线只匹配 incoming；fallback 重验同一输入框、同一按钮和精确草稿，Enter 已尝试后的任何不确定性收束为 `SEND_RESULT_UNKNOWN`。VM content 12/12、聚焦 35/35、全量 135/135 通过。
+- Task 6 store 扩展 RED：新增 checkpoint、AUTO intent/原子日计数、固定码暂停、NO_REPLY 和 MANUAL 不计数用例后，聚焦测试为 22 passes、5 failures，失败均为新 API 或 `mode` 尚不存在；另一个后续新指纹用例明确证明终态 AUTO intent 会错误阻止新 intent。
+- Task 6 store 扩展 GREEN：五个受限 API、AUTO/MANUAL 模式和仅 AUTO 成功原子计数完成；后续新指纹可替换已终态 intent，仍在 `SENDING` 的 intent 不可覆盖。`node --test tests/conversation-store.test.js` 为 28/28 通过。
+- Task 6 引擎 RED：`node --test tests/monitor-engine.test.js` 先因缺少 `src/conversation/monitor-engine.js` 以 `MODULE_NOT_FOUND` 失败。首轮实现后聚焦 store + engine 为 42/42 通过；安全自审新增逐会话 PAUSED 禁读、运行中全局暂停禁通知和未知策略失败转待办三个真实失败用例，最小修复后 engine 17/17、store + engine 45/45 通过。
+- Task 6 最终验证：`node --check src/conversation/monitor-engine.js` 与 `node --check src/conversation/conversation-store.js` 均退出 0；`node --test tests/conversation-store.test.js tests/monitor-engine.test.js` 为 45/45 通过；`npm test` 为 158/158 通过。全部为内存存储和注入 fake 的自动化验证，没有访问 Chrome、真实 Boss、LLM 或飞书。
+- Task 6 审查修复 RED：store + engine 聚焦测试扩展到 60 项后为 46 passes、14 failures；强化同实例操作队列断言后另有 1 个独立失败，共确认 15 个缺陷，覆盖跨实例额度/通知竞态、全局暂停竞态、reader 身份与 checkpoint、任意错误码泄漏、提前停止游标和 resolve 映射。
+- Task 6 审查修复 GREEN：共享 storage 的 AUTO 原子预留、AUTO 未知计数（含禁用时终结）、通知 reservation 两阶段、engine 操作 FIFO、严格 reader 身份/checkpoint、稳定错误映射和实际尝试游标完成后，`node --test tests/conversation-store.test.js tests/monitor-engine.test.js` 为 62/62 通过；语法检查通过，`npm test` 为 175/175 通过。
+- Task 6 最终收口 RED：单一通知 phase API、原子 enabled/paused/quiet 门禁、预出站 quiet/pause 二次复核、CANCEL、双终态落盘失败恢复和 15 方法公共预算加入后，聚焦测试为 68 tests、57 passes、11 failures。
+- Task 6 最终收口 GREEN：移除独立 reserve/complete 公共方法及旧单阶段语义；`recordNotificationAttempt` 的 RESERVE/COMPLETE/CANCEL、预出站最新快照复核、恢复所有权失效与有界同模块恢复完成后，语法检查通过，聚焦测试 68/68、`npm test` 181/181 通过。
+- Task 7 TDD RED：新增后台契约、runtime fake Chrome 测试和初始 incoming 基线用例后，后台/store 聚焦为 47 tests、39 passes、8 failures；runtime 单测以缺少 `src/conversation/trusteeship-runtime.js` 的 `MODULE_NOT_FOUND` 失败。原有三项 background 契约继续通过。
+- Task 7 GREEN：单 store/engine/notifier/runtime、alarm 生命周期、八类 runtime 消息、前置条件、inactive/temporary tab 生命周期、ReplyAI/简历 seam、飞书测试状态与成功联系登记完成后，聚焦 54/54、全量 `npm test` 196/196 通过。
+- Task 7 安全自审 RED/GREEN：新增“inactive 候选在导航前被用户激活”和“托管发送前登录失效”两个竞态用例，旧实现为 7/9；导航前 `tabs.get` 二次复核和 sender 全局暂停落地后，runtime + background 聚焦 19/19 通过。最终全量为 198/198，语法检查通过。全部 Chrome/Boss/LLM/飞书行为均由 fake/injection 覆盖，没有真实外部操作。
+- Task 7 独立审查修复：runtime/content 聚焦测试先出现 10 个预期失败，真实执行 `background.js` 的 VM fake 先出现 5/6 失败，API 凭据绑定也先因旧测试状态未清而失败。修复后，凭据测试与 explicit `ok` 协议、独占临时 tab/可见性边界、初始化 fail-closed、sidepanel sender + exact schema、内部 alarm 入口、controller FIFO 和 Chrome callback/Promise exactly-once 兼容均有行为覆盖；旧 background 行为 regex 只保留 import order，运行行为由 VM 测试接管。最终 `npm test` 为 207/207，通过语法检查，未访问真实 Boss、LLM 或飞书。
+- Task 7 第二轮独立复审修复：新增持久 API version/proof version、pending 旧响应与 ABA、草稿填充/Enter 后 visibility、原生 `length === 0` callback、失败 lifecycle 和 `TEST_API` 授权/写失败用例；各组均先复现预期失败。修复后聚焦 133/133、全量 `npm test` 217/217 通过；晚到测试固定 `API_TEST_STALE`，已尝试 Enter 后的接管保持 `SEND_RESULT_UNKNOWN` 且不 fallback click，未执行真实 Boss、LLM 或飞书操作。
+- Task 7 最终复审修复：SAVE_SETTINGS A→B 竞态、controller 配置失效、四类受保护外部依赖与 intent 前门禁分别先形成 RED；旧实现的 runtime 为 16/19、background VM 为 12/15。三层连续证明门禁完成后，runtime/background/engine 聚焦为 67/67；配置身份变化固定暂停并清 alarm，proof-only 写入不暂停，轮换后的 reader/LLM/Boss sender/飞书调用均为 0，AUTO/MANUAL intent 也不会在最后门禁后创建。最终 `npm test` 为 225/225，相关生产与测试 JavaScript 的 `node --check` 全部退出 0。
+- Task 8 TDD RED：新增 `tests/trusteeship-sidepanel-contract.test.js` 后，`node --test tests/trusteeship-sidepanel-contract.test.js tests/sidepanel-contract.test.js` 中既有 delivery modal 契约 6/6 通过；新增托管设置、待确认工作台、消息与样式四项契约均因功能尚不存在失败。随后新增 `tests/sidepanel-runtime.test.js`，最小 VM helper 的保存回滚、前置条件导航、待办 resolve 与单会话回滚四项也均以缺少 controller 失败。
+- Task 8 GREEN：侧边栏新增默认关闭的 AI 托管设置（5/10/15 分钟、1–20 日限、静默时段、默认遮罩的飞书凭证、显式风险说明和手动飞书测试）；`TRUSTEESHIP_GET_STATE` 驱动顶栏状态、已登记岗位和待确认角标。密码不会从状态响应回填，已保存凭证只显示无敏感内容的占位提示；空凭证输入也不会在保存其他设置时覆盖持久凭证。
+- 待确认页只以 DOM API、`textContent` 和 `value` 构建聊天上下文、草稿与操作控件。`SEND_EDITED` 才携带草稿；每张卡在 resolve 期间禁用全部动作，失败（尤其 `SEND_RESULT_UNKNOWN`）保留卡和编辑值，只有 `ok === true` 后才刷新。关闭单会话托管在明确提示会删除最近聊天上下文后才发送单个 `TRUSTEESHIP_SET_CONVERSATION`，失败会恢复原值。
+- Task 8 聚焦验证：`node --test tests/trusteeship-sidepanel-contract.test.js tests/sidepanel-runtime.test.js tests/sidepanel-contract.test.js` 14/14 通过；`node --check src/sidepanel.js` 通过。测试使用静态契约和 Node VM/fake dependencies，不调用真实 Boss、LLM 或飞书；360–600px 样式与 ARIA 语义为代码/契约覆盖，尚未作真实 Chrome 手工验收。
+- Task 8 独立审查修复：runtime 在公共边界把 engine allowlist 中的 `errorCode` 收束为稳定 `code`，UI 也防御性读取 `code || errorCode`。`SEND_RESULT_UNKNOWN` 作为持久待确认项计入 badge，重开后仍显示只读人工核对卡且只提供“打开 Boss 会话”，没有再次发送、拒绝或关闭会话的入口。顶栏按 `enabled → paused → pending → active` 取值；已登记岗位使用中文状态/暂停原因并展示安全 DTO 的最近检查时间。
+- Task 8 审查修复验证：完整生产 `sidepanel.js` 的 Node VM/fake DOM 覆盖初始化、状态组合、真实 unknown 响应、重开只读、成功刷新和会话关闭回滚；runtime/静态契约覆盖公共错误码、DTO、完整 missing 清单、ARIA 和长词换行。`npm test` 249/249 通过；`node --check src/sidepanel.js` 与 `node --check src/conversation/trusteeship-runtime.js` 通过。所有验证未访问真实 Boss、LLM 或飞书。
+- Task 8 独立复审修复：首次收到真实 `SEND_RESULT_UNKNOWN` 后，当前旧卡不会短暂恢复编辑或 resolve。它保持 textarea `disabled + readOnly` 与所有 resolve 控件禁用，先提示人工核对并立即请求持久列表；列表刷新失败时旧卡仍保持禁用，刷新成功后替换为“本次尝试草稿（只读）”和唯一的“打开 Boss 会话”。普通失败仍恢复可编辑草稿，成功仍刷新。完整 sidepanel VM 使用延迟刷新断言“unknown 响应返回后、刷新 promise 完成前”没有第二次 `TRUSTEESHIP_RESOLVE_APPROVAL`。
+
+## 版本控制注意项
+
+当前仓库没有可验证的 Git `HEAD`（`NO_GIT_BASELINE`）。本任务不会初始化 Git、暂存或提交；待合法基线恢复或用户明确授权后，再执行提交操作。
+
+## 参考依据
+
+既有计划已确认的依据：Chrome Alarms API 用于 MV3 Service Worker 调度；Chrome Cross-origin Requests 指明自定义 API 域名需对应 host permission；[GeekGeekRun](https://github.com/geekgeekrun/geekgeekrun) 提供适配器隔离和人工参与边界的参考。
+
+Task 1 新检索的开源参考：[Open Policy Agent](https://github.com/open-policy-agent/opa) 将输入数据与确定性策略决策分离；[node-casbin](https://github.com/apache/casbin-node-casbin) 的 deny-override 模型说明显式拒绝规则应先于允许结论。本模块只借鉴这两个边界原则，因浏览器扩展需要零运行时依赖而未引入其库。
+
+Task 2 新检索的开源参考：[idb-keyval](https://github.com/jakearchibald/idb-keyval) 明确展示异步 `get`/`set` 读改写会丢更新，并用排队的 `update` 保证顺序；[Chrome 扩展迁移文档源码](https://github.com/GoogleChrome/developer.chrome.com/blob/main/site/en/docs/extensions/migrating/to-service-workers/index.md) 强调 MV3 Service Worker 短生命周期下应以持久存储为事实源；[Workbox](https://github.com/GoogleChrome/workbox) 的 Background Sync 面向可重放请求队列，本模块的聊天发送结果可能未知，因此只借鉴持久队列边界，不采用自动重放。
+
+Task 2 审查修复新增参考：[OWASP REST Security Cheat Sheet](https://github.com/OWASP/CheatSheetSeries/blob/master/cheatsheets/REST_Security_Cheat_Sheet.md) 要求不信任输入对象并将值约束到固定范围；本轮据此把外部通知结果和发送证据收窄为明确字段与离散 allowlist。
+
+Task 4 已检索的开源参考：[larksuite/node-sdk](https://github.com/larksuite/node-sdk) 展示了飞书交互式卡片使用 `interactive` 消息类型；已批准计划中的 [feishu-webhook-sdk](https://github.com/jz0ojiang/feishu-webhook-sdk) 用于核对自定义机器人 Webhook 与 HMAC-SHA256 签名约定。本模块没有复制任一项目的源代码：为满足浏览器扩展的零依赖、私有卡片品牌和可注入测试边界，使用 Web Crypto 与原生 `fetch` 独立实现最小通知逻辑。
+
+Task 5 新检索的开源参考：[GeekGeekRun](https://github.com/geekgeekrun/geekgeekrun) 说明 Boss 会话自动化依赖高变动 UI 且需要明确异常停机；[Chrome 扩展消息传递文档源码](https://github.com/GoogleChrome/developer.chrome.com/blob/main/site/en/docs/extensions/mv3/messaging/index.md) 明确要求把 content script 数据视为不可信并验证、净化输入。本任务仅借鉴“适配器隔离、输入不可信、失败关闭”的边界，没有复制项目选择器、真实会话数据或自动发送流程。
+
+Task 6 新检索的开源参考：[BullMQ](https://github.com/taskforcesh/bullmq) 把持久化、原子操作和 deduplication 作为任务执行的一等边界；[Temporal TypeScript SDK](https://github.com/temporalio/sdk-typescript) 展示了把外部副作用放在可审计工作流边界中的实现方向。审查修复继续核对 [SAP CAP Transactional Outbox](https://github.com/cap-js-community/transactional-outbox) 与 [MassTransit](https://github.com/MassTransit/MassTransit) 的 outbox/inbox 语义，用于确认通知必须先持久化 reservation 再出站，且未知/未终结结果不得自动重放；最终收口又核对 [BullMQ locked jobs](https://github.com/taskforcesh/bullmq-redis) 的 owner token、active 状态与受控终态释放边界。本任务仅借鉴这些边界原则，没有引入其运行时或复制实现。
+
+Task 7 新检索的开源参考：[GoogleChrome/chrome-extensions-samples](https://github.com/GoogleChrome/chrome-extensions-samples) 用于核对 MV3 service worker 的事件监听与 Chrome API 组合方式；[Chrome 扩展 Service Worker 迁移文档源码](https://github.com/GoogleChrome/developer.chrome.com/blob/main/site/en/docs/extensions/migrating/to-service-workers/index.md) 展示了用 `chrome.alarms` 替代不可靠 DOM timer，并在 worker 事件入口恢复持久状态；[MDN WebExtensions 示例](https://github.com/mdn/webextensions-examples) 用于交叉检查 background/content 消息边界。本任务只借鉴事件驱动调度、alarm 恢复和消息适配原则，没有复制开源项目源代码或引入运行时依赖。
+
+Task 8 新检索的开源参考：[GoogleChrome/chrome-extensions-samples](https://github.com/GoogleChrome/chrome-extensions-samples) 的 side panel 示例用于核对面板状态不应依赖“刚刚打开”这一时序假设；[MDN WebExtensions examples](https://github.com/mdn/webextensions-examples) 与其 storage 文档用于核对扩展设置应经受控扩展存储/消息边界处理。当前实现据此把状态、badge 和列表刷新统一委托给既有 `TRUSTEESHIP_*` 后台接口，并在 UI 中只渲染已遮罩的凭证状态；没有复制开源代码或引入依赖。
+
+本机 Obsidian 既有结论引用：`技术复用/Electron只读采集与持久租约-Phase2B复盘.md` 提出的“稳定排序与显式 cursor”“终态响应丢失不等于未提交”和“keyed FIFO 只保存 tail”原则。Task 2 的新实现建议是在浏览器扩展存储上采用单 worker Promise 尾队列，并把未知发送收束为人工核对；Task 6 的新实现建议是把这些原则应用于最多 10 个会话的单轮游标编排和一次性 AUTO/MANUAL intent。这些是当前 Boss 插件的实现决策，不是笔记中已经验证过的 Boss 场景结论。
+
+## Task 9 集成、恢复与隐私验收
+
+### 恢复与调度语义
+
+| 场景 | 自动化固定行为 |
+| --- | --- |
+| Worker 在证据一致的 `CLASSIFYING` 中断 | 恢复 `classificationBaseline + classificationOriginState`；`WAITING_HR` 可重新分类一次，`WAITING_CONFIRMATION` 保留原 PENDING 待办并直接合并一次，AI/发送为 0 |
+| `WAITING_CONFIRMATION` 恢复证据缺链、错链或重复 PENDING | `PAUSED/RECOVERY_STATE_UNCERTAIN`；通知为 0 |
+| legacy / 损坏 / 矛盾 `CLASSIFYING` | `PAUSED/RECOVERY_STATE_UNCERTAIN`；保留原游标与有界去重证据，不读页、不调用 AI/通知/发送；恢复持久化失败后重试 |
+| 同一 raw 快照同时存在 `CLASSIFYING` 与 `SENDING` | `SENDING` 恢复优先；intent、会话和关联待办全部收束为 `SEND_RESULT_UNKNOWN`，绝不重新分类 |
+| Worker 在 `SENDING` 中断 | 保持发送结果未知的人工核对终态，不自动重放；AUTO 额度在恢复重试后仍只按一次消耗 |
+| alarm 重建 | 始终使用唯一逻辑名称 `boss-ai-chat-monitor`；5 / 10 / 15 分钟只更新该 alarm |
+| 过期 `scheduledTime` 事件 | 事件入口只启动一次“当前”周期，不补跑历史 tick |
+| 全局关闭 | 清除 alarm，不读取 Boss、不调用 LLM、不发送飞书 |
+| 单会话关闭 | 删除该会话最近上下文和活动待办；不会撤销此前已经成功联系的事实 |
+| 静默时段收到多条消息 | 合并为一个本地待办，静默期间零通知；退出静默后只发送一个合并通知 |
+| 飞书失败 | 本地待办不丢失，通知最多补发一次 |
+| 通知预留后 owner 被暂停、禁用、改链或出现重复 PENDING | store 原子预留、engine 新鲜快照和签名/序列化后的 runtime dispatch 门禁中止外发；fetch 调用为 0 |
+| `subtle.sign` await 期间 owner 暂停、断链、出现第二待办、全局/飞书关闭或进入静默 | client 只交出 prepared fetch thunk；runtime 读取最终快照后拒绝 dispatch，reservation 收束为安全未知且不重试 |
+| 真实 background 包装层的双租约组合 | actual store → engine → protected notifier → runtime notifier → actual Feishu client；六类 owner 变化 fetch 为 0，正常为 1，API proof 轮换为 0；resolved caller 断言保留且非函数安全 |
+| 登录失效 / Boss 阻止 | 全局暂停并清 alarm；侧边栏显示中文重新登录或验证码/风控处理指引，必须人工恢复 |
+| 未知发送结果 | 持久只读人工核对卡只允许打开 Boss 会话，不再提供再次发送 |
+
+公共持久 pauseCode allowlist 包括 `LOGIN_REQUIRED`、`BOSS_BLOCKED`、`SERVICE_WORKER_INTERRUPTED`、`PREREQUISITE_CHANGED`、`API_CONFIG_CHANGED`、`TARGET_UNCERTAIN`、`SELECTOR_UNAVAILABLE`、`SEND_RESULT_UNKNOWN`、`MESSAGE_ORDER_UNCERTAIN`、`CONVERSATION_UNAVAILABLE`、`RECOVERY_STATE_UNCERTAIN` 和 `UNKNOWN_PROCESSING_FAILURE`。store 归一化与 runtime DTO 投影各自执行一次 allowlist；任何未知原始值统一映射为 `UNKNOWN_PROCESSING_FAILURE`。`pauseReason` 只允许随未知发送固定为 `SEND_RESULT_UNKNOWN`，其他值全部清空。runtime settings DTO 逐字段构造固定 10 个公共字段，`quietHours` 也逐字段构造，内部新增字段不会自动外溢。`API_PROOF_STALE` 是运行时操作错误而非持久 pauseCode。
+
+### 隐私边界与静态扫描
+
+新增的真实模块组合测试执行 classifier error、draft error、send error，以及成功进入人工确认的模型回显分支；每条链使用 actual store → engine → runtime controller/notifier → 真实 `FeishuNotifier.create()`，只用 fake fetch 捕获最终 HTTP body。成功分支让 classifier 的 `fieldsNeeded` 和 draft 故意回显 HR 文本开头、旧 160 code-points 边界附近和末尾的三个 marker，并证明这些内容只保留于本地待办；最终请求 body、周期摘要及 controller response 均不得包含任一 marker、API Key、Webhook token、签名密钥、provider body 或 raw error。飞书卡片使用固定文案“HR 有新消息，请在插件内查看完整上下文”，不接受聊天、草稿、待补字段、reason 或任意自由文本摘要。
+
+对 `src` / `tests` 的 `apiKey`、`feishuWebhook`、`signingSecret`、`recentMessages`、`console`、`LOG` 和 `runtime.sendMessage` 定向扫描确认：托管模块没有 raw console/log 输出，凭证只出现在配置校验、签名或测试 fixture，聊天只进入有界本地状态与 AI 输入。`src/background.js` 仍含 Task 9 范围外的既有联系/扫描 raw error 日志；本任务没有按要求顺手重构该旧链路。独立的生产 background VM 测试证明 `TEST_API` 的 provider/credential canary 不进入响应、runtime 消息或其中的 `LOG/BLOCKED/PHASE` 事件；完整 sidepanel VM 证明未知原始错误码不进入 status 或 managed-conversation DOM。这里是多个真实边界测试的组合证据，不宣称一次单链执行跨过所有浏览器 UI 表面。
+
+### 自动化证据与未覆盖边界
+
+- 首轮新增恢复/隐私测试：2 tests、0 passes、2 failures，分别暴露 `CLASSIFYING` 永久卡住和完整 HR 消息进入飞书卡片。
+- UI 恢复指引 RED：10 tests 中 1 项失败，证明 `LOGIN_REQUIRED` / `BOSS_BLOCKED` 没有中文下一步提示。
+- 独立审查 P1 恢复 RED：integration 5 项中 4 项失败，证明来源状态未保存、legacy/损坏状态未 fail closed、恢复失败未重试；空 baseline 合法项通过。GREEN 后 5/5。
+- GREEN 自检又用 RED 证明“可靠登记 baseline 不一定已进入 processed window”；移除这一过强假设后 integration 最终 6/6。
+- 独立审查 P1 隐私 RED：修正测试自身 substring 定位错误后，3 项中 2 项按预期因最终飞书 HTTP body 含开头 marker 失败；send-error 分支通过。固定通知文案后 3/3。
+- 独立审查 P1 UI RED：目标用例因没有 `RECOVERY_STATE_UNCERTAIN` 中文文案失败；修复后 sidepanel VM 12/12。
+- 第二轮复审恢复优先级 RED：integration 8 项中 2 项失败，分别证明组合 `CLASSIFYING + SENDING` 被错误走入分类恢复、首次未知终态写失败没有按预期拒绝；修复并校正测试时钟后 8/8。
+- 第二轮 owner/link 门禁 RED：integration + store + engine 共 87 项，79 passes、8 failures，覆盖 5 个无效原子预留（含父级汇总）、通知前 owner 变化仍外发，以及 orphan 待办仍通知；三层门禁后 87/87。
+- 第二轮成功隐私 RED：privacy 4 项中 1 项失败，证明模型 `fieldsNeeded` / draft 回显进入最终 HTTP body；builder 防御测试 17 项中 1 项失败，证明任意自由文本入口可泄漏。固定外发 schema 后分别 4/4、17/17。
+- 第二轮恢复元数据清理 RED：store 52 项中 4 项失败（3 个子用例与父级汇总），覆盖 checkpoint、NO_REPLY、enable；全部终态/管理路径清理后 52/52。
+- 第二轮 pauseCode DTO/UI RED：runtime 25 项中 1 项失败，sidepanel 13 项中 1 项失败；store/runtime 双 allowlist 与稳定中文提示后分别 25/25、13/13。
+- 第三轮 pauseReason/settings RED：actual store 保留 raw global pauseReason，controller 整体 clone settings；与签名竞态合跑 68 项时这两项失败。store 固定 reason 归一化和 runtime settings 逐字段重建后通过。
+- 第三轮签名 await 竞态 RED：同一 68 项聚焦测试中，owner pause、approval 断链、第二 local PENDING、全局关闭、飞书关闭和进入静默 6 项都错误得到 `fetchCount = 1`；prepared dispatch thunk 与 runtime 最终门禁后 6 项均为 0，正常签名路径仍为 1，聚焦 68/68。
+- 第三轮广覆盖聚焦命令（Feishu/runtime/monitor/privacy/background/sidepanel/store/recovery）184/184；随后新增 client prepared-dispatch 直接单测，Feishu 18/18。
+- release-review background 组合 RED：真实生产 VM 的 8 个核心路径中 6 个 owner 竞态错误 fetch 1，正常 fetch 1 与 API rotation fetch 0 通过；补入 resolved 断言透传后完整 RED 为 10 项中 7 项失败。包装层改为双断言组合后 background 组合 10/10，完整 background VM 31/31。
+- 最终广覆盖聚焦命令（Feishu/runtime/monitor/privacy/background/sidepanel/store/recovery）195/195；全量：`npm test` 306/306。修改的生产/测试 JavaScript `node --check`、Manifest JSON、敏感/egress 扫描和 `git diff --check` 全部退出 0；扫描仍明确列出 Task 9 范围外的旧联系/扫描 raw error 日志。仓库仍无可验证 Git `HEAD`，因此 `git diff --check` 不能替代 commit-range 审查。
+
+全部测试使用内存存储、fake Chrome、fake fetch、Node VM 和合成消息。没有读取真实 Boss 会话，没有调用真实 LLM/飞书，没有控制 Chrome，也没有执行外部写入。当前状态是：**release-review 的最后一个 gate-blocking P1 已实现修复并完成新鲜自动化验证，新的 review-clean gate 仍 pending；待无外部写入 Chrome 验收和分阶段实号验收**。
+
+Task 10 必须分阶段且每阶段单独获授权：先做一个完整工作日的只读监控；再用测试岗位人工确认发送一条；然后仅一个会话、日限 1 条观察一条低风险自动回复；最后验证登录失效、验证码/风控和页面变化停机。任一阶段未通过都不能进入下一阶段，也不能宣称真实 Boss 发送已验证。
+
+这些是既有计划结论；本任务的新实现建议仅限于以固定、最小权限落实上述契约。

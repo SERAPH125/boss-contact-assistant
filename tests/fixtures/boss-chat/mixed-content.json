@@ -1,0 +1,55 @@
+[
+  {
+    "id": "t1",
+    "direction": "incoming",
+    "kind": "text",
+    "text": "这是脱敏的测试消息",
+    "at": 1700000300000,
+    "profileUrl": "https://private.invalid/profile/1"
+  },
+  {
+    "id": "i1",
+    "direction": "incoming",
+    "kind": "image",
+    "text": "不应保留的图片说明",
+    "at": 1700000360000,
+    "url": "https://private.invalid/image/1"
+  },
+  {
+    "id": "a1",
+    "direction": "outgoing",
+    "kind": "attachment",
+    "text": "不应保留的附件地址",
+    "at": 1700000420000,
+    "attachmentUrl": "https://private.invalid/file/1"
+  },
+  {
+    "id": "v1",
+    "direction": "incoming",
+    "kind": "voice",
+    "text": "不应保留的语音地址",
+    "at": 1700000480000,
+    "mediaUrl": "https://private.invalid/voice/1"
+  },
+  {
+    "id": "w1",
+    "direction": "incoming",
+    "kind": "withdrawn",
+    "text": "对方撤回了一条消息",
+    "at": 1700000540000
+  },
+  {
+    "id": "s1",
+    "direction": "system",
+    "kind": "time",
+    "text": "14:05",
+    "at": 1700000600000
+  },
+  {
+    "id": "u1",
+    "direction": "unknown",
+    "kind": "text",
+    "text": "方向未知",
+    "at": 1700000660000
+  }
+]

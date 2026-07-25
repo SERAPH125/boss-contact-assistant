@@ -1,0 +1,15 @@
+.DS_Store
+*.log
+node_modules/
+.env
+.env.*
+!.env.example
+*.pem
+*.p12
+.chrome-profile/
+.vscode/
+.idea/
+*.crx
+*.zip
+dist/
+build/
