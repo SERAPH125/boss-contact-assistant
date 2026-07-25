@@ -492,7 +492,70 @@ function renderManagedConversations(conversations) {
       input.disabled = false;
       if (response && response.ok === true) await refreshTrusteeshipState();
     });
-    card.append(title, details, label);
+    const actions = document.createElement('div');
+    actions.className = 'managed-actions';
+    const open = document.createElement('button');
+    open.type = 'button';
+    open.className = 'btn-ghost';
+    open.textContent = '打开会话';
+    open.addEventListener('click', async () => {
+      open.disabled = true;
+      try {
+        const result = await sendRuntimeMessage({
+          type: 'TRUSTEESHIP_OPEN_CONVERSATION',
+          conversationId: conversation.conversationId
+        });
+        if (!result || result.ok !== true) {
+          setTrusteeshipMessage(
+            '无法打开会话：' + stableTrusteeshipError(result && (result.code || result.errorCode))
+          );
+        }
+      } catch (_) {
+        setTrusteeshipMessage(
+          '无法打开会话：' + stableTrusteeshipError('SERVICE_WORKER_INTERRUPTED')
+        );
+      } finally {
+        open.disabled = false;
+      }
+    });
+    const remove = document.createElement('button');
+    remove.type = 'button';
+    remove.className = 'btn-ghost managed-remove';
+    remove.textContent = '从列表移除';
+    remove.addEventListener('click', async () => {
+      if (!window.confirm('将彻底删除该岗位的登记与待确认记录，且不可恢复。是否继续？')) {
+        return;
+      }
+      remove.disabled = true;
+      open.disabled = true;
+      input.disabled = true;
+      try {
+        const result = await sendRuntimeMessage({
+          type: 'TRUSTEESHIP_REMOVE_CONVERSATION',
+          conversationId: conversation.conversationId
+        });
+        if (!result || result.ok !== true) {
+          setTrusteeshipMessage(
+            '移除失败：' + stableTrusteeshipError(result && (result.code || result.errorCode))
+          );
+          remove.disabled = false;
+          open.disabled = false;
+          input.disabled = false;
+          return;
+        }
+        setTrusteeshipMessage('已从列表移除该岗位登记。');
+        await refreshTrusteeshipState();
+      } catch (_) {
+        setTrusteeshipMessage(
+          '移除失败：' + stableTrusteeshipError('SERVICE_WORKER_INTERRUPTED')
+        );
+        remove.disabled = false;
+        open.disabled = false;
+        input.disabled = false;
+      }
+    });
+    actions.append(open, remove);
+    card.append(title, details, label, actions);
     container.appendChild(card);
   });
 }
@@ -914,7 +977,12 @@ if ($('btnRegisterActiveConversation')) {
         setTrusteeshipMessage((response.alreadyRegistered ? '已更新登记：' : action) + label + peer);
         await refreshTrusteeshipState();
       } else {
-        setTrusteeshipMessage('登记失败：' + stableTrusteeshipError(response && response.code));
+        const detail = response && typeof response.detail === 'string' && response.detail.trim()
+          ? '（' + response.detail.trim().slice(0, 120) + '）'
+          : '';
+        setTrusteeshipMessage(
+          '登记失败：' + stableTrusteeshipError(response && response.code) + detail
+        );
       }
     } catch (_) {
       setTrusteeshipMessage('登记失败：' + stableTrusteeshipError('SERVICE_WORKER_INTERRUPTED'));

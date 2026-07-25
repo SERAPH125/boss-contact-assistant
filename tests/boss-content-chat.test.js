@@ -84,6 +84,15 @@ class FakeElement {
     return false;
   }
 
+  contains(other) {
+    let current = other;
+    while (current) {
+      if (current === this) return true;
+      current = current.parentElement;
+    }
+    return false;
+  }
+
   closest(selector) {
     let current = this;
     while (current) {
@@ -142,14 +151,20 @@ function createHarness(options = {}) {
     tagName: 'li',
     className: 'active',
     text: options.activeText === undefined ? '示例公司 示例岗位' : options.activeText,
-    dataset: { conversationId: 'conv1' },
+    dataset: Object.hasOwn(options, 'activeDataset')
+      ? options.activeDataset
+      : { conversationId: 'conv1' },
     selectors: [S.activeUser]
   }));
   const activeLink = activeItem.append(new FakeElement({
     tagName: 'a',
     text: options.activeText === undefined ? '示例公司 示例岗位' : options.activeText,
-    href: 'https://www.zhipin.com/web/geek/chat?conversationId=conv1',
-    dataset: { conversationId: 'conv1' },
+    href: Object.hasOwn(options, 'activeHref')
+      ? options.activeHref
+      : 'https://www.zhipin.com/web/geek/chat?conversationId=conv1',
+    dataset: Object.hasOwn(options, 'activeLinkDataset')
+      ? options.activeLinkDataset
+      : { conversationId: 'conv1' },
     selectors: [S.conversationLink]
   }));
 
@@ -160,7 +175,9 @@ function createHarness(options = {}) {
   }));
   const container = pane.append(new FakeElement({
     id: 'message-pane-1',
-    dataset: options.ownership === 'none' ? {} : { conversationId: 'conv1' },
+    dataset: Object.hasOwn(options, 'containerDataset')
+      ? options.containerDataset
+      : (options.ownership === 'none' ? {} : { conversationId: 'conv1' }),
     selectors: [S.messageList]
   }));
   const input = pane.append(new FakeElement({
@@ -201,14 +218,14 @@ function createHarness(options = {}) {
   state.addMessage = function addMessage(config = {}, target = container) {
     const index = state.nextMessage++;
     const direction = config.direction || 'incoming';
+    const directionSelectors = direction === 'incoming'
+      ? [S.incoming]
+      : (direction === 'outgoing' ? [S.outgoing] : []);
     const item = target.append(new FakeElement({
       dataset: {
-        messageId: config.id || 'm' + index
+        messageId: Object.hasOwn(config, 'id') ? config.id : 'm' + index
       },
-      selectors: [
-        S.messageItem,
-        direction === 'incoming' ? S.incoming : S.outgoing
-      ]
+      selectors: [S.messageItem].concat(directionSelectors)
     }));
     item.append(new FakeElement({
       text: config.text === undefined ? '消息 ' + index : config.text,
@@ -301,6 +318,12 @@ function createHarness(options = {}) {
     clearTimeout() {},
     location: {
       href: options.locationHref || 'https://www.zhipin.com/web/geek/chat'
+    },
+    performance: {
+      getEntriesByType(type) {
+        if (type !== 'resource') return [];
+        return Array.isArray(options.historyResources) ? options.historyResources : [];
+      }
     },
     sessionStorage: {
       getItem() { return null; }
@@ -502,6 +525,280 @@ test('CAPTURE registers the owned active conversation without expected identity'
   assert.equal(result.peerSource, 'encryptUid');
   assert.equal(result.baselineIncomingFingerprint, 'id:initial-incoming');
   assert.ok(result.company || result.position || result.hrName);
+});
+
+test('CAPTURE supports modern chat-record DOM without geek/chat anchors', async () => {
+  const peerId = 'peer~~modern1';
+  const documentRoot = new FakeElement();
+  const body = { innerText: '' };
+  const friend = documentRoot.append(new FakeElement({
+    className: 'friend-content active',
+    text: '杭州云禾致远商贸 江女士 跨境电商运营',
+    selectors: [S.conversationLink, S.activeUser]
+  }));
+  const pane = documentRoot.append(new FakeElement());
+  pane.append(new FakeElement({
+    text: '杭州云禾致远商贸',
+    selectors: ['.chat-info']
+  }));
+  pane.append(new FakeElement({
+    className: 'position-name',
+    text: '跨境电商运营 9-14K 杭州',
+    selectors: ['.position-name']
+  }));
+  const container = pane.append(new FakeElement({
+    className: 'chat-record',
+    selectors: [S.messageList]
+  }));
+  const outgoing = container.append(new FakeElement({
+    className: 'message-item item-myself',
+    selectors: [S.messageItem, S.outgoing]
+  }));
+  outgoing.append(new FakeElement({
+    text: '您好，我对这个岗位很感兴趣',
+    selectors: [S.text]
+  }));
+  outgoing.append(new FakeElement({
+    text: '已读',
+    selectors: [S.time]
+  }));
+  const contextObject = {
+    console,
+    URL,
+    Date,
+    Promise,
+    Array,
+    Set,
+    Uint8Array,
+    Object,
+    Number,
+    String,
+    JSON,
+    Math,
+    RegExp,
+    Error,
+    Event: FakeEvent,
+    InputEvent: FakeEvent,
+    KeyboardEvent: FakeEvent,
+    HTMLInputElement: function HTMLInputElement() {},
+    HTMLTextAreaElement: function HTMLTextAreaElement() {},
+    File: function File() {},
+    DataTransfer: function DataTransfer() {
+      this.items = { add() {} };
+      this.files = [];
+    },
+    atob() { return ''; },
+    getComputedStyle(element) {
+      return { position: element.offsetParent === null ? 'static' : 'relative' };
+    },
+    setTimeout(callback) {
+      Promise.resolve().then(callback);
+      return 1;
+    },
+    clearTimeout() {},
+    location: { href: 'https://www.zhipin.com/web/geek/chat' },
+    performance: {
+      getEntriesByType(type) {
+        if (type !== 'resource') return [];
+        return [{
+          name: 'https://www.zhipin.com/wapi/zpchat/geek/historyMsg?bossId=' +
+            encodeURIComponent(peerId) + '&page=1'
+        }];
+      }
+    },
+    sessionStorage: { getItem() { return null; } },
+    document: {
+      body,
+      visibilityState: 'visible',
+      querySelectorAll(selector) { return documentRoot.querySelectorAll(selector); },
+      querySelector(selector) { return documentRoot.querySelector(selector); }
+    },
+    chrome: {
+      runtime: {
+        onMessage: {
+          addListener(listener) { contextObject._listener = listener; }
+        }
+      }
+    },
+    async fetch(url) {
+      if (String(url || '').indexOf('getGeekFriendList.json') === -1) {
+        return { ok: false, status: 404, async json() { return {}; } };
+      }
+      return {
+        ok: true,
+        status: 200,
+        async json() {
+          return {
+            code: 0,
+            zpData: {
+              result: [{
+                encryptUid: peerId,
+                name: '江女士',
+                brandName: '杭州云禾致远商贸',
+                jobName: '跨境电商运营'
+              }]
+            }
+          };
+        }
+      };
+    },
+    _listener: null
+  };
+  contextObject.window = contextObject;
+  contextObject.self = contextObject;
+  const context = vm.createContext(contextObject);
+  scripts.forEach((relativePath) => {
+    vm.runInContext(
+      fs.readFileSync(path.join(root, relativePath), 'utf8'),
+      context,
+      { filename: relativePath }
+    );
+  });
+  void friend;
+  const result = await new Promise((resolve, reject) => {
+    const timeout = setTimeout(() => reject(new Error('timeout')), 1000);
+    contextObject._listener({ type: 'CAPTURE_ACTIVE_CONVERSATION' }, {}, (response) => {
+      clearTimeout(timeout);
+      resolve(response);
+    });
+  });
+  assert.equal(
+    result.success,
+    true,
+    'CAPTURE modern DOM failed: ' + JSON.stringify(result)
+  );
+  assert.equal(result.conversationRef.conversationId, peerId);
+  assert.equal(result.baselineIncomingFingerprint, '');
+  assert.equal(result.position, '跨境电商运营 9-14K 杭州');
+  assert.match(result.company + result.hrName, /云禾|江女士/);
+});
+
+test('CAPTURE rejects an existing incoming message without a reliable cursor', async () => {
+  const h = createHarness({
+    messages: [{
+      id: '',
+      direction: 'incoming',
+      text: '三天前的历史消息',
+      at: null
+    }]
+  });
+  const result = await h.dispatch({ type: 'CAPTURE_ACTIVE_CONVERSATION' });
+  assert.equal(result.success, false);
+  assert.equal(result.errorCode, 'MESSAGE_ORDER_UNCERTAIN');
+});
+
+test('CAPTURE rejects an unclassified history node beside a valid outgoing message', async () => {
+  const h = createHarness({
+    messages: [
+      {
+        id: 'known-outgoing',
+        direction: 'outgoing',
+        text: '历史回复'
+      },
+      {
+        id: '',
+        direction: 'unknown',
+        text: '无法确认方向的历史节点',
+        at: null
+      }
+    ]
+  });
+  const result = await h.dispatch({ type: 'CAPTURE_ACTIVE_CONVERSATION' });
+  assert.equal(result.success, false);
+  assert.equal(result.errorCode, 'MESSAGE_ORDER_UNCERTAIN');
+});
+
+test('CAPTURE ignores a foreign resource that mimics the Boss history path', async () => {
+  const h = createHarness({
+    activeDataset: {},
+    activeLinkDataset: {},
+    activeHref: '',
+    containerDataset: {},
+    historyResources: [
+      {
+        name: 'https://www.zhipin.com/wapi/zpchat/geek/historyMsg?bossId=current-peer'
+      },
+      {
+        name: 'https://cdn.example.invalid/wapi/zpchat/geek/historyMsg?bossId=stale-peer'
+      }
+    ],
+    friends: [
+      { encryptUid: 'current-peer', name: '示例HR', brandName: '示例公司' },
+      { encryptUid: 'stale-peer', name: '其他HR', brandName: '其他公司' }
+    ]
+  });
+  const result = await h.dispatch({ type: 'CAPTURE_ACTIVE_CONVERSATION' });
+  assert.equal(result.success, true);
+  assert.equal(result.conversationRef.conversationId, 'current-peer');
+});
+
+test('CAPTURE rejects ambiguous Boss history ids without independent ownership', async () => {
+  const h = createHarness({
+    activeDataset: {},
+    activeLinkDataset: {},
+    activeHref: '',
+    containerDataset: {},
+    historyResources: [
+      {
+        name: 'https://www.zhipin.com/wapi/zpchat/geek/historyMsg?bossId=older-peer'
+      },
+      {
+        name: 'https://www.zhipin.com/wapi/zpchat/geek/historyMsg?bossId=current-peer'
+      }
+    ],
+    friends: [
+      { encryptUid: 'older-peer', name: '旧HR', brandName: '旧公司' },
+      { encryptUid: 'current-peer', name: '示例HR', brandName: '示例公司' }
+    ]
+  });
+  const result = await h.dispatch({ type: 'CAPTURE_ACTIVE_CONVERSATION' });
+  assert.equal(result.success, false);
+  assert.equal(result.errorCode, 'TARGET_UNCERTAIN');
+});
+
+test('CAPTURE rejects malformed matching history resources instead of using an older id', async () => {
+  const h = createHarness({
+    activeDataset: {},
+    activeLinkDataset: {},
+    activeHref: '',
+    containerDataset: {},
+    historyResources: [
+      {
+        name: 'https://www.zhipin.com/wapi/zpchat/geek/historyMsg?bossId=older-peer'
+      },
+      {
+        name: 'https://www.zhipin.com/wapi/zpchat/geek/historyMsg' +
+          '?bossId=current-peer&bossId=other-peer'
+      }
+    ],
+    friends: [
+      { encryptUid: 'older-peer', name: '旧HR', brandName: '旧公司' },
+      { encryptUid: 'current-peer', name: '示例HR', brandName: '示例公司' }
+    ]
+  });
+  const result = await h.dispatch({ type: 'CAPTURE_ACTIVE_CONVERSATION' });
+  assert.equal(result.success, false);
+  assert.equal(result.errorCode, 'TARGET_UNCERTAIN');
+});
+
+test('CAPTURE prefers the page uid over an older history resource', async () => {
+  const h = createHarness({
+    activeDataset: {},
+    activeLinkDataset: {},
+    activeHref: '',
+    containerDataset: {},
+    locationHref: 'https://www.zhipin.com/web/geek/chat?uid=current-peer',
+    historyResources: [{
+      name: 'https://www.zhipin.com/wapi/zpchat/geek/historyMsg?bossId=older-peer'
+    }],
+    friends: [
+      { encryptUid: 'older-peer', name: '旧HR', brandName: '旧公司' },
+      { encryptUid: 'current-peer', name: '示例HR', brandName: '示例公司' }
+    ]
+  });
+  const result = await h.dispatch({ type: 'CAPTURE_ACTIVE_CONVERSATION' });
+  assert.equal(result.success, true);
+  assert.equal(result.conversationRef.conversationId, 'current-peer');
 });
 
 test('CAPTURE rejects when the active conversation has no identity text', async () => {

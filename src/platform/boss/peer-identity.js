@@ -73,18 +73,34 @@
     return out;
   }
 
+  function friendPosition(friend) {
+    if (!friend || typeof friend !== 'object') return '';
+    var keys = ['jobName', 'positionName', 'position', 'jobTitle', 'title'];
+    for (var i = 0; i < keys.length; i++) {
+      var key = keys[i];
+      if (!Object.prototype.hasOwnProperty.call(friend, key)) continue;
+      var value = friend[key];
+      if (typeof value === 'string' && value.trim()) return value.trim().slice(0, 80);
+    }
+    return '';
+  }
+
   function sanitizeFriend(friend) {
     if (!friend || typeof friend !== 'object' || Array.isArray(friend)) return null;
     var ids = friendIdentityValues(friend);
     if (!ids.length) return null;
     var encryptUid = asPeerId(friend.encryptUid);
+    var position = friendPosition(friend);
+    // title 在 Boss 好友里常是「HR/招聘者」，不能当岗位名
+    if (position && /^(HR|hr|招聘者|人事|猎头)$/.test(position)) position = '';
     return {
       encryptUid: encryptUid,
       ids: ids,
       name: typeof friend.name === 'string' ? friend.name.slice(0, 80) : '',
       company: typeof friend.brandName === 'string'
         ? friend.brandName.slice(0, 80)
-        : (typeof friend.company === 'string' ? friend.company.slice(0, 80) : '')
+        : (typeof friend.company === 'string' ? friend.company.slice(0, 80) : ''),
+      position: position
     };
   }
 
@@ -139,7 +155,8 @@
       aliases: aliases,
       peerSource: 'encryptUid',
       matchedName: friend.name,
-      matchedCompany: friend.company
+      matchedCompany: friend.company,
+      matchedPosition: friend.position || ''
     };
   }
 

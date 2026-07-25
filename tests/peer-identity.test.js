@@ -14,7 +14,13 @@ test('resolves a unique friend match to encryptUid and keeps DOM id as alias', (
     domIds: ['dom-conv-1'],
     origin: 'https://www.zhipin.com',
     friends: [
-      { encryptUid: 'peer~~abc', uid: 'dom-conv-1', name: '李经理', brandName: '甲公司' },
+      {
+        encryptUid: 'peer~~abc',
+        uid: 'dom-conv-1',
+        name: '李经理',
+        brandName: '甲公司',
+        jobName: '前端工程师'
+      },
       { encryptUid: 'other', uid: 'other-dom', name: '别人' }
     ]
   });
@@ -24,6 +30,18 @@ test('resolves a unique friend match to encryptUid and keeps DOM id as alias', (
   assert.equal(resolved.url, 'https://www.zhipin.com/web/geek/chat?uid=peer~~abc');
   assert.deepEqual(resolved.aliases, ['dom-conv-1']);
   assert.equal(resolved.peerSource, 'encryptUid');
+  assert.equal(resolved.matchedPosition, '前端工程师');
+  assert.equal(resolved.matchedCompany, '甲公司');
+});
+
+test('does not treat friend title HR as a job position', () => {
+  const resolved = Peer.resolvePeerIdentity({
+    domIds: ['dom-1'],
+    origin: 'https://www.zhipin.com',
+    friends: [{ encryptUid: 'peer~~1', uid: 'dom-1', title: 'HR', jobName: '' }]
+  });
+  assert.equal(resolved.ok, true);
+  assert.equal(resolved.matchedPosition, '');
 });
 
 test('fails closed on missing unique friend alignment', () => {

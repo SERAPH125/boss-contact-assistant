@@ -1258,6 +1258,25 @@
       });
     }
 
+    function removeConversation(conversationId) {
+      return serialized(async function () {
+        var loaded = await load();
+        var snapshot = loaded.snapshot;
+        var conversation = requireConversation(snapshot, conversationId);
+        var id = conversation.conversationId;
+        closeActiveApproval(snapshot, conversation, loaded.now);
+        Object.keys(snapshot.pendingApprovals || {}).forEach(function (approvalId) {
+          var approval = snapshot.pendingApprovals[approvalId];
+          if (approval && approval.conversationId === id) {
+            delete snapshot.pendingApprovals[approvalId];
+          }
+        });
+        delete snapshot.managedConversations[id];
+        await persist(snapshot);
+        return { ok: true, conversationId: id };
+      });
+    }
+
     return {
       getSnapshot: getSnapshot,
       saveSettings: saveSettings,
@@ -1273,7 +1292,8 @@
       pauseConversation: pauseConversation,
       resolveApprovalWithoutSend: resolveApprovalWithoutSend,
       recordNotificationAttempt: recordNotificationAttempt,
-      resetConversation: resetConversation
+      resetConversation: resetConversation,
+      removeConversation: removeConversation
     };
   }
 

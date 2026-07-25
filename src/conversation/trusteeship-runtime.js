@@ -228,6 +228,10 @@
         boundedString(message.conversationId, 128, false) &&
         typeof message.enabled === 'boolean';
     }
+    if (message.type === 'TRUSTEESHIP_REMOVE_CONVERSATION') {
+      return exactKeys(message, ['type', 'conversationId']) &&
+        boundedString(message.conversationId, 128, false);
+    }
     if (message.type === 'TRUSTEESHIP_OPEN_CONVERSATION') {
       return exactKeys(message, ['type', 'conversationId']) &&
         boundedString(message.conversationId, 128, false);
@@ -1002,6 +1006,26 @@
       }
     }
 
+    async function removeConversation(message) {
+      if (typeof message.conversationId !== 'string') {
+        return safeError('TRUSTEESHIP_CONVERSATION_INPUT_INVALID');
+      }
+      if (typeof store.removeConversation !== 'function') {
+        return safeError('CONVERSATION_NOT_REGISTERED');
+      }
+      try {
+        var removed = await store.removeConversation(message.conversationId);
+        return {
+          ok: true,
+          conversationId: removed && removed.conversationId
+            ? removed.conversationId
+            : message.conversationId
+        };
+      } catch (_) {
+        return safeError('CONVERSATION_NOT_REGISTERED');
+      }
+    }
+
     async function ensureActiveChatContent(tabId) {
       var ping = null;
       try {
@@ -1051,7 +1075,11 @@
         var captureCode = capture && READER_CODES.indexOf(capture.errorCode) !== -1
           ? capture.errorCode
           : 'TARGET_UNCERTAIN';
-        return safeError(captureCode);
+        var failed = safeError(captureCode);
+        if (capture && typeof capture.error === 'string' && capture.error.trim()) {
+          failed.detail = capture.error.trim().slice(0, 200);
+        }
+        return failed;
       }
       var conversationRef = capture.conversationRef;
       if (!conversationRef || typeof conversationRef.conversationId !== 'string') {
@@ -1156,6 +1184,7 @@
       if (input.type === 'TRUSTEESHIP_SAVE_SETTINGS') return saveSettings(input);
       if (input.type === 'TRUSTEESHIP_TEST_FEISHU') return testFeishu();
       if (input.type === 'TRUSTEESHIP_SET_CONVERSATION') return setConversation(input);
+      if (input.type === 'TRUSTEESHIP_REMOVE_CONVERSATION') return removeConversation(input);
       if (input.type === 'TRUSTEESHIP_REGISTER_ACTIVE') return registerActiveConversation(input);
       if (input.type === 'TRUSTEESHIP_LIST_APPROVALS') return listApprovals();
       if (input.type === 'TRUSTEESHIP_RESOLVE_APPROVAL') {

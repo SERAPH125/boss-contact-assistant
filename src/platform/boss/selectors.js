@@ -46,17 +46,40 @@
         '.position-name',
         '[class*="position-name"]'
       ].join(', '),
+      // 旧版多为 li.active > a[href*=/web/geek/chat]；现网多为可点击 .friend-content（未必有 geek/chat 锚点）
       conversationLink: [
         '.user-list-content li.active a[href*="/web/geek/chat"]',
         '.user-list-content .friend-content.active a[href*="/web/geek/chat"]',
-        '.friend-content.active a[href*="/web/geek/chat"]'
+        '.friend-content.active a[href*="/web/geek/chat"]',
+        '.user-list-content li.active a[href*="uid="]',
+        '.user-list-content .friend-content.active a[href*="uid="]',
+        '.friend-content.active a[href*="uid="]',
+        '.user-list-content .friend-content.active',
+        '.friend-content.active',
+        '.user-list-content li.active'
       ].join(', '),
-      messageList: '.chat-message-list',
-      messageItem: '.chat-message-list .item',
-      messageIncoming: '.chat-message-list .item-friend',
-      messageOutgoing: '.chat-message-list .item-myself',
-      messageText: '.message-content .text, .message-text',
-      messageTime: 'time, [data-time]'
+      // 旧版 .chat-message-list；现网常见 .chat-record + .message-item
+      messageList: '.chat-message-list, .chat-record',
+      messageItem: [
+        '.chat-message-list .item',
+        '.chat-message-list .message-item',
+        '.chat-record .message-item',
+        '.chat-record .item'
+      ].join(', '),
+      messageIncoming: [
+        '.chat-message-list .item-friend',
+        '.chat-message-list .message-item.item-friend',
+        '.chat-record .item-friend',
+        '.chat-record .message-item.item-friend'
+      ].join(', '),
+      messageOutgoing: [
+        '.chat-message-list .item-myself',
+        '.chat-message-list .message-item.item-myself',
+        '.chat-record .item-myself',
+        '.chat-record .message-item.item-myself'
+      ].join(', '),
+      messageText: '.message-content .text, .message-content > .text, .message-text, .text',
+      messageTime: 'time, [data-time], .item-time .time, .item-time time, .time'
     }
   };
 

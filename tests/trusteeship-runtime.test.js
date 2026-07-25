@@ -78,6 +78,7 @@ function controllerHarness(overrides) {
     clear: [],
     create: [],
     setManaged: [],
+    removeConversation: [],
     run: 0,
     resolve: [],
     saveApi: [],
@@ -101,6 +102,16 @@ function controllerHarness(overrides) {
       }
       snapshot.managedConversations[id].enabled = enabled;
       return structuredClone(snapshot.managedConversations[id]);
+    },
+    async removeConversation(id) {
+      calls.removeConversation.push(id);
+      if (!snapshot.managedConversations[id]) {
+        const error = new Error('missing');
+        error.code = 'CONVERSATION_NOT_FOUND';
+        throw error;
+      }
+      delete snapshot.managedConversations[id];
+      return { ok: true, conversationId: id };
     }
   };
   const chromeApi = source.chromeApi || {
@@ -167,6 +178,7 @@ test('high-privilege message schemas reject extra keys, oversized identifiers, a
     },
     { type: 'TRUSTEESHIP_TEST_FEISHU' },
     { type: 'TRUSTEESHIP_SET_CONVERSATION', conversationId: 'conv-1', enabled: true },
+    { type: 'TRUSTEESHIP_REMOVE_CONVERSATION', conversationId: 'conv-1' },
     { type: 'TRUSTEESHIP_LIST_APPROVALS' },
     {
       type: 'TRUSTEESHIP_RESOLVE_APPROVAL',
@@ -200,7 +212,10 @@ test('high-privilege message schemas reject extra keys, oversized identifiers, a
     },
     { type: 'TRUSTEESHIP_REGISTER_ACTIVE' },
     { type: 'TRUSTEESHIP_REGISTER_ACTIVE', enable: true, extra: true },
-    { type: 'TRUSTEESHIP_REGISTER_ACTIVE', enable: 'yes' }
+    { type: 'TRUSTEESHIP_REGISTER_ACTIVE', enable: 'yes' },
+    { type: 'TRUSTEESHIP_REMOVE_CONVERSATION' },
+    { type: 'TRUSTEESHIP_REMOVE_CONVERSATION', conversationId: 'x'.repeat(129) },
+    { type: 'TRUSTEESHIP_REMOVE_CONVERSATION', conversationId: 'conv-1', extra: true }
   ].forEach((message) => assert.equal(Runtime.validateUserMessage(message), false));
 });
 
@@ -1500,6 +1515,22 @@ test('REGISTER_ACTIVE captures the focused Boss chat tab and optionally enables 
   assert.equal(failed.code, 'ACTIVE_CHAT_REQUIRED');
   assert.equal(missing.ok, true);
   assert.equal(missing.alreadyRegistered, true);
+});
+
+test('REMOVE_CONVERSATION deletes a registered conversation from the store', async () => {
+  const h = controllerHarness();
+  const removed = await h.controller.handleMessage({
+    type: 'TRUSTEESHIP_REMOVE_CONVERSATION',
+    conversationId: 'conv-1'
+  });
+  assert.deepEqual(removed, { ok: true, conversationId: 'conv-1' });
+  assert.deepEqual(h.calls.removeConversation, ['conv-1']);
+  const missing = await h.controller.handleMessage({
+    type: 'TRUSTEESHIP_REMOVE_CONVERSATION',
+    conversationId: 'conv-1'
+  });
+  assert.equal(missing.ok, false);
+  assert.equal(missing.code, 'CONVERSATION_NOT_REGISTERED');
 });
 
 test('classifier uses ReplyAI builders/parsers and resume facts read one bounded config snapshot', async () => {

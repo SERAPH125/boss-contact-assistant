@@ -172,26 +172,26 @@ Task 7 组合层必须保持一个后台 Worker、一个共享 storage 对象和
 
 `src/platform/boss/peer-identity.js` 负责纯函数解析：`resolvePeerIdentity({ domIds, friends, origin })` → `{ peerId, url, aliases, peerSource: 'encryptUid' }`。`src/platform/boss/conversation-reader.js` 仍是零 DOM、零网络模块，只从页面 URL / 活动链接 / dataset 抽取原始 `conversationId` 或 `uid`；公司、岗位、HR、预览文本不能生成会话 ID。
 
-- 页面和活动链接必须是 HTTPS 的 `*.zhipin.com`，原始路径必须精确为 `/web/geek/chat`；根域名、尾随/额外路径、点段、反斜杠、其他主机和不安全 ID 均拒绝。ID 接受 `[A-Za-z0-9_~-]{1,128}`（兼容开源实测含 `~` 的 encryptUid）。多个来源出现不同 ID 时返回 `null`。
+- 页面和活动链接必须是 HTTPS 的 `*.zhipin.com`，原始路径必须精确为 `/web/geek/chat`；根域名、尾随/额外路径、点段、反斜杠、其他主机和不安全 ID 均拒绝。ID 接受 `[A-Za-z0-9_~-]{1,128}`（兼容开源实测含 `~` 的 encryptUid）。多个来源出现不同 ID 时返回 `null`。空 `activeHref` 视为未提供（现网 `.friend-content` 常无 geek/chat 锚点）。消息容器兼容 `.chat-message-list` 与 `.chat-record`；在单活动会话 + 单容器且无共享 dataset/ARIA 时，页面 URL 的 `uid` 是优先软归属标识。仅当 Resource Timing 中所有同源、HTTPS、精确 `/wapi/zpchat/geek/historyMsg` 请求都收敛到同一个安全 `bossId` 时，才允许用该 ID 兜底；外域伪装路径、重复参数和多个不同历史 ID 均拒绝。
 - DOM reader 输出 `{ conversationId, url }`；登记/托管前由 peer resolver 归一为 `{ conversationId: peerId, url: ?uid=peerId, aliases }`。
-- `normalizeMessages` 只处理数组或对象形式的 array-like 输入，最多检查最近 200 个原始项；方向必须明确为 `incoming` 或 `outgoing`，类型只允许 `text`、`image`、`attachment`、`voice`。文本最多 600 个 Unicode code points；非文本消息保留类型但清空文本，不保留附件、图片、语音或头像 URL。撤回、时间分隔、未知方向/类型全部忽略。
-- 指纹优先使用明确且安全的消息 ID；否则必须有有限、非负且不超过 `Number.MAX_SAFE_INTEGER` 的整数稳定时间，再以方向、类型、文本和时间做确定性非明文哈希。无 ID 且时间缺失/不安全的消息直接丢弃；同一批中任何重复或碰撞指纹的全部候选均丢弃，禁止反向猜测。输出 `at` 只能是该安全整数或 `null`。
+- 纯函数 `normalizeMessages` 只处理数组或对象形式的 array-like 输入，最多检查最近 200 个原始项；方向必须明确为 `incoming` 或 `outgoing`，类型只允许 `text`、`image`、`attachment`、`voice`。文本最多 600 个 Unicode code points；非文本消息保留类型但清空文本，不保留附件、图片、语音或头像 URL。撤回、时间分隔、未知方向/类型在纯归一化边界被忽略；DOM strict reader 对已由 `messageItem` 选中的节点要求方向和结构全部可确认，任一未分类节点都返回 `MESSAGE_ORDER_UNCERTAIN`。
+- 指纹优先使用明确且安全的消息 ID；否则必须有有限、非负且不超过 `Number.MAX_SAFE_INTEGER` 的整数稳定时间，再以方向、类型、文本和时间做确定性非明文哈希。无 ID 且时间缺失/不安全的消息直接丢弃；同一批中任何重复或碰撞指纹的全部候选均丢弃，禁止反向猜测。输出 `at` 只能是该安全整数或 `null`。页面存在可靠 outgoing 节点但确无 incoming 候选和未分类节点时可以登记空 incoming baseline；只要任一 incoming 候选无法生成唯一可靠指纹，或任一消息节点方向/结构无法确认，就返回 `MESSAGE_ORDER_UNCERTAIN`，禁止用空 baseline 代替未知历史游标。
 - `selectNewIncoming` 只返回基线之后的 incoming，保持页面顺序且每轮最多 20 条；找不到非空基线时返回空数组，不重放整段历史。纯 API 省略第二参数时仍只返回最后 20 条供显式初始化；传入明确空串表示“此前没有 incoming”，从第一条开始按 20 条分页。
 
 Boss chat content script 失败关闭的消息契约：
 
 | 消息 | 前置校验与结果 |
 | --- | --- |
-| `GET_ACTIVE_CONVERSATION_REF` | 要求恰好一个可见 active link 和一个可见 `.chat-message-list`，并通过相同 `conversationId`/`uid` dataset、`aria-controls` 或 `aria-labelledby` 之一证明归属；身份文本只读取唯一 active item 和 owned pane 内 header |
+| `GET_ACTIVE_CONVERSATION_REF` | 要求恰好一个可见活动会话节点（旧版 active link，或无锚点的 `.friend-content` / active item）和一个可见消息容器（`.chat-message-list` 或 `.chat-record`）。优先通过相同 `conversationId`/`uid` dataset、`aria-controls` 或 `aria-labelledby` 证明归属；缺少这些关系时只接受页面 `uid`，或唯一且严格校验的同源 `historyMsg?bossId=` 软标识；身份文本只读取唯一 active item 和 owned pane 内 header |
 | `CAPTURE_ACTIVE_CONVERSATION` / `PROBE_PEER_IDENTITY` | 在 owned 活动会话上读取 DOM ID，再请求 `getGeekFriendList.json` 唯一对齐 `encryptUid`；成功返回 canonical `?uid=` ref 与 aliases；失败不写 store |
 | `READ_ACTIVE_CONVERSATION` | 在上述校验外要求登记 peerId 或 aliases 命中当前 DOM ID，并要求调用对象自有的字符串 `lastFingerprint`；返回给 engine 的 ref 使用 canonical peerId/URL。没有 incoming 时 GET 返回空串（绝不返回 `null`），可原样传给 READ；遗漏/非字符串返回 `BASELINE_REQUIRED`，非空基线必须命中 incoming，否则返回 `BASELINE_NOT_FOUND` |
 | `SEND_MANAGED_REPLY` | Enter 和 fallback button 每次动作前同步重验 ref、身份和同一个 owned scope，证据后再次重验；fallback 还要求输入框与按钮都是最初对象且输入内容精确等于冻结草稿，任一变化都不点击；发送前记录 scoped outgoing 指纹，发送后只接受同目标 owned container 中新增且文案等于草稿的唯一 outgoing 气泡 |
 
 READ 每页最多返回最早的 20 条新增 incoming，并只把 cursor 推进到本页最后返回项；下一轮可继续读取余量，不跳到页面末尾。outgoing 指纹不能充当 incoming cursor。SEND 成功必须同时返回非空 `sentFingerprint`、精确 `targetConversationId` 和有限正数 `observedAt`。动作前目标已变化返回 `TARGET_UNCERTAIN` 且不触发动作；Enter 已触发后如 fallback 发现控件或草稿变化，以及其后发生目标变化、scoped read 失败或没有新匹配气泡，一律返回 `SEND_RESULT_UNKNOWN` 且不重试。
 
-固定选择器缺失或消息结构不能明确识别时返回 `SELECTOR_UNAVAILABLE`；ref、归属或身份不一致及多可见 link/container 时返回 `TARGET_UNCERTAIN`。managed 登录失效与页面阻止分别稳定返回 `LOGIN_REQUIRED` 和 `BOSS_BLOCKED`，所有 managed 失败都包含 `success: false` 与 `errorCode`。不得改用全页面任意 `.item`、任意文本节点或第一条会话兜底。既有 `SEND` / `SEND_ACTIVE` 行为保持：一次联系已有肯定发送结果后，只有 ref、身份和当前消息基线都可靠时才附加 `conversationRef` 与 `baselineIncomingFingerprint`；附加元数据失败不会追溯改变本次联系成功结果，只会使该会话不可登记托管。
+固定选择器缺失时返回 `SELECTOR_UNAVAILABLE`；已选消息节点的方向、结构、incoming 指纹或顺序不能全部可靠确认时返回 `MESSAGE_ORDER_UNCERTAIN`；ref、归属或身份不一致及多可见活动节点/容器时返回 `TARGET_UNCERTAIN`。managed 登录失效与页面阻止分别稳定返回 `LOGIN_REQUIRED` 和 `BOSS_BLOCKED`，所有 managed 失败都包含 `success: false` 与 `errorCode`。不得改用全页面任意 `.item`、任意文本节点或第一条会话兜底。既有 `SEND` / `SEND_ACTIVE` 行为保持：一次联系已有肯定发送结果后，只有 ref、身份和当前消息基线都可靠时才附加 `conversationRef` 与 `baselineIncomingFingerprint`；附加元数据失败不会追溯改变本次联系成功结果，只会使该会话不可登记托管。
 
-`tests/fixtures/boss-chat/*.json` 全部是脱敏的合成中间数据；`tests/boss-content-chat.test.js` 使用最小 VM/fake DOM 加载真实生产脚本并调用实际注册的 runtime handler，覆盖 hidden decoy、多可见容器、显式归属、baseline 分页、发送前/后切换目标及新 outgoing 证据。它们仍不代表当前 Boss DOM 已验收。当前仓库没有可核对 `conversationId` / `uid` 实际来源及消息 DOM 的脱敏页面快照，本任务也未获授权访问真实 Boss；因此固定选择器和稳定 ID/ownership 来源必须在后续测试账号中做只读验证。未验证前，任何不匹配都按不可托管处理，不扩大选择器。
+`tests/fixtures/boss-chat/*.json` 全部是脱敏的合成中间数据；`tests/boss-content-chat.test.js` 使用最小 VM/fake DOM 加载真实生产脚本并调用实际注册的 runtime handler，覆盖 hidden decoy、多可见容器、显式/软归属、跨域与多 ID history 资源、不可追踪 incoming、未分类消息节点、baseline 分页、发送前/后切换目标及新 outgoing 证据。它们仍不代表当前 Boss DOM 已验收。当前仓库没有可核对 `conversationId` / `uid` 实际来源及消息 DOM 的脱敏页面快照，本任务也未获授权访问真实 Boss；因此固定选择器和稳定 ID/ownership 来源必须在后续测试账号中做只读验证。未验证前，任何不匹配都按不可托管处理，不扩大选择器。
 
 ## 飞书通知、签名与凭证边界
 
@@ -221,6 +221,7 @@ Chrome alarm 固定为 `boss-ai-chat-monitor`。Worker 初始化、`runtime.onIn
 | `TRUSTEESHIP_SAVE_SETTINGS` | 只保存本地设置；间隔不是 5/10/15 时返回 `TRUSTEESHIP_INTERVAL_INVALID`；响应中的飞书只包含 `hasWebhook` / `hasSigningSecret` 与测试状态 |
 | `TRUSTEESHIP_TEST_FEISHU` | 唯一直接发送“测试卡片”的入口；只在用户显式消息触发后更新 `lastTestOk` / `lastTestAt`，返回稳定码且不返回凭证或响应体 |
 | `TRUSTEESHIP_SET_CONVERSATION` | 只接受单个已经可靠登记的 `conversationId` 和布尔 `enabled`；不存在“全部开启”协议 |
+| `TRUSTEESHIP_REMOVE_CONVERSATION` | 彻底删除已登记会话及其关联待确认记录；侧栏「从列表移除」使用 |
 | `TRUSTEESHIP_REGISTER_ACTIVE` | 用户显式操作：读取当前聚焦窗口中活动的 Boss 聊天页，捕获可靠会话标识与基线后登记；`enable: true` 时立即开启该岗位托管；不降低策略门，不打开新标签 |
 | `TRUSTEESHIP_LIST_APPROVALS` | 只返回最多 100 个本地 `PENDING` 待办；每个最多 20 条、每条 600 字符的上下文以及 300 code points 草稿，不含任何凭证 |
 | `TRUSTEESHIP_RESOLVE_APPROVAL` | 原样委托同一个 engine 的串行 `resolveApproval()` |

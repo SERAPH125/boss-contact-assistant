@@ -226,6 +226,15 @@
     };
   }
 
+  function messageOrderFailure(error) {
+    return {
+      success: false,
+      errorCode: 'MESSAGE_ORDER_UNCERTAIN',
+      messageOrderUncertain: true,
+      error: error
+    };
+  }
+
   function managedPreflight() {
     const login = detectLoginIssue();
     if (login) {
@@ -334,25 +343,92 @@
     return parts.join(' | ').slice(0, 1200);
   }
 
+  function elementHref(element) {
+    if (!element) return '';
+    if (typeof element.href === 'string' && element.href) return element.href;
+    try {
+      const attr = element.getAttribute && element.getAttribute('href');
+      return typeof attr === 'string' ? attr : '';
+    } catch (_) {
+      return '';
+    }
+  }
+
+  // conversationLink 可能同时命中父级 .friend-content 与内部 a，只保留最内层节点。
+  function preferInnermostNodes(nodes) {
+    return nodes.filter((node) =>
+      !nodes.some((other) =>
+        other !== node &&
+        typeof node.contains === 'function' &&
+        node.contains(other)
+      )
+    );
+  }
+
+  // 现网活动会话常无 DOM dataset；仅唯一、同源、精确路径的 historyMsg
+  // 请求可作为软标识，避免 SPA 资源历史把旧会话误绑为当前会话。
+  function extractBossIdFromHistoryRequests() {
+    try {
+      if (typeof performance === 'undefined' ||
+          typeof performance.getEntriesByType !== 'function') {
+        return '';
+      }
+      const pageOrigin = new URL(location.href || '').origin;
+      const ids = [];
+      const entries = performance.getEntriesByType('resource');
+      for (let i = 0; i < entries.length; i++) {
+        const name = entries[i] && entries[i].name ? String(entries[i].name) : '';
+        let resource;
+        try {
+          resource = new URL(name);
+        } catch (_) {
+          continue;
+        }
+        if (resource.protocol !== 'https:' ||
+            resource.origin !== pageOrigin ||
+            resource.pathname !== '/wapi/zpchat/geek/historyMsg') {
+          continue;
+        }
+        const values = resource.searchParams.getAll('bossId');
+        if (values.length !== 1 || !/^[A-Za-z0-9_~-]{1,128}$/.test(values[0])) {
+          return '';
+        }
+        ids.push(values[0]);
+      }
+      const unique = Array.from(new Set(ids));
+      return unique.length === 1 ? unique[0] : '';
+    } catch (_) {}
+    return '';
+  }
+
   function resolveOwnedConversation() {
     if (typeof BossConversationReader === 'undefined') {
       return selectorFailure('Boss 会话读取器不可用');
     }
     const linkSelector = SELECTORS.chat.conversationLink;
+    const activeSelector = SELECTORS.chat.activeUser;
     const listSelector = SELECTORS.chat.messageList;
-    if (!linkSelector || !listSelector) {
+    if (!listSelector || (!linkSelector && !activeSelector)) {
       return selectorFailure('活动会话或消息容器选择器不可用');
     }
     let links;
     let containers;
     try {
-      links = Array.from(document.querySelectorAll(linkSelector)).filter(isVisible);
-      containers = Array.from(document.querySelectorAll(listSelector)).filter(isVisible);
+      links = linkSelector
+        ? Array.from(document.querySelectorAll(linkSelector)).filter(isVisible)
+        : [];
+      if (!links.length && activeSelector) {
+        links = Array.from(document.querySelectorAll(activeSelector)).filter(isVisible);
+      }
+      links = preferInnermostNodes(links);
+      containers = preferInnermostNodes(
+        Array.from(document.querySelectorAll(listSelector)).filter(isVisible)
+      );
     } catch (e) {
       return selectorFailure('活动会话或消息容器选择器不可用');
     }
     if (!links.length || !containers.length) {
-      return selectorFailure('未找到明确的活动会话链接');
+      return selectorFailure('未找到明确的活动会话或消息容器');
     }
     if (links.length !== 1 || containers.length !== 1) {
       return targetFailure('页面存在多个可见活动会话或消息容器');
@@ -360,7 +436,10 @@
     const link = links[0];
     const container = containers[0];
     const activeItem = typeof link.closest === 'function'
-      ? (link.closest('li.active') || link)
+      ? (link.closest('li.active') ||
+        link.closest('.friend-content.active') ||
+        link.closest('.friend-content') ||
+        link)
       : link;
     const pane = container.parentElement;
     if (!pane) return selectorFailure('目标会话消息容器缺少明确父级面板');
@@ -370,17 +449,42 @@
     if (!activeIds || !containerIds) {
       return targetFailure('活动会话或消息容器标识不安全');
     }
-    const activeDataset = uniqueDataset(activeIds);
+    let activeDataset = uniqueDataset(activeIds);
     if (!activeDataset) return targetFailure('活动会话存在冲突标识');
-    if (!hasOwnedRelation(link, activeItem, container, activeIds, containerIds)) {
-      return targetFailure('活动会话与消息容器缺少明确归属关系');
+
+    const historyBossId = extractBossIdFromHistoryRequests();
+    const pageOnlyRef = BossConversationReader.extractConversationRef({
+      pageUrl: location.href || ''
+    });
+    const softId = (pageOnlyRef && pageOnlyRef.conversationId) || historyBossId || '';
+    const ownedByRelation = hasOwnedRelation(
+      link, activeItem, container, activeIds, containerIds
+    );
+    // 现网常见：单活动会话 + 单消息容器，但两侧无共享 dataset/ARIA。
+    // 仅当页面 URL 或 historyMsg bossId 能提供稳定 ID，且不与两侧 dataset 冲突时放行。
+    if (!ownedByRelation) {
+      if (!softId) {
+        return targetFailure('活动会话与消息容器缺少明确归属关系');
+      }
+      const activeId = activeDataset.conversationId || activeDataset.uid || '';
+      if (activeId && activeId !== softId) {
+        return targetFailure('活动会话标识与页面/history 不一致');
+      }
+      if (containerIds.some((item) => item.value !== softId)) {
+        return targetFailure('消息容器标识与活动会话不一致');
+      }
+      if (!activeDataset.conversationId && !activeDataset.uid) {
+        activeDataset = Object.assign({}, activeDataset, { uid: softId });
+      }
     }
 
-    const ref = BossConversationReader.extractConversationRef({
+    const activeHref = elementHref(link);
+    const refInput = {
       pageUrl: location.href || '',
-      activeHref: link.href || '',
       activeDataset: activeDataset
-    });
+    };
+    if (activeHref) refInput.activeHref = activeHref;
+    const ref = BossConversationReader.extractConversationRef(refInput);
     if (!ref) {
       return targetFailure('当前活动会话缺少可靠标识，已停止托管操作');
     }
@@ -544,7 +648,8 @@
       peerSource: resolved.peerSource,
       domId: active.conversationRef.conversationId,
       matchedName: resolved.matchedName || '',
-      matchedCompany: resolved.matchedCompany || ''
+      matchedCompany: resolved.matchedCompany || '',
+      matchedPosition: resolved.matchedPosition || ''
     };
   }
 
@@ -575,6 +680,7 @@
     }
     if (!nodes.length) return selectorFailure('未找到目标会话消息列表');
 
+    let hasUnclassifiedNode = false;
     const rawItems = nodes.slice(-200).map((node) => {
       let incoming = false;
       let outgoing = false;
@@ -582,9 +688,13 @@
         incoming = node.matches(SELECTORS.chat.messageIncoming);
         outgoing = node.matches(SELECTORS.chat.messageOutgoing);
       } catch (e) {
+        hasUnclassifiedNode = true;
         return null;
       }
-      if (incoming === outgoing) return null;
+      if (incoming === outgoing) {
+        hasUnclassifiedNode = true;
+        return null;
+      }
 
       let textElement = null;
       let timeElement = null;
@@ -592,12 +702,27 @@
         textElement = node.querySelector(SELECTORS.chat.messageText);
         timeElement = node.querySelector(SELECTORS.chat.messageTime);
       } catch (e) {
+        hasUnclassifiedNode = true;
         return null;
       }
       const explicitKind = node.dataset && node.dataset.kind;
       const kind = explicitKind || (textElement ? 'text' : '');
+      let messageId = '';
+      try {
+        if (node.dataset) {
+          messageId = node.dataset.messageId || node.dataset.mid ||
+            node.dataset.msgId || node.dataset.id || '';
+        }
+        if (!messageId && node.getAttribute) {
+          messageId = node.getAttribute('data-mid') ||
+            node.getAttribute('data-msg-id') ||
+            node.getAttribute('data-message-id') || '';
+        }
+      } catch (_) {
+        messageId = '';
+      }
       return {
-        id: (node.dataset && (node.dataset.messageId || node.dataset.id)) || '',
+        id: typeof messageId === 'string' ? messageId : '',
         direction: incoming ? 'incoming' : 'outgoing',
         kind: kind,
         text: textElement ? (textElement.textContent || '') : '',
@@ -605,8 +730,25 @@
       };
     }).filter(Boolean);
 
+    if (hasUnclassifiedNode) {
+      return messageOrderFailure('存在方向或结构无法确认的历史消息节点，已停止读取');
+    }
     const messages = BossConversationReader.normalizeMessages(rawItems);
+    const rawIncomingCount = rawItems.filter((item) =>
+      item.direction === 'incoming'
+    ).length;
+    const reliableIncomingCount = messages.filter((item) =>
+      item.direction === 'incoming'
+    ).length;
+    if (reliableIncomingCount !== rawIncomingCount) {
+      return messageOrderFailure('存在无法建立可靠游标的历史来信，已停止读取');
+    }
     if (!messages.length) {
+      // 现网常见：消息只有中文相对时间、无 mid/data-time，无法建可靠 cursor；
+      // 只有不存在 incoming 候选时才允许空基线，避免后续把历史来信当成新消息。
+      if (rawItems.length > 0) {
+        return { success: true, messages: [] };
+      }
       return selectorFailure('消息结构无法可靠识别，已停止读取');
     }
     return { success: true, messages: messages };
@@ -763,6 +905,14 @@
       .slice(0, 200);
   }
 
+  function cleanPositionText(value) {
+    const text = String(value || '').replace(/\s+/g, ' ').trim();
+    if (!text) return '';
+    // 保留薪资/城市后缀（如「跨境电商运营 9-14K 杭州」）；仅过滤明显非岗位文案
+    if (/^(HR|hr|招聘者|人事|猎头)$/.test(text)) return '';
+    return text.slice(0, 80);
+  }
+
   function extractActiveIdentity(scope) {
     let hrName = '';
     let company = '';
@@ -776,15 +926,39 @@
       }
     } catch (_) {}
     try {
-      const positionNode = scope.pane.querySelector(
-        '.position-name, [class*="position-name"], .base-info, [class*="base-info"]'
-      );
-      position = textOf(positionNode);
+      const positionSelectors = [
+        '.position-name',
+        '[class*="position-name"]',
+        '.chat-position',
+        '[class*="chat-position"]',
+        '.job-name',
+        'a[href*="/job_detail/"]',
+        '.base-info .name',
+        '.base-info [class*="position"]',
+        '[class*="base-info"] [class*="position"]',
+        '.chat-info [class*="job"]',
+        '.chat-top [class*="position"]',
+        '.conversation-title'
+      ].join(', ');
+      const nodes = Array.from(scope.pane.querySelectorAll(positionSelectors));
+      for (let i = 0; i < nodes.length; i++) {
+        if (!isVisible(nodes[i])) continue;
+        const cleaned = cleanPositionText(textOf(nodes[i]));
+        if (!cleaned || cleaned === company || cleaned === hrName) continue;
+        // 排除明显是公司名/整段会话摘要的误匹配
+        if (company && cleaned.indexOf(company) >= 0 && cleaned.length <= company.length + 4) {
+          continue;
+        }
+        position = cleaned;
+        break;
+      }
     } catch (_) {}
     if (!hrName && !company && !position) {
       const fallback = textOf(scope.activeItem) || textOf(scope.link);
       company = fallback.slice(0, 80);
     }
+    company = company.replace(/\s*(招聘者|HR|人事)$/, '').trim().slice(0, 80);
+    if (position === company || position === hrName) position = '';
     return {
       company: company,
       position: position,
@@ -811,9 +985,9 @@
       conversationRef: peer.conversationRef,
       peerSource: peer.peerSource || 'encryptUid',
       baselineIncomingFingerprint: lastIncomingFingerprint(read.messages),
-      company: identity.company,
-      position: identity.position,
-      hrName: identity.hrName
+      company: identity.company || peer.matchedCompany || '',
+      position: identity.position || peer.matchedPosition || '',
+      hrName: identity.hrName || peer.matchedName || ''
     };
   }
 

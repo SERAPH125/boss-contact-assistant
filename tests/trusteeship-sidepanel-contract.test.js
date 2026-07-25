@@ -45,10 +45,12 @@ test('uses trusteeship messages and DOM-safe approval rendering', () => {
     'TRUSTEESHIP_GET_STATE', 'TRUSTEESHIP_SAVE_SETTINGS', 'TRUSTEESHIP_TEST_FEISHU',
     'TRUSTEESHIP_RUN_NOW', 'TRUSTEESHIP_LIST_APPROVALS',
     'TRUSTEESHIP_RESOLVE_APPROVAL', 'TRUSTEESHIP_OPEN_CONVERSATION',
-    'TRUSTEESHIP_SET_CONVERSATION', 'TRUSTEESHIP_REGISTER_ACTIVE'
+    'TRUSTEESHIP_SET_CONVERSATION', 'TRUSTEESHIP_REMOVE_CONVERSATION', 'TRUSTEESHIP_REGISTER_ACTIVE'
   ]) assert.match(script, new RegExp(type));
   assert.match(script, /从当前 Boss 聊天页登记/);
   assert.match(html, /从当前 Boss 聊天页登记/);
+  assert.match(script, /从列表移除/);
+  assert.match(css, /\.managed-remove/);
   assert.match(script, /function renderApprovals\(/);
   const rendererStart = script.indexOf('function renderApprovals(');
   const renderer = script.slice(rendererStart, script.indexOf('\nfunction setLoginBanner', rendererStart));
@@ -62,6 +64,9 @@ test('uses trusteeship messages and DOM-safe approval rendering', () => {
 test('has responsive approval and managed-conversation styling', () => {
   assert.match(css, /\.approval-card/);
   assert.match(css, /\.managed-conversation/);
+  assert.match(css, /\.managed-actions/);
+  assert.match(script, /TRUSTEESHIP_OPEN_CONVERSATION/);
+  assert.match(script, /打开会话/);
   assert.match(css, /@media\s*\(max-width:\s*600px\)/);
 });
 

@@ -319,6 +319,21 @@ test('disabling and resetting delete recent context and the active approval link
   );
 });
 
+test('removeConversation deletes the registration and linked approvals', async () => {
+  const harness = makeHarness();
+  await registerAndEnable(harness);
+  const approval = await createPendingApproval(harness, 'fp-remove', ['A']);
+  const removed = await harness.store.removeConversation('conv-1');
+  assert.deepEqual(removed, { ok: true, conversationId: 'conv-1' });
+  const snapshot = await harness.store.getSnapshot();
+  assert.equal(snapshot.managedConversations['conv-1'], undefined);
+  assert.equal(snapshot.pendingApprovals[approval.approvalId], undefined);
+  await assert.rejects(
+    () => harness.store.removeConversation('conv-1'),
+    (error) => error && error.code === 'CONVERSATION_NOT_FOUND'
+  );
+});
+
 test('persists one send intent before terminal evidence and consumes it once', async () => {
   const harness = makeHarness();
   await registerAndEnable(harness);
@@ -1345,6 +1360,7 @@ test('store exposes one notification transition API within the exact public meth
     'pauseConversation',
     'recordNotificationAttempt',
     'registerConversation',
+    'removeConversation',
     'resetConversation',
     'resolveApprovalWithoutSend',
     'saveSettings',

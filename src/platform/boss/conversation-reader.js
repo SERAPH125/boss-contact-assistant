@@ -83,7 +83,10 @@
     var candidates = [];
     collectUrlCandidates(pageUrl, candidates);
 
-    if (own(input, 'activeHref')) {
+    // 空 activeHref 视为未提供（现网 .friend-content 常无锚点）
+    if (own(input, 'activeHref') &&
+      typeof input.activeHref === 'string' &&
+      input.activeHref.trim() !== '') {
       var activeUrl = parseChatUrl(input.activeHref);
       if (!activeUrl || activeUrl.origin !== pageUrl.origin) return null;
       collectUrlCandidates(activeUrl, candidates);
