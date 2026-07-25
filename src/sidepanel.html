@@ -143,7 +143,7 @@
 
           <section class="setup-section" aria-labelledby="secResume">
             <h3 class="section-title" id="secResume">简历材料</h3>
-            <p class="hint">有 API Key 时用于 AI 筛选与招呼语。开启 AI 托管时：简历要点与「AI 托管 → HR 常用问答」至少填一项。图片可选，联系时发给 HR。</p>
+            <p class="hint">有 API Key 时用于 AI 筛选。开启 AI 托管时：简历要点与「AI 托管 → HR 常用问答」至少填一项（建联后的多轮回复会引用）。图片可选，联系时发给 HR。</p>
             <label for="resumeText">简历要点</label>
             <textarea id="resumeText" rows="5" placeholder="技能、项目、年限、城市偏好…建议按行写要点"></textarea>
             <label for="resumeImg">简历图片（可选）</label>
@@ -187,6 +187,7 @@
           <section class="setup-section" aria-labelledby="secGreeting">
             <h3 class="section-title" id="secGreeting">招呼语</h3>
             <label for="greetingTemplate">招呼语模板（本平台独立）</label>
+            <p class="hint">联系时原样发送（可用 {jobName} / {company}）。首条招呼不走 AI；建联后的 AI 托管才用个人情况做简短争取回复。</p>
             <textarea id="greetingTemplate" rows="3" placeholder="您好，我对贵司岗位很感兴趣…">您好，我对这个岗位很感兴趣，方便聊聊吗？</textarea>
           </section>
 

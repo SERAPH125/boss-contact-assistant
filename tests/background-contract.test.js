@@ -40,3 +40,8 @@ test('keeps prepared delivery confirmation while adding trusteeship dispatch', (
   assert.match(source, /msg\.type === 'CONFIRM_DELIVERY'/);
   assert.match(source, /msg\.type === 'START_DELIVER'[\s\S]{0,500}CONFIRMATION_REQUIRED/);
 });
+
+test('imports greeting template helper for contact greetings', () => {
+  assert.match(source, /['"]\/src\/greeting-template\.js['"]/);
+  assert.match(source, /GreetingTemplate\.renderGreetingTemplate/);
+});

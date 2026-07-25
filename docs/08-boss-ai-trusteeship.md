@@ -168,6 +168,8 @@ Task 7 组合层必须保持一个后台 Worker、一个共享 storage 对象和
 
 托管主键对齐开源实践：以好友列表 API 的 **`encryptUid` 作为 canonical peerId**（存储字段名仍为 `conversationId`），打开 URL 统一为 `?uid=<peerId>`；DOM 上的 `conversationId`/`uid` 仅作 `aliases`。读消息与发回复仍走 DOM owned-scope，**不引入 MQTT / 内部发信协议**。好友列表不可用或无法唯一对齐时，登记失败关闭（`PEER_LIST_UNAVAILABLE` / `PEER_ID_UNRESOLVED`），不得用未验证 DOM ID 冒充稳定主键。
 
+**首条招呼不由托管/联系 AI 生成**：联系流程只发送用户配置的招呼语模板（可含 `{jobName}` / `{company}`）。建联后的多轮草稿由 ReplyAI 生成，目标是简短争取继续沟通或面试机会；匹配不足时也表达想试一试，不得编造简历事实；薪资/面试/到岗等硬风险仍进待确认。
+
 `src/platform/boss/peer-identity.js` 负责纯函数解析：`resolvePeerIdentity({ domIds, friends, origin })` → `{ peerId, url, aliases, peerSource: 'encryptUid' }`。`src/platform/boss/conversation-reader.js` 仍是零 DOM、零网络模块，只从页面 URL / 活动链接 / dataset 抽取原始 `conversationId` 或 `uid`；公司、岗位、HR、预览文本不能生成会话 ID。
 
 - 页面和活动链接必须是 HTTPS 的 `*.zhipin.com`，原始路径必须精确为 `/web/geek/chat`；根域名、尾随/额外路径、点段、反斜杠、其他主机和不安全 ID 均拒绝。ID 接受 `[A-Za-z0-9_~-]{1,128}`（兼容开源实测含 `~` 的 encryptUid）。多个来源出现不同 ID 时返回 `null`。

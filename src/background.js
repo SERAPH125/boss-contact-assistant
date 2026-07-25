@@ -5,6 +5,7 @@ importScripts(
   '/src/platform/config.js',
   '/src/platform/boss/selectors.js',
   '/src/humanize.js',
+  '/src/greeting-template.js',
   '/src/run-safety.js',
   '/src/run-store.js',
   '/src/delivery-guard.js',
@@ -423,19 +424,12 @@ async function screenJob(cfg, job) {
   }
 }
 
-async function genGreetingFromJD(cfg, job, jd) {
-  const fallback = (cfg.greetingTemplate || '您好，我对这个岗位很感兴趣，方便聊聊吗？').trim();
-  if (!apiKeyOf(cfg) || !resumeFull(cfg)) return fallback;
-  const sys = '你是求职者本人，在招聘平台给HR发招呼语。回复会原样发给HR，严禁任何注释、说明、括号备注。\n【格式】1.开头前15字必须是"熟悉XXX、XXX"。2.紧接"做过XXX"。3.全文80-120字。';
-  const jdText = (jd && jd.trim()) ? jd.trim() : ('技能标签：' + (job.tags || []).join('、'));
-  const user = '我的简历：\n' + resumeFull(cfg) + '\n\n目标岗位：' + (job.name || '') + (job.company ? ('（' + job.company + '）') : '') + '\n该岗位JD：\n' + jdText + '\n\n直接输出招呼语本身。';
-  try {
-    const raw = await callLLM([{ role: 'system', content: sys }, { role: 'user', content: user }], 300);
-    return (raw || '').trim() || fallback;
-  } catch (e) {
-    log('  招呼语 AI 失败，改用模板：' + e.message, 'warn');
-    return fallback;
-  }
+// 首条招呼只用用户模板（支持 {jobName}/{company}），不再调用 LLM。
+function genGreetingFromJD(cfg, job) {
+  return GreetingTemplate.renderGreetingTemplate(
+    cfg && cfg.greetingTemplate,
+    job
+  );
 }
 
 async function ensureInjected(tabId, file, selectorsFile) {
@@ -947,8 +941,8 @@ async function runDeliver(jobIds, options) {
       }
       const jd = (jdr && jdr.jd) || '';
 
-      log('  生成招呼语…');
-      let greeting = await genGreetingFromJD(cfg, job, jd);
+      log('  使用招呼语模板…');
+      let greeting = genGreetingFromJD(cfg, job);
       checkpoint();
       if (!greeting) { recordFail(job, '招呼语为空'); log('  招呼语为空，跳过', 'warn'); progress(k + 1, ids.length, '联系'); continue; }
 
@@ -1011,7 +1005,7 @@ async function runDeliver(jobIds, options) {
       // 智联等：列表页已投递成功，无需进聊天页发招呼
       if (chatR && (chatR.skipChat || chatR.applied)) {
         recordOk(job);
-        log('  ✓ 已投递/联系（' + meta.short + ' 今日 ' + contactUsage.count + '/' + dailyLimit + '）' + (greeting ? '（招呼语已生成，网页未开聊则未发出）' : ''), 'success');
+        log('  ✓ 已投递/联系（' + meta.short + ' 今日 ' + contactUsage.count + '/' + dailyLimit + '）' + (greeting ? '（已按模板准备招呼语，网页未开聊则未发出）' : ''), 'success');
         progress(k + 1, ids.length, '联系');
       } else {
         await waitTabComplete(tab.id);

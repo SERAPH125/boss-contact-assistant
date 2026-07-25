@@ -112,6 +112,9 @@ test('draft prompt has the same bounded allowlisted context and approved categor
   assert.equal(messages.length, 2);
   assert.match(messages[0].content, /still_looking/);
   assert.match(messages[0].content, /deterministic policy is authoritative/i);
+  assert.match(messages[0].content, /争取岗位|win a chance|试一试|try/i);
+  assert.match(messages[0].content, /80 Chinese characters|简短|short/i);
+  assert.match(messages[0].content, /never invent|不得编造|only the supplied resume facts/i);
   assert.match(serialized, /resume-line-1/);
   assert.doesNotMatch(serialized, /api-key-secret|open\.feishu\.cn|消息 0/);
 });

@@ -79,19 +79,29 @@
   }
 
   function systemPrompt(kind) {
-    var task = kind === 'draft'
-      ? 'Draft a concise Chinese reply supported only by the supplied resume facts.'
-      : 'Classify the newest recruiter message using the supplied target conversation and resume facts.';
+    if (kind === 'draft') {
+      return [
+        'You are the job seeker in an ongoing Boss chat after the first greeting.',
+        'Goal: help win a chance to continue talking or interview — 争取岗位机会.',
+        'Draft one short Chinese reply. Prefer about 80 Chinese characters or fewer; never write a resume-style essay, bullet list, or long self-introduction.',
+        'Use only the supplied resume facts when stating experience; never invent skills, years, companies, or projects.',
+        'If facts are weak or the fit looks incomplete, do NOT refuse or sound cold — briefly show strong interest and ask for a try / chat / interview chance (想试一试、希望给一次机会).',
+        'The deterministic policy is authoritative. It runs after you and can reject every result.',
+        'Important topics including salary/薪资, interview/面试, arrival or start date/到岗, resignation, contact details, experience expansion, assessments, offers, or commitments cannot be auto-approved.',
+        'Use only approved categories: ' + CATEGORIES.join(', ') + '.',
+        'Return exactly one JSON object with no prose and no markdown fences.',
+        'Schema: {"draft":"nonempty string no longer than 300 Unicode code points","evidenceIds":["nonempty resume fact id"]}. Evidence IDs must be nonempty and unique.'
+      ].join('\n');
+    }
     return [
       'You are an assistant in a job-conversation workflow.',
-      task,
+      'Classify the newest recruiter message using the supplied target conversation and resume facts.',
+      'Do not treat a weak skill match as a reason to sound rejecting; low-risk courtesy questions stay in low-risk categories when appropriate.',
       'The deterministic policy is authoritative. It runs after you and can reject every result.',
       'Important topics including salary/薪资, interview/面试, arrival or start date/到岗, resignation, contact details, experience expansion, assessments, offers, or commitments cannot be auto-approved.',
       'Use only approved categories: ' + CATEGORIES.join(', ') + '.',
       'Return exactly one JSON object with no prose and no markdown fences.',
-      kind === 'draft'
-        ? 'Schema: {"draft":"nonempty string no longer than 300 Unicode code points","evidenceIds":["nonempty resume fact id"]}. Evidence IDs must be nonempty and unique.'
-        : 'Schema: {"category":"approved category","confidence":0..1,"reasonCode":"nonempty string","evidenceIds":["resume fact id"],"fieldsNeeded":["nonempty field name"]}. resume_fact requires evidenceIds.'
+      'Schema: {"category":"approved category","confidence":0..1,"reasonCode":"nonempty string","evidenceIds":["resume fact id"],"fieldsNeeded":["nonempty field name"]}. resume_fact requires evidenceIds.'
     ].join('\n');
   }
 

@@ -1165,7 +1165,7 @@ function renderDeliveryPlan(plan) {
       '<div><dt>今日额度</dt><dd>' + plan.usageCount + ' / ' + plan.dailyLimit + '，完成后剩 ' + plan.remainingAfter + '</dd></div>' +
       '<div><dt>预计等待</dt><dd>' + formatDurationRange(plan.estimatedMinSec, plan.estimatedMaxSec) + '</dd></div>' +
       '<div><dt>简历图片</dt><dd>' + resumeText + '</dd></div>' +
-      '<div><dt>招呼语</dt><dd>按当前平台配置生成</dd></div>' +
+      '<div><dt>招呼语</dt><dd>使用当前平台招呼语模板</dd></div>' +
     '</dl>';
   $('deliveryJobs').innerHTML = (plan.jobs || []).map((job) =>
     '<li><strong>' + esc(job.name) + '</strong><span>' + esc(job.company) + '</span></li>'
