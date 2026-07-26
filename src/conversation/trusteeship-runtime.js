@@ -738,7 +738,9 @@
           500,
           frozenConfig
         );
-        return replyAI.parseDraft(raw);
+        return replyAI.parseDraft(raw, {
+          category: input && input.classification && input.classification.category
+        });
       }
     };
   }

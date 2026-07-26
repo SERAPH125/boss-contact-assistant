@@ -49,11 +49,11 @@
 
 ## AI 分类与草稿契约
 
-`src/conversation/reply-ai.js` 是纯 UMD/CommonJS 提示词与 JSON 契约模块；它不调用 LLM、Chrome、Boss、飞书或网络，也不决定是否发送。`TrusteeshipPolicy` 的确定性风险门始终具有最高优先级：即使 AI 给出低风险结论，薪资、面试、到岗、离职、联系方式、经历扩展、测评/Offer/承诺等重要事项也绝不可自动批准。
+`src/conversation/reply-ai.js` 是纯 UMD/CommonJS 提示词与 JSON 契约模块；它不调用 LLM、Chrome、Boss、飞书或网络，也不决定是否发送。`TrusteeshipPolicy` 的确定性风险门始终具有最高优先级：即使 AI 给出低风险结论，薪资、面试、到岗、离职、联系方式、经历扩展、测评/Offer/承诺等重要事项也绝不可自动批准。明确拒绝是否成立只由 AI 语义分类判断；这里没有 HR 正文关键词、正则或本地分类覆盖。
 
-- `buildClassificationMessages(input)` 与 `buildDraftMessages(input)` 只读取并序列化目标岗位身份（公司、岗位、HR、岗位 ID）、最近 20 条目标会话消息（按原时间顺序，每条最多 600 字符）和最多 40 条编号简历事实（每条最多 600 字符）。它们不会整体序列化调用对象，因此 API Key、飞书 Webhook/签名和任意配置字段不能进入 AI 输入。
-- 分类输出必须是且只能是一个 JSON 对象（可被一个完整的 `json` Markdown fence 包裹），字段严格为 `category`、`confidence`、`reasonCode`、`evidenceIds`、`fieldsNeeded`。类别仅允许 `still_looking`、`resume_permission`、`courtesy`、`please_wait`、`resume_fact`、`important`、`unknown`；置信度只能在 0–1；数组中的 ID/字段名必须为非空且不重复字符串。`resume_fact` 没有依据固定失败为 `AI_EVIDENCE_MISSING`。
-- 草稿输出字段严格为 `draft` 和 `evidenceIds`。草稿必须是非空字符串，最多 300 个 Unicode code points；依据 ID 必须为非空、唯一字符串数组。该解析器只验证“模型声明了依据”，不会断言 ID 确实属于当前简历；成员关系必须由后续引擎在发送门之前核验。
+- `buildClassificationMessages(input)` 与 `buildDraftMessages(input)` 只读取并序列化目标岗位身份（公司、岗位、HR、岗位 ID）、最近 20 条目标会话消息（按原时间顺序，每条最多 600 字符）、最多 40 条编号简历事实（每条最多 600 字符），以及草稿阶段的有界分类摘要（类别、置信度、原因码）。它们不会整体序列化调用对象，因此 API Key、飞书 Webhook/签名和任意配置字段不能进入 AI 输入。
+- 分类输出必须是且只能是一个 JSON 对象（可被一个完整的 `json` Markdown fence 包裹），字段严格为 `category`、`confidence`、`reasonCode`、`evidenceIds`、`fieldsNeeded`。类别仅允许 `still_looking`、`resume_permission`、`courtesy`、`please_wait`、`resume_fact`、`explicit_rejection`、`important`、`unknown`；置信度只能在 0–1；数组中的 ID/字段名必须为非空且不重复字符串。`resume_fact` 没有依据固定失败为 `AI_EVIDENCE_MISSING`。`explicit_rejection` 的提示词契约要求 `reasonCode=EXPLICIT_REJECTION`、空 `evidenceIds` 和空 `fieldsNeeded`；含糊拒绝仍归为 `important`。
+- 草稿输出字段严格为 `draft` 和 `evidenceIds`。草稿必须是非空字符串，最多 300 个 Unicode code points；依据 ID 必须为非空、唯一字符串数组。仅当运行时把当前分类上下文明确传为 `explicit_rejection` 时，解析器允许空依据；其他类别继续固定失败为 `AI_EVIDENCE_MISSING`。该解析器只验证“模型声明了依据”，不会断言 ID 确实属于当前简历；成员关系和拒绝结束语的 45 字、安全文案约束仍必须由后续引擎与策略在发送门之前核验。
 - 非 JSON、对象外的解释文字、数组、重复 JSON 键、未知/缺失字段、越界值和畸形数组全部失败关闭。异常以稳定 `error.code`（例如 `AI_OUTPUT_INVALID`、`AI_OUTPUT_DUPLICATE_KEY`、`AI_CLASSIFICATION_INVALID`、`AI_DRAFT_INVALID`、`AI_EVIDENCE_MISSING`）交给后台转人工确认；错误消息不包含原始模型输出。
 
 当前 Task 3 验证：新增 `tests/reply-ai.test.js` 后先以缺少模块的 `MODULE_NOT_FOUND` 完成 TDD RED；实现后 `node --test tests/reply-ai.test.js` 为 9/9 通过，`npm test` 为 94/94 通过。审查修复另以“最早 20 条而非最近 20 条”的失败用例完成 RED，再以最新窗口实现完成 GREEN。
@@ -168,7 +168,7 @@ Task 7 组合层必须保持一个后台 Worker、一个共享 storage 对象和
 
 托管主键对齐开源实践：以好友列表 API 的 **`encryptUid` 作为 canonical peerId**（存储字段名仍为 `conversationId`），打开 URL 统一为 `?uid=<peerId>`；DOM 上的 `conversationId`/`uid` 仅作 `aliases`。活动会话、身份和发送控件仍要求 DOM owned-scope；登记基线、周期增量与发送后证据改读当前页面同源 `/wapi/zpchat/geek/historyMsg`，**不引入 MQTT / 内部发信协议，也不调用内部发信 API**。好友列表或历史接口不可用、响应结构不明确、无法唯一对齐时均失败关闭，不得用未验证 DOM ID 或页面文案冒充稳定主键。
 
-**首条招呼不由托管/联系 AI 生成**：联系流程只发送用户配置的招呼语模板（可含 `{jobName}` / `{company}`）。建联后的多轮分类与草稿统一采用“求职者本人”身份、45 个汉字上限和六条最高优先级规则：明确拒绝时提示模型不要继续争取或生成自动回复，并要求在现有枚举内归为 `important`；含糊拒绝也归为 `important` 并等待人工确认；事实回复只能引用简历或 HR 常用问答，不得编造经验或承诺薪资、面试和到岗时间；用户选择礼貌结束时只建议一次固定回复，结束后的后续检查不得重复回复。该变更仅约束模型输出，不新增拒绝分类、会话终态或确定性拦截；最终动作仍由现有策略与状态机决定，薪资/面试/到岗等硬风险仍进待确认。
+**首条招呼不由托管/联系 AI 生成**：联系流程只发送用户配置的招呼语模板（可含 `{jobName}` / `{company}`）。建联后的多轮分类与草稿统一采用“求职者本人”身份、45 个汉字上限和六条最高优先级规则：明确拒绝完全由 AI 语义判断为 `explicit_rejection / EXPLICIT_REJECTION`，示例短语只是提示上下文而不是本地关键词规则；含糊拒绝归为 `important` 并等待人工确认；事实回复只能引用简历或 HR 常用问答，不得编造经验或承诺薪资、面试和到岗时间。明确拒绝的草稿只允许一次简短礼貌结束语，不继续争取、追问或推销经历，结束后的后续检查不得重复回复。本阶段只扩展模型输出和严格解析契约，尚未新增自动结束策略或会话终态；最终动作仍由现有策略与状态机决定，薪资/面试/到岗等硬风险仍进待确认。
 
 `src/platform/boss/peer-identity.js` 负责纯函数解析：`resolvePeerIdentity({ domIds, friends, origin })` → `{ peerId, peerUid, url, aliases, peerSource: 'encryptUid' }`。`peerId` 是好友列表 `encryptUid`，`peerUid` 是同一条好友记录的数字 `uid`，后者只用于历史消息方向判定。`src/platform/boss/conversation-reader.js` 仍是零 DOM、零网络模块，只从页面 URL / 活动链接 / dataset 抽取原始 `conversationId` 或 `uid`；公司、岗位、HR、预览文本不能生成会话 ID。
 

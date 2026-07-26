@@ -74,6 +74,37 @@ test('requires resume evidence for resume facts with a stable error code', funct
   }), 'AI_EVIDENCE_MISSING');
 });
 
+test('accepts an AI-only explicit rejection classification without resume evidence', function () {
+  const parsed = ReplyAI.parseClassification(classification({
+    category: 'explicit_rejection',
+    confidence: 0.96,
+    reasonCode: 'EXPLICIT_REJECTION',
+    evidenceIds: [],
+    fieldsNeeded: []
+  }));
+  assert.deepEqual(parsed, {
+    category: 'explicit_rejection',
+    confidence: 0.96,
+    reasonCode: 'EXPLICIT_REJECTION',
+    evidenceIds: [],
+    fieldsNeeded: []
+  });
+});
+
+test('allows empty draft evidence only for explicit rejection', function () {
+  const raw = '{"draft":"收到，感谢您的回复，祝工作顺利。","evidenceIds":[]}';
+  assert.deepEqual(
+    ReplyAI.parseDraft(raw, { category: 'explicit_rejection' }),
+    {
+      draft: '收到，感谢您的回复，祝工作顺利。',
+      evidenceIds: []
+    }
+  );
+  assert.equal(errorCode(function () {
+    ReplyAI.parseDraft(raw, { category: 'courtesy' });
+  }), 'AI_EVIDENCE_MISSING');
+});
+
 test('parses only a bounded, evidence-backed draft schema', function () {
   assert.deepEqual(ReplyAI.parseDraft('```json\n{"draft":"您好，感谢您的联系。","evidenceIds":["resume-line-1"]}\n```'), {
     draft: '您好，感谢您的联系。',
@@ -138,6 +169,40 @@ test('classification and draft prompts carry the approved jobseeker reply rules'
     assert.match(prompt, /好的，感谢您的回复，祝工作顺利。/);
     assert.match(prompt, /不得重复回复/);
   }
+});
+
+test('prompts delegate explicit rejection recognition to AI and constrain the closing draft', function () {
+  const classificationPrompt = ReplyAI.buildClassificationMessages(promptInput)[0].content;
+  const draftPrompt = ReplyAI.buildDraftMessages(Object.assign({}, promptInput, {
+    classification: {
+      category: 'explicit_rejection',
+      confidence: 0.96,
+      reasonCode: 'EXPLICIT_REJECTION',
+      evidenceIds: [],
+      fieldsNeeded: []
+    }
+  }))[0].content;
+
+  assert.match(classificationPrompt, /explicit_rejection/);
+  assert.match(classificationPrompt, /完全由你判断/);
+  assert.match(draftPrompt, /explicit_rejection/);
+  assert.match(draftPrompt, /不得提出问题/);
+  assert.match(draftPrompt, /不继续争取/);
+  assert.match(draftPrompt, /45/);
+  assert.deepEqual(
+    JSON.parse(ReplyAI.buildDraftMessages(Object.assign({}, promptInput, {
+      classification: {
+        category: 'explicit_rejection',
+        confidence: 0.96,
+        reasonCode: 'EXPLICIT_REJECTION'
+      }
+    }))[1].content).classification,
+    {
+      category: 'explicit_rejection',
+      confidence: 0.96,
+      reasonCode: 'EXPLICIT_REJECTION'
+    }
+  );
 });
 
 test('prompts keep the latest twenty target messages in chronological order', function () {

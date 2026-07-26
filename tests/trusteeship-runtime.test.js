@@ -2103,3 +2103,39 @@ test('classifier uses ReplyAI builders/parsers and resume facts read one bounded
   assert.deepEqual(facts.map((item) => item.id), ['resume-line-1', 'resume-line-2']);
   assert.equal(Array.from(facts[1].text).length, 600);
 });
+
+test('classifier passes explicit rejection context into strict draft parsing', async () => {
+  const parseContexts = [];
+  const classifier = Runtime.createClassifier({
+    replyAI: {
+      buildDraftMessages(input) {
+        assert.equal(input.classification.category, 'explicit_rejection');
+        return [{ role: 'system', content: 'draft' }];
+      },
+      parseDraft(raw, context) {
+        assert.equal(raw, '{"draft":"收到，感谢您的回复，祝工作顺利。","evidenceIds":[]}');
+        parseContexts.push(context);
+        return {
+          draft: '收到，感谢您的回复，祝工作顺利。',
+          evidenceIds: []
+        };
+      }
+    },
+    async callLLM() {
+      return '{"draft":"收到，感谢您的回复，祝工作顺利。","evidenceIds":[]}';
+    }
+  });
+
+  const result = await classifier.draft({
+    classification: {
+      category: 'explicit_rejection',
+      confidence: 0.96,
+      reasonCode: 'EXPLICIT_REJECTION',
+      evidenceIds: [],
+      fieldsNeeded: []
+    }
+  });
+
+  assert.equal(result.draft, '收到，感谢您的回复，祝工作顺利。');
+  assert.deepEqual(parseContexts, [{ category: 'explicit_rejection' }]);
+});

@@ -5,7 +5,14 @@
   if (typeof module !== 'undefined' && module.exports) module.exports = api;
 })(typeof globalThis !== 'undefined' ? globalThis : self, function () {
   var CATEGORIES = [
-    'still_looking', 'resume_permission', 'courtesy', 'please_wait', 'resume_fact', 'important', 'unknown'
+    'still_looking',
+    'resume_permission',
+    'courtesy',
+    'please_wait',
+    'resume_fact',
+    'explicit_rejection',
+    'important',
+    'unknown'
   ];
   var CATEGORY_SET = new Set(CATEGORIES);
   var CLASSIFICATION_KEYS = ['category', 'confidence', 'reasonCode', 'evidenceIds', 'fieldsNeeded'];
@@ -69,12 +76,26 @@
     }).filter(Boolean);
   }
 
+  function getClassification(source) {
+    var candidate = isPlainObject(source.classification) ? source.classification : null;
+    if (!candidate || !CATEGORY_SET.has(candidate.category)) return null;
+    return {
+      category: candidate.category,
+      confidence: typeof candidate.confidence === 'number' &&
+        Number.isFinite(candidate.confidence)
+        ? Math.max(0, Math.min(1, candidate.confidence))
+        : 0,
+      reasonCode: copyText(candidate.reasonCode, 120)
+    };
+  }
+
   function boundedContext(input) {
     var source = isPlainObject(input) ? input : {};
     return {
       target: getTarget(source),
       messages: getMessages(source),
-      resumeFacts: getResumeFacts(source)
+      resumeFacts: getResumeFacts(source),
+      classification: getClassification(source)
     };
   }
 
@@ -82,13 +103,13 @@
     return [
       '身份：我是求职者本人。回复简短、自然、礼貌，不超过45个汉字。',
       '最高优先级：',
-      '1. HR明确表示“不合适、不匹配、暂不考虑、不符合、岗位关闭、已招满、谢谢关注、祝求职顺利”时，不继续争取，不追问原因，不生成自动回复，将会话视为“已结束－未匹配”。',
+      '1. 是否属于HR明确拒绝完全由你判断；“不合适、不匹配、暂不考虑、不符合、岗位关闭、已招满、谢谢关注、祝求职顺利”等仅是语义示例，不是本地关键词规则。明确拒绝时使用category=explicit_rejection、reasonCode=EXPLICIT_REJECTION、fieldsNeeded=[]，只生成一次礼貌结束语，随后将会话视为“已结束－未匹配”。',
       '2. “经验可能不太匹配”等含糊表达，只生成草稿并等待人工确认。',
       '3. 只有能从简历或已填写问答直接获得答案的低风险事实问题，才允许自动回复。',
       '4. 不编造经验、年限、项目和公司，不承诺薪资、面试或到岗时间。',
-      '5. 若用户选择礼貌结束，只回复一次：“好的，感谢您的回复，祝工作顺利。”',
+      '5. explicit_rejection只生成简短自然的礼貌结束语，例如“好的，感谢您的回复，祝工作顺利。”；不继续争取，不追问原因，不得提出问题，不陈述或推销经历。',
       '6. 会话结束后，即使再次定时检查，也不得重复回复。',
-      '兼容当前分类协议：遇到第1条时，category必须为important且reasonCode为EXPLICIT_REJECTION；遇到第2条时，category必须为important。两种情况都不得自动批准。'
+      '含糊拒绝仍使用category=important并等待人工确认；不得把不确定表达归为explicit_rejection。'
     ];
   }
 
@@ -100,8 +121,9 @@
         'The deterministic policy is authoritative. It runs after you and can reject every result.',
         'Important topics including salary/薪资, interview/面试, arrival or start date/到岗, resignation, contact details, experience expansion, assessments, offers, or commitments cannot be auto-approved.',
         'Use only approved categories: ' + CATEGORIES.join(', ') + '.',
+        'When classification.category is explicit_rejection, produce only one polite closing sentence: no question, no renewed persuasion, no experience promotion, and no salary/interview/arrival commitment.',
         'Return exactly one JSON object with no prose and no markdown fences.',
-        'Schema: {"draft":"nonempty string no longer than 300 Unicode code points","evidenceIds":["nonempty resume fact id"]}. Evidence IDs must be nonempty and unique.'
+        'Schema: {"draft":"nonempty string no longer than 300 Unicode code points","evidenceIds":["nonempty resume fact id"]}. Evidence IDs must be nonempty and unique except that explicit_rejection must use an empty evidenceIds array.'
       ]).join('\n');
     }
     return jobseekerRules().concat([
@@ -109,6 +131,8 @@
       'The deterministic policy is authoritative. It runs after you and can reject every result.',
       'Important topics including salary/薪资, interview/面试, arrival or start date/到岗, resignation, contact details, experience expansion, assessments, offers, or commitments cannot be auto-approved.',
       'Use only approved categories: ' + CATEGORIES.join(', ') + '.',
+      'Whether the newest recruiter message is an explicit rejection must be judged entirely by you; no local keyword matcher makes that decision.',
+      'For explicit_rejection return reasonCode=EXPLICIT_REJECTION, evidenceIds=[], and fieldsNeeded=[]. Ambiguous rejection stays important.',
       'Return exactly one JSON object with no prose and no markdown fences.',
       'Schema: {"category":"approved category","confidence":0..1,"reasonCode":"nonempty string","evidenceIds":["resume fact id"],"fieldsNeeded":["nonempty field name"]}. resume_fact requires evidenceIds.'
     ]).join('\n');
@@ -245,13 +269,16 @@
     };
   }
 
-  function parseDraft(text) {
+  function parseDraft(text, context) {
     var value = unwrapJson(text);
     if (!hasExactKeys(value, DRAFT_KEYS)) fail('AI_DRAFT_INVALID');
     if (typeof value.draft !== 'string' || value.draft.trim() === '' ||
       Array.from(value.draft).length > MAX_DRAFT_CODE_POINTS) fail('AI_DRAFT_INVALID');
     var evidenceIds = validateIds(value.evidenceIds, 'AI_EVIDENCE_MISSING');
-    if (evidenceIds.length === 0) fail('AI_EVIDENCE_MISSING');
+    var category = isPlainObject(context) ? context.category : '';
+    if (evidenceIds.length === 0 && category !== 'explicit_rejection') {
+      fail('AI_EVIDENCE_MISSING');
+    }
     return { draft: value.draft, evidenceIds: evidenceIds };
   }
 

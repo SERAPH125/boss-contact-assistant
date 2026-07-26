@@ -231,6 +231,12 @@ ego-lite 对徐海霞会话的精确单次发送排查得到三组现场证据�
 
 修复保留消息读取用的直接父级 `pane`，另从消息容器向上有界查找同时包含输入框与发送按钮的最近共同 `controlPane`。控件查找只在该共同祖先内进行，要求输入框和按钮各自唯一；发送前重验还要求原 `pane`、`controlPane`、输入框和按钮对象全部未变化。新增 fake DOM 回归先以真实的兄弟分支结构复现 `SELECTOR_UNAVAILABLE`，再转为成功发送证据；另加双输入/双按钮歧义用例，确认动作数为 0 且以 `TARGET_UNCERTAIN` 失败关闭。该修复不会全页面查找第一组控件，也不会重放已经进入 UNKNOWN 的意图。模块回归为 49/49，全量自动化为 411/411；JavaScript 语法、Manifest 和 diff 检查均通过。扩展重载后的实号只读探针确认：depth 0 的 `.message-content` 为 0 个输入/0 个按钮，depth 1 的 `.chat-conversation` 恰好为 1 个输入/1 个按钮，修复会选择后者且未触发任何发送。
 
+## v0.3.7 AI 明确拒绝分类契约
+
+本阶段继续对照 [Rasa](https://github.com/RasaHQ/rasa) 的 NLU/对话动作分层与 [LangGraph](https://github.com/langchain-ai/langgraph) 的显式状态、人工确认边界：模型负责给出受限结构化判断，确定性运行时只验证输出形状并决定后续动作。本地知识库 `技术复用/浏览器扩展-AI会话托管可靠性复盘.md` 的既有结论仍是“未知发送必须终态且不得自动重放、成功需要新 outgoing 正证据”；本轮新增结论是“明确拒绝的语义识别可以完全交给 AI，但输出必须落入独立类别和严格字段契约，不能让模型自由文本直接取得发送权限”。
+
+`ReplyAI` 新增 `explicit_rejection` 类别。分类提示要求 AI 独立判断语义，使用 `reasonCode=EXPLICIT_REJECTION`、空 `evidenceIds` 和空 `fieldsNeeded`；代码没有新增 HR 正文关键词或正则分类器。草稿阶段只投影有界分类摘要，并且只有当前分类上下文确认为 `explicit_rejection` 时才允许空简历依据；其他事实或普通回复仍保留非空 evidence 要求。拒绝示例和礼貌结束语只存在于模型提示中，不参与本地分类覆盖。该提交尚未授权真实自动结束，后续仍需策略、状态机、静默延迟和发送证据门。
+
 ## v0.3.5 Task 9 恢复、幂等与隐私回归参考
 
 - [Chrome Extension Service Worker 迁移文档源码](https://github.com/GoogleChrome/developer.chrome.com/blob/main/site/en/docs/extensions/migrating/to-service-workers/index.md) 与 [GoogleChrome/chrome-extensions-samples](https://github.com/GoogleChrome/chrome-extensions-samples)（Apache-2.0）用于复核 MV3 Worker 会被终止、持久存储应作为事实源、事件监听应在顶层注册，以及周期任务应使用具名 `chrome.alarms`。本项目据此验证同名 `boss-ai-chat-monitor` 只表达一个逻辑 alarm，并验证旧 `scheduledTime` 事件只触发一次当前周期。
