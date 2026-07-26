@@ -195,6 +195,20 @@ browser-harness 的 2026-05-01 实号记录说明，历史接口的普通消息�
 
 扩展精确重载后，API proof、HR FAQ、风险确认和飞书 proof 均仍有效；恢复全局托管并现场运行得到 `checked=2 / newMessages=0 / pending=0 / autoSent=0 / errors=[]`，两条会话 `lastCheckedAt` 都更新且读失败计数为 0，同名 10 分钟 alarm 已重建。侧栏当前显示“正在托管 2 个岗位”和“检查 2 个”。本轮没有新消息，也没有任何 Boss 发送。
 
+## v0.3.6 AI 托管安全模拟器
+
+本轮先检索并对照三个开源实现：
+
+- [Rasa](https://github.com/RasaHQ/rasa) 的 conversation-driven 测试把一组预设用户消息送入同一对话决策链，再断言动作结果；本项目据此复用生产 engine，而不是另写一套“看起来相同”的判断器。
+- [Botium Bindings WebdriverIO](https://github.com/codeforequity-at/botium-bindings-webdriverio) 把合成输入和受控输出适配器放在真实对话逻辑边界之外；本项目据此注入一次性 reader 和 recorder sender，让 AI/策略真实运行而 Boss/飞书副作用为零。
+- [LangGraph](https://github.com/langchain-ai/langgraph) 的 interrupt / human-in-the-loop 模型把自动执行与人工确认作为显式状态；本项目继续使用 `AUTO_REPLY / REQUIRE_CONFIRMATION / NO_REPLY` 的确定性策略结果，不让模拟 UI 绕过人工门禁。
+
+上述参考只用于验证架构与测试边界，没有复制其源码，也没有新增运行时依赖。当前独立实现新增 `trusteeship-simulator.js`：只读一次生产快照，把单个已登记 Boss 会话复制进一次性内存 store，以合成新消息运行真实 `MonitorEngine`、真实受保护 AI、简历事实和策略；sender 仅记录草稿，飞书关闭，production store 和 alarm 完全不触碰。runtime 只接受精确 `{ type, conversationId, message }`，限制 ID 与 1–600 code-points 消息，并将 provider 异常收敛成稳定错误码。侧栏结果使用 DOM 节点与 `textContent` 渲染，不把模型文本拼接成 HTML。
+
+TDD 先用缺失 simulator、runtime schema/dispatch、background 组合和 sidepanel 控件/事件处理器得到 RED，再逐层转为 GREEN。显式拒绝样本同时暴露生产 engine 的证据归一化冲突：分类器按提示词正确返回 `important / EXPLICIT_REJECTION` 且无简历依据，却被通用 evidence 规则误判为 `AI_CLASSIFICATION_INVALID`。修复后只有 `resume_fact` 分类和所有草稿继续强制 evidence；策略发送门仍要求可核对依据，因此没有放宽自动回复安全边界。
+
+模拟结果只能证明合成消息经过真实 AI 与生产决策链时的行为，不能替代真实 Boss 新来信检测、目标绑定、发送、飞书和 Worker alarm 验收。推荐固定回归样本为“还在看机会吗？”“薪资是多少？”“不合适”“经验可能不太匹配”。
+
 ## v0.3.5 Task 9 恢复、幂等与隐私回归参考
 
 - [Chrome Extension Service Worker 迁移文档源码](https://github.com/GoogleChrome/developer.chrome.com/blob/main/site/en/docs/extensions/migrating/to-service-workers/index.md) 与 [GoogleChrome/chrome-extensions-samples](https://github.com/GoogleChrome/chrome-extensions-samples)（Apache-2.0）用于复核 MV3 Worker 会被终止、持久存储应作为事实源、事件监听应在顶层注册，以及周期任务应使用具名 `chrome.alarms`。本项目据此验证同名 `boss-ai-chat-monitor` 只表达一个逻辑 alarm，并验证旧 `scheduledTime` 事件只触发一次当前周期。
