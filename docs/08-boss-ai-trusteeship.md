@@ -174,7 +174,9 @@ approval.status = SEND_RESULT_UNKNOWN
 
 reader 返回值始终视为不可信：成功结果必须包含 `conversationRef.conversationId` 和 `conversationRef.url`；ID 与 URL 必须分别精确等于持久值，URL 还必须是规范化的 HTTPS `*.zhipin.com/web/geek/chat` 单一会话查询。可选顶层 `conversationId` 以及任一层出现的 URL、岗位、公司、HR、平台等身份字段都必须逐项与持久值一致。最多 20 条消息必须是严格归一化 incoming；非空批次的 `baseline` 必须等于最后一条消息指纹，空批次则必须等于请求时会话的 `lastIncomingFingerprint`，否则在 AI、发送和 cursor checkpoint 前失败关闭。`TARGET_UNCERTAIN` 和 `SELECTOR_UNAVAILABLE` 只暂停对应会话；`LOGIN_REQUIRED` 和 `BOSS_BLOCKED` 全局暂停并停止读取后续会话，同轮也不发送历史待办通知。任一未列入 reader allowlist 的外部错误统一映射为 `CONVERSATION_UNAVAILABLE`；分类、草稿抛错分别固定为 `AI_CLASSIFY_FAILED`、`AI_DRAFT_FAILED`，store/notifier 的未知错误也只映射到固定码，原始 `error.code` 不进入快照、摘要或通知载荷。
 
-可选的异步 `getResumeFacts()` 每轮最多调用一次。它的结果最多归一化为 100 条 `{ id, text, number }`，要求唯一非空 ID 和有界正文；缺失、抛错或空结果不是创建时错误，但强制转人工确认。分类和草稿必须满足 ReplyAI 的严格对象形状，且两者的非空 `evidenceIds` 都必须是本轮编号简历事实 ID 的子集。草稿最多 300 个 Unicode code points。硬风险、非文本、低于 0.85、AI/解析/依据失败、日限、静默、已有待办和未知内部失败都会先落本地待办，绝不自动发送；硬风险与非文本仍可保存一个经过相同依据校验的建议草稿。
+可选的异步 `getResumeFacts()` 每轮最多调用一次。它的结果最多归一化为 100 条 `{ id, text, number }`，要求唯一非空 ID 和有界正文。可靠文本消息即使没有简历事实也仍会进入 AI 分类，以便 AI 能识别不需要简历依据的 `explicit_rejection`；其他分类和草稿继续要求非空 `evidenceIds`，且必须是本轮编号简历事实 ID 的子集。草稿最多 300 个 Unicode code points。硬风险、非文本、低置信度、AI/解析/依据失败、普通回复日限、普通回复静默、已有待办和未知内部失败都会先落本地待办，绝不自动发送；硬风险与非文本仍可保存一个经过相同依据校验的建议草稿。
+
+非静默时段的明确拒绝已经接入生产监控编排：只有分类严格满足 `explicit_rejection / EXPLICIT_REJECTION / confidence >= 0.90 / 空 evidenceIds / 空 fieldsNeeded`，且 AI 结束语再通过 `validateAutoCloseDraft`，引擎才会在发送前重读最新快照、重算策略、原子创建 `AUTO_CLOSE` intent，再复用既有 sender 和肯定发送证据终结为 `ENDED_UNMATCHED`。成功只发送一次、不会增加普通自动回复计数，下一轮因会话已停用而不会再读；未知发送结果固定进入 `PAUSED / SEND_RESULT_UNKNOWN`，不得重放。AI 草稿失败、格式错误或结束语安全校验失败时只创建不含原始异常及不安全草稿的本地待办。静默时段的 `DEFER_AUTO_CLOSE` 持久调度将在下一阶段接入。
 
 本地 `PENDING` 待办是通知事实源。只有非静默、全局未暂停、飞书已开启，且 owner 会话仍启用、处于 `WAITING_CONFIRMATION`、精确链接该待办、同会话恰好只有一个 `PENDING` 时才通知；通知尝试的 `SENDING` 预留落盘后，引擎还会立即读取最新快照，并以当前 clock/policy 重算全部门禁。任一门禁变化都先 `CANCEL` 且不出站；通过后 notifier 会在自己的异步快照读取之后、真实 client 调用之前同步重验一次。零次通知或首次已知失败的历史待办即使没有新消息也会被考虑；同一待办同轮最多尝试一次，首次失败只能在下一轮补一次。静默时段继续合并消息但不通知、不自动发送。
 
@@ -186,7 +188,7 @@ Task 7 组合层必须保持一个后台 Worker、一个共享 storage 对象和
 
 托管主键对齐开源实践：以好友列表 API 的 **`encryptUid` 作为 canonical peerId**（存储字段名仍为 `conversationId`），打开 URL 统一为 `?uid=<peerId>`；DOM 上的 `conversationId`/`uid` 仅作 `aliases`。活动会话、身份和发送控件仍要求 DOM owned-scope；登记基线、周期增量与发送后证据改读当前页面同源 `/wapi/zpchat/geek/historyMsg`，**不引入 MQTT / 内部发信协议，也不调用内部发信 API**。好友列表或历史接口不可用、响应结构不明确、无法唯一对齐时均失败关闭，不得用未验证 DOM ID 或页面文案冒充稳定主键。
 
-**首条招呼不由托管/联系 AI 生成**：联系流程只发送用户配置的招呼语模板（可含 `{jobName}` / `{company}`）。建联后的多轮分类与草稿统一采用“求职者本人”身份、45 个汉字上限和六条最高优先级规则：明确拒绝完全由 AI 语义判断为 `explicit_rejection / EXPLICIT_REJECTION`，示例短语只是提示上下文而不是本地关键词规则；含糊拒绝归为 `important` 并等待人工确认；事实回复只能引用简历或 HR 常用问答，不得编造经验或承诺薪资、面试和到岗时间。明确拒绝的草稿只允许一次简短礼貌结束语，不继续争取、追问或推销经历，结束后的后续检查不得重复回复。纯策略层已经能返回 `AUTO_CLOSE / DEFER_AUTO_CLOSE` 并校验结束语，但本阶段尚未接入持久会话终态和真实发送；薪资/面试/到岗等普通回答仍由原硬风险门进入待确认。
+**首条招呼不由托管/联系 AI 生成**：联系流程只发送用户配置的招呼语模板（可含 `{jobName}` / `{company}`）。建联后的多轮分类与草稿统一采用“求职者本人”身份、45 个汉字上限和六条最高优先级规则：明确拒绝完全由 AI 语义判断为 `explicit_rejection / EXPLICIT_REJECTION`，示例短语只是提示上下文而不是本地关键词规则；含糊拒绝归为 `important` 并等待人工确认；事实回复只能引用简历或 HR 常用问答，不得编造经验或承诺薪资、面试和到岗时间。明确拒绝的草稿只允许一次简短礼貌结束语，不继续争取、追问或推销经历，结束后的后续检查不得重复回复。非静默即时 `AUTO_CLOSE` 已接入持久意图、真实 sender 和 `ENDED_UNMATCHED` 终态；`DEFER_AUTO_CLOSE` 的静默结束调度仍待下一阶段接入。薪资/面试/到岗等普通回答仍由原硬风险门进入待确认。
 
 `src/platform/boss/peer-identity.js` 负责纯函数解析：`resolvePeerIdentity({ domIds, friends, origin })` → `{ peerId, peerUid, url, aliases, peerSource: 'encryptUid' }`。`peerId` 是好友列表 `encryptUid`，`peerUid` 是同一条好友记录的数字 `uid`，后者只用于历史消息方向判定。`src/platform/boss/conversation-reader.js` 仍是零 DOM、零网络模块，只从页面 URL / 活动链接 / dataset 抽取原始 `conversationId` 或 `uid`；公司、岗位、HR、预览文本不能生成会话 ID。
 
@@ -445,7 +447,7 @@ Task 10 必须分阶段且每阶段单独获授权：先做一个完整工作日
 | --- | --- |
 | `还在看机会吗？` | 只有已填写问答或简历可直接作答时才允许 `AUTO_REPLY`；否则转人工确认 |
 | `薪资是多少？` | 硬风险先于模型结论，必须 `REQUIRE_CONFIRMATION` |
-| `不合适` | 明确拒绝，不自动回复；策略结果不得因缺少简历依据而降级成 AI 格式错误 |
+| `不合适` | 若 AI 严格分类为明确拒绝，非静默时只自动发送一次合规礼貌结束语并进入 `ENDED_UNMATCHED`；不得因缺少简历依据降级成格式错误 |
 | `经验可能不太匹配` | 含糊拒绝，只生成草稿并等待人工确认 |
 
 `src/conversation/trusteeship-live-drill.js` 先把目标会话、设置与当天计数复制到一次性内存 store，用合成 reader 运行真实 `MonitorEngine`、受保护 AI、简历事实和策略；隔离 sender 只捕获建议草稿，不访问 Boss。评估成功后，它才调用生产 store 的专用 `createLiveDrillApproval`：创建 `origin=LIVE_DRILL` 的本地 `PENDING`，并复用生产通知 reservation/租约发送飞书。该专用写入不得修改真实 `lastIncomingFingerprint`、`processedFingerprints`、`recentMessages`、monitor cursor、自动回复额度或真实读取时间。
@@ -463,7 +465,7 @@ Task 10 必须分阶段且每阶段单独获授权：先做一个完整工作日
 
 自动化回归使用三轮稳定 reader fixture 验证 `newMessages` 为 `0 → 1 → 0`，同一消息只产生一个 `LIVE_MONITOR` 待办、一次通知且确认前 Boss send 为 0。这证明消息游标和幂等状态机契约，但真实站点的新来信捕获仍需上述实号事件才能最终验收。
 
-本轮还修正了分类证据归一化边界：`resume_fact` 自动回答仍必须提供可核对的简历/问答 evidence；明确拒绝等非事实分类可以没有简历 evidence，但策略仍禁止无依据的自动回复。这样“明确拒绝 → 不回复”和“含糊拒绝 → 人工确认”不会被错误改写成 `AI_CLASSIFICATION_INVALID`。
+本轮还修正了分类证据归一化边界：普通分类和事实回答仍必须提供可核对的简历/问答 evidence；只有严格的 `explicit_rejection` 可以没有简历 evidence，并且只能取得受限的单次结束动作权限。这样“明确拒绝 → 单次礼貌结束”和“含糊拒绝 → 人工确认”不会被错误改写成 `AI_CLASSIFICATION_INVALID`。
 
 这些是既有计划结论；本任务的新实现建议仅限于以固定、最小权限落实上述契约。
 

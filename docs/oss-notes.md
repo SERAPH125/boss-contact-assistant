@@ -243,6 +243,8 @@ ego-lite 对徐海霞会话的精确单次发送排查得到三组现场证据�
 
 `AUTO_CLOSE` 复用现有发送肯定证据和 `SEND_RESULT_UNKNOWN` 终态，但从普通 AUTO 额度预留、成功计数、未知计数及 fresh Worker 恢复计数中完全排除。成功时会话关闭为 `ENDED_UNMATCHED` 并保留 `AUTO_CLOSE/SENT` 证据；只有显式重新托管才能恢复。存储与恢复聚焦测试为 75/75，覆盖完整/损坏延迟状态、即时和延迟意图、满额度成功、未知结果、Worker 恢复、重置及重新托管。
 
+监控引擎即时路径继续沿用 [Rasa](https://github.com/RasaHQ/rasa) 的“同一对话决策链跑真实动作”边界、[LangGraph](https://github.com/langchain-ai/langgraph) 的显式终态，以及 [Open Policy Agent](https://github.com/open-policy-agent/opa) 的模型判断与确定性授权分层：可靠文本即使没有简历事实也会先分类，但只有严格 `explicit_rejection` 允许空依据；结束语还要经过独立确定性校验和发送前最新快照二次策略门。非静默命中后引擎先创建唯一 `AUTO_CLOSE` intent，再复用现有 Boss sender 和肯定证据收束为 `ENDED_UNMATCHED`；满普通额度仍可执行且计数不变，第二周期不会再读取或发送。草稿失败、不安全草稿和 provider 异常全部降级为不含原始内容的本地待办，未知发送进入不可重放的 `SEND_RESULT_UNKNOWN`。监控引擎聚焦测试为 53/53；静默延迟调度尚未在本阶段接入。
+
 ## v0.3.5 Task 9 恢复、幂等与隐私回归参考
 
 - [Chrome Extension Service Worker 迁移文档源码](https://github.com/GoogleChrome/developer.chrome.com/blob/main/site/en/docs/extensions/migrating/to-service-workers/index.md) 与 [GoogleChrome/chrome-extensions-samples](https://github.com/GoogleChrome/chrome-extensions-samples)（Apache-2.0）用于复核 MV3 Worker 会被终止、持久存储应作为事实源、事件监听应在顶层注册，以及周期任务应使用具名 `chrome.alarms`。本项目据此验证同名 `boss-ai-chat-monitor` 只表达一个逻辑 alarm，并验证旧 `scheduledTime` 事件只触发一次当前周期。

@@ -358,11 +358,90 @@ test('confidence 0.85 with valid resume evidence sends once after a second polic
   assert.equal(snapshot.managedConversations['conv-1'].sendIntent.mode, 'AUTO');
 });
 
-test('an important explicit rejection needs no resume evidence and still requires confirmation', async () => {
+test('an AI explicit rejection needs no resume evidence, closes once, and ends unmatched without quota', async () => {
+  let reads = 0;
+  let classifications = 0;
+  let drafts = 0;
   const harness = await makeHarness({
+    initial: {
+      conversationTrusteeship: {
+        enabled: true,
+        dailyAutoReplyLimit: 1,
+        autoReplyCount: 1,
+        autoReplyDay: '2026-07-24'
+      }
+    },
+    getResumeFacts() {
+      return [];
+    },
     reader: {
       async read(conversation) {
+        reads += 1;
         return readOk(conversation, [incoming('reject', '不合适')], 'id:reject');
+      },
+      async send(conversation, draft, intent) {
+        return {
+          success: true,
+          targetConversationId: conversation.conversationId,
+          sentFingerprint: `sent:${intent.intentId}`,
+          observedAt: Date.now()
+        };
+      }
+    },
+    classifier: {
+      async classify() {
+        classifications += 1;
+        return {
+          category: 'explicit_rejection',
+          confidence: 0.99,
+          reasonCode: 'EXPLICIT_REJECTION',
+          evidenceIds: [],
+          fieldsNeeded: []
+        };
+      },
+      async draft() {
+        drafts += 1;
+        return {
+          draft: '收到，感谢您的回复，祝工作顺利。',
+          evidenceIds: []
+        };
+      }
+    }
+  });
+  await harness.register(['conv-1']);
+  await harness.enableGlobal({ dailyAutoReplyLimit: 1 });
+
+  const first = await harness.engine.runCycle();
+  const second = await harness.engine.runCycle();
+  const snapshot = await harness.store.getSnapshot();
+  const conversation = snapshot.managedConversations['conv-1'];
+
+  assert.equal(reads, 1);
+  assert.equal(first.checked, 1);
+  assert.equal(first.autoSent, 1);
+  assert.equal(first.pending, 0);
+  assert.equal(second.checked, 0);
+  assert.equal(second.autoSent, 0);
+  assert.equal(classifications, 1);
+  assert.equal(drafts, 1);
+  assert.equal(harness.calls.send.length, 1);
+  assert.equal(harness.calls.send[0].intent.mode, 'AUTO_CLOSE');
+  assert.equal(snapshot.conversationTrusteeship.autoReplyCount, 1);
+  assert.equal(conversation.state, 'ENDED_UNMATCHED');
+  assert.equal(conversation.enabled, false);
+});
+
+test('unsafe or failed AI rejection drafts become clean approvals and never reach Boss', async () => {
+  const unsafeDraft = '请再考虑一下，我的经验很匹配。';
+  const providerSecret = 'provider-secret-must-not-leak';
+  const harness = await makeHarness({
+    getResumeFacts() {
+      return [];
+    },
+    reader: {
+      async read(conversation) {
+        const message = incoming(`reject-${conversation.conversationId}`, '不合适');
+        return readOk(conversation, [message], message.fingerprint);
       },
       async send() {
         throw new Error('must not send');
@@ -371,30 +450,38 @@ test('an important explicit rejection needs no resume evidence and still require
     classifier: {
       async classify() {
         return {
-          category: 'important',
+          category: 'explicit_rejection',
           confidence: 0.99,
           reasonCode: 'EXPLICIT_REJECTION',
           evidenceIds: [],
           fieldsNeeded: []
         };
       },
-      async draft() {
-        throw new Error('explicit rejection needs no automatic draft');
+      async draft(input) {
+        if (input.target.conversationId === 'failed') {
+          throw new Error(providerSecret);
+        }
+        return { draft: unsafeDraft, evidenceIds: [] };
       }
     }
   });
-  await harness.register(['conv-1']);
+  await harness.register(['failed', 'unsafe']);
   await harness.enableGlobal();
 
-  const summary = await harness.engine.runCycle();
+  const result = await harness.engine.runCycle();
   const snapshot = await harness.store.getSnapshot();
-  const approval = snapshot.pendingApprovals[
-    snapshot.managedConversations['conv-1'].pendingApprovalId
-  ];
+  const approvals = Object.values(snapshot.pendingApprovals);
+  const serialized = JSON.stringify({ result, snapshot });
 
-  assert.equal(summary.autoSent, 0);
-  assert.equal(summary.pending, 1);
-  assert.equal(approval.reasonCode, 'CATEGORY_REQUIRES_CONFIRMATION');
+  assert.equal(result.autoSent, 0);
+  assert.equal(result.pending, 2);
+  assert.equal(harness.calls.send.length, 0);
+  assert.equal(approvals.length, 2);
+  assert.ok(approvals.every((approval) => approval.draft === ''));
+  assert.ok(approvals.some((approval) => approval.reasonCode === 'AI_DRAFT_FAILED'));
+  assert.ok(approvals.some((approval) => approval.reasonCode === 'AUTO_CLOSE_DRAFT_UNSAFE'));
+  assert.equal(serialized.includes(providerSecret), false);
+  assert.equal(serialized.includes(unsafeDraft), false);
 });
 
 test('low confidence, hard risk, AI failure, non-text, and evidence mismatch become local approvals', async () => {

@@ -16,6 +16,7 @@
     'courtesy',
     'please_wait',
     'resume_fact',
+    'explicit_rejection',
     'important',
     'unknown'
   ]);
@@ -83,6 +84,7 @@
     'createOrMergeApproval',
     'createSendIntent',
     'createAutoSendIntent',
+    'createAutoCloseIntent',
     'completeSend',
     'markSendUnknown',
     'markConversationChecked',
@@ -163,7 +165,7 @@
       !boundedString(value.reasonCode, 120) ||
       !Array.isArray(value.fieldsNeeded) ||
       !value.fieldsNeeded.every(function (field) { return boundedString(field, 120); }) ||
-      !idsAreSubset(value.evidenceIds, facts, value.category === 'resume_fact')) {
+      !idsAreSubset(value.evidenceIds, facts, value.category !== 'explicit_rejection')) {
       throw engineError('AI_CLASSIFICATION_INVALID');
     }
     return {
@@ -175,12 +177,14 @@
     };
   }
 
-  function normalizeDraft(value, facts) {
+  function normalizeDraft(value, facts, classification) {
+    var allowEmptyEvidence = classification &&
+      classification.category === 'explicit_rejection';
     if (!exactKeys(value, ['draft', 'evidenceIds']) ||
       typeof value.draft !== 'string' ||
       value.draft.trim() === '' ||
       Array.from(value.draft).length > MAX_DRAFT_CODE_POINTS ||
-      !idsAreSubset(value.evidenceIds, facts, true)) {
+      !idsAreSubset(value.evidenceIds, facts, !allowEmptyEvidence)) {
       throw engineError('AI_DRAFT_INVALID');
     }
     return { draft: value.draft.trim(), evidenceIds: value.evidenceIds.slice() };
@@ -379,7 +383,12 @@
       !hasMethods(source.reader, ['read', 'send']) ||
       !hasMethods(source.classifier, ['classify', 'draft']) ||
       !hasMethods(source.notifier, ['notifyApproval', 'notifyResolved']) ||
-      !hasMethods(source.policy, ['detectHardRisk', 'isQuietHours', 'decide']) ||
+      !hasMethods(source.policy, [
+        'detectHardRisk',
+        'isQuietHours',
+        'decide',
+        'validateAutoCloseDraft'
+      ]) ||
       typeof source.clock !== 'function' ||
       (source.guardExternalAction !== undefined &&
         typeof source.guardExternalAction !== 'function') ||
@@ -627,7 +636,7 @@
         ? hardRisk.fieldsNeeded
         : [];
 
-      if (context.facts.length > 0) {
+      if (message.kind === 'text') {
         var rawClassification;
         try {
           rawClassification = await classifier.classify(
@@ -643,8 +652,6 @@
             reasonCode = 'AI_CLASSIFICATION_INVALID';
           }
         }
-      } else {
-        reasonCode = 'MISSING_RESUME_EVIDENCE';
       }
 
       var hasPending = !!current.pendingApprovalId;
@@ -673,21 +680,86 @@
             classifierInput(current, message, context.facts, classification)
           );
         } catch (_) {
-          if (decision.action === 'AUTO_REPLY') {
+          if (decision.action === 'AUTO_REPLY' ||
+            decision.action === 'AUTO_CLOSE' ||
+            decision.action === 'DEFER_AUTO_CLOSE') {
             decision = { action: 'REQUIRE_CONFIRMATION', reasonCode: 'AI_DRAFT_FAILED' };
             reasonCode = 'AI_DRAFT_FAILED';
           }
         }
         if (rawDraft !== undefined) {
           try {
-            draft = normalizeDraft(rawDraft, context.facts);
+            draft = normalizeDraft(rawDraft, context.facts, classification);
           } catch (_) {
-            if (decision.action === 'AUTO_REPLY') {
+            if (decision.action === 'AUTO_REPLY' ||
+              decision.action === 'AUTO_CLOSE' ||
+              decision.action === 'DEFER_AUTO_CLOSE') {
               decision = { action: 'REQUIRE_CONFIRMATION', reasonCode: 'AI_DRAFT_INVALID' };
               reasonCode = 'AI_DRAFT_INVALID';
             }
           }
         }
+      }
+
+      if ((decision.action === 'AUTO_CLOSE' || decision.action === 'DEFER_AUTO_CLOSE') && draft) {
+        var validatedCloseDraft = policy.validateAutoCloseDraft(draft.draft);
+        if (!validatedCloseDraft || validatedCloseDraft.ok !== true) {
+          decision = {
+            action: 'REQUIRE_CONFIRMATION',
+            reasonCode: 'AUTO_CLOSE_DRAFT_UNSAFE'
+          };
+          reasonCode = 'AUTO_CLOSE_DRAFT_UNSAFE';
+          draft = null;
+        } else {
+          draft = {
+            draft: validatedCloseDraft.draft,
+            evidenceIds: draft.evidenceIds
+          };
+        }
+      }
+
+      if (decision.action === 'AUTO_CLOSE' && draft) {
+        var freshClose = await store.getSnapshot();
+        var freshCloseConversation = freshClose.managedConversations[current.conversationId];
+        var closeRecheck = policy.decide({
+          hardRisk: hardRisk,
+          settings: freshClose.conversationTrusteeship,
+          conversationEnabled: freshCloseConversation && freshCloseConversation.enabled,
+          quiet: policy.isQuietHours(
+            readClock(clock),
+            freshClose.conversationTrusteeship.quietHours
+          ),
+          hasPendingApproval: !!(
+            freshCloseConversation && freshCloseConversation.pendingApprovalId
+          ),
+          dailyCount: freshClose.conversationTrusteeship.autoReplyCount,
+          ai: classification
+        });
+        if (closeRecheck.action === 'AUTO_CLOSE') {
+          var closeIntent;
+          try {
+            if (guardExternalAction) await guardExternalAction();
+            closeIntent = await store.createAutoCloseIntent(
+              current.conversationId,
+              message.fingerprint,
+              draft.draft
+            );
+          } catch (closeIntentError) {
+            throw engineError(mapStoreError(closeIntentError && closeIntentError.code));
+          }
+          var closeOutcome = await executeSend(
+            freshCloseConversation,
+            draft.draft,
+            closeIntent
+          );
+          if (closeOutcome.sent) {
+            output.autoSent += 1;
+            return true;
+          }
+          addError(output, closeOutcome.errorCode);
+          return false;
+        }
+        reasonCode = closeRecheck.reasonCode;
       }
 
       if (decision.action === 'AUTO_REPLY' && draft) {
