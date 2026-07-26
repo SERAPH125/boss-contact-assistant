@@ -138,6 +138,9 @@
   }
 
   function projectResult(input, observations, snapshot, summary) {
+    if (observations.failureCode === 'API_PROOF_STALE') {
+      throw simulatorError('API_PROOF_STALE');
+    }
     var approvalIds = Object.keys(snapshot.pendingApprovals || {}).sort();
     var approval = approvalIds.length > 0
       ? snapshot.pendingApprovals[approvalIds[0]]
@@ -199,7 +202,8 @@
         var observations = {
           classification: null,
           draft: null,
-          sentDraft: ''
+          sentDraft: '',
+          failureCode: ''
         };
         var fingerprint = 'simulation:' + source.idFactory('message');
         var engine = source.engineModule.create({
@@ -236,12 +240,26 @@
           },
           classifier: {
             classify: async function (classifierInput) {
-              observations.classification = await source.classifier.classify(classifierInput);
-              return observations.classification;
+              try {
+                observations.classification = await source.classifier.classify(classifierInput);
+                return observations.classification;
+              } catch (error) {
+                observations.failureCode = error && error.code === 'API_PROOF_STALE'
+                  ? 'API_PROOF_STALE'
+                  : '';
+                throw error;
+              }
             },
             draft: async function (classifierInput) {
-              observations.draft = await source.classifier.draft(classifierInput);
-              return observations.draft;
+              try {
+                observations.draft = await source.classifier.draft(classifierInput);
+                return observations.draft;
+              } catch (error) {
+                observations.failureCode = error && error.code === 'API_PROOF_STALE'
+                  ? 'API_PROOF_STALE'
+                  : '';
+                throw error;
+              }
             }
           },
           notifier: {

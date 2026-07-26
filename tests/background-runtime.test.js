@@ -457,6 +457,23 @@ function harness(options = {}) {
         return engine;
       }
     },
+    TrusteeshipSimulator: {
+      create() {
+        return {
+          async simulate() {
+            return {
+              decision: {
+                action: 'REQUIRE_CONFIRMATION',
+                reasonCode: 'CATEGORY_REQUIRES_CONFIRMATION'
+              },
+              draft: '',
+              wouldSend: false,
+              simulated: true
+            };
+          }
+        };
+      }
+    },
     TrusteeshipPolicy: {
       normalizeSettings(input) {
         return {

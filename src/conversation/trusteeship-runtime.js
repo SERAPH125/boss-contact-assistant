@@ -40,6 +40,16 @@
     'CONVERSATION_UNAVAILABLE', 'LOGIN_REQUIRED', 'BOSS_BLOCKED',
     'TRUSTEESHIP_RESOLVE_FAILED', 'TRUSTEESHIP_PREREQUISITE_FAILED'
   ];
+  var SIMULATION_CODES = new Set([
+    'CONVERSATION_NOT_FOUND',
+    'UNSUPPORTED_PLATFORM',
+    'API_PROOF_STALE',
+    'AI_CLASSIFY_FAILED',
+    'AI_CLASSIFICATION_INVALID',
+    'AI_DRAFT_FAILED',
+    'AI_DRAFT_INVALID',
+    'TRUSTEESHIP_SIMULATION_FAILED'
+  ]);
   var PUBLIC_PAUSE_CODES = new Set([
     'LOGIN_REQUIRED',
     'BOSS_BLOCKED',
@@ -237,6 +247,13 @@
     if (message.type === 'TRUSTEESHIP_REGISTER_ACTIVE') {
       return exactKeys(message, ['type', 'enable']) &&
         typeof message.enable === 'boolean';
+    }
+    if (message.type === 'TRUSTEESHIP_SIMULATE_MESSAGE') {
+      return exactKeys(message, ['type', 'conversationId', 'message']) &&
+        boundedString(message.conversationId, 128, false) &&
+        typeof message.message === 'string' &&
+        message.message.trim() !== '' &&
+        Array.from(message.message.trim()).length <= 600;
     }
     if (message.type === 'TRUSTEESHIP_SET_CONVERSATION') {
       return exactKeys(message, ['type', 'conversationId', 'enabled']) &&
@@ -810,6 +827,7 @@
     var storage = source.storage;
     var store = source.store;
     var engine = source.engine;
+    var simulator = source.simulator;
     var policy = source.policy;
     var notifierModule = source.notifierModule;
     var feishuClient = source.feishuClient;
@@ -817,7 +835,8 @@
     var runApiTest = source.runApiTest;
     var now = typeof source.now === 'function' ? source.now : Date.now;
     if (!chromeApi || !chromeApi.alarms || !chromeApi.tabs ||
-      !storage || !store || !engine || !policy || !notifierModule || !feishuClient ||
+      !storage || !store || !engine || !simulator || typeof simulator.simulate !== 'function' ||
+      !policy || !notifierModule || !feishuClient ||
       typeof saveApi !== 'function' || typeof runApiTest !== 'function') {
       throw new Error('INVALID_CONTROLLER_DEPENDENCIES');
     }
@@ -1350,6 +1369,22 @@
       if (input.type === 'TRUSTEESHIP_REMOVE_CONVERSATION') return removeConversation(input);
       if (input.type === 'TRUSTEESHIP_REGISTER_ACTIVE') return registerActiveConversation(input);
       if (input.type === 'TRUSTEESHIP_LIST_APPROVALS') return listApprovals();
+      if (input.type === 'TRUSTEESHIP_SIMULATE_MESSAGE') {
+        try {
+          return {
+            ok: true,
+            result: await simulator.simulate({
+              conversationId: input.conversationId,
+              message: input.message.trim()
+            })
+          };
+        } catch (error) {
+          var simulationCode = error && error.code;
+          return safeError(SIMULATION_CODES.has(simulationCode)
+            ? simulationCode
+            : 'TRUSTEESHIP_SIMULATION_FAILED');
+        }
+      }
       if (input.type === 'TRUSTEESHIP_RESOLVE_APPROVAL') {
         var resolvePrerequisiteFailure = await checkCurrentPrerequisitesUnsafe();
         if (resolvePrerequisiteFailure) return resolvePrerequisiteFailure;

@@ -222,6 +222,19 @@ async function privacyHarness(mode) {
     storage,
     store,
     engine,
+    simulator: {
+      async simulate() {
+        return {
+          decision: {
+            action: 'REQUIRE_CONFIRMATION',
+            reasonCode: 'CATEGORY_REQUIRES_CONFIRMATION'
+          },
+          draft: '',
+          wouldSend: false,
+          simulated: true
+        };
+      }
+    },
     policy: Policy,
     notifierModule: FeishuNotifier,
     feishuClient: client,

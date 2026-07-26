@@ -258,3 +258,26 @@ test('turns classifier and draft failures into stable errors without provider de
     }
   );
 });
+
+test('preserves a stale API proof code through the engine classification boundary', async () => {
+  const harness = createHarness({
+    classifier: {
+      async classify() {
+        const error = new Error('stale proof provider detail');
+        error.code = 'API_PROOF_STALE';
+        throw error;
+      },
+      async draft() {
+        throw new Error('must not draft');
+      }
+    }
+  });
+
+  await assert.rejects(
+    () => harness.simulator.simulate({
+      conversationId: 'conv-1',
+      message: '还在看机会吗？'
+    }),
+    (error) => error && error.code === 'API_PROOF_STALE'
+  );
+});

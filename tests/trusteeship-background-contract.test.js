@@ -15,6 +15,7 @@ test('imports trusteeship modules in dependency order before background use', ()
     '/src/platform/boss/peer-identity.js',
     '/src/platform/boss/conversation-reader.js',
     '/src/conversation/monitor-engine.js',
+    '/src/conversation/trusteeship-simulator.js',
     '/src/conversation/trusteeship-runtime.js'
   ];
   let previous = -1;
@@ -26,3 +27,20 @@ test('imports trusteeship modules in dependency order before background use', ()
   }
 });
 
+test('composes the simulator from protected AI dependencies and passes it to runtime', () => {
+  const creation = background.indexOf('TrusteeshipSimulator.create({');
+  const controller = background.indexOf('TrusteeshipRuntime.createController({');
+  assert.ok(creation > 0 && controller > creation);
+  const block = background.slice(creation, controller);
+  for (const dependency of [
+    'storeModule: ConversationStore',
+    'engineModule: MonitorEngine',
+    'productionStore: conversationStore',
+    'classifier: protectedTrusteeshipClassifier',
+    'policy: TrusteeshipPolicy',
+    'getResumeFacts: getTrusteeshipResumeFacts'
+  ]) {
+    assert.match(block, new RegExp(dependency));
+  }
+  assert.match(background.slice(controller, controller + 800), /simulator:\s*trusteeshipSimulator/);
+});

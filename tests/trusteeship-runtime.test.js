@@ -81,6 +81,7 @@ function controllerHarness(overrides) {
     removeConversation: [],
     run: 0,
     resolve: [],
+    simulate: [],
     saveApi: [],
     apiTest: 0
   };
@@ -133,6 +134,27 @@ function controllerHarness(overrides) {
       return { ok: true, status: 'NO_REPLY' };
     }
   };
+  const simulator = source.simulator || {
+    async simulate(input) {
+      calls.simulate.push(structuredClone(input));
+      return {
+        conversationId: input.conversationId,
+        message: input.message,
+        classification: {
+          category: 'still_looking',
+          confidence: 0.91,
+          reasonCode: 'SAFE',
+          evidenceIds: ['faq-line-1'],
+          fieldsNeeded: []
+        },
+        decision: { action: 'AUTO_REPLY', reasonCode: 'AUTO_REPLY_ALLOWED' },
+        draft: '是的，我还在看合适机会。',
+        draftEvidenceIds: ['faq-line-1'],
+        wouldSend: true,
+        simulated: true
+      };
+    }
+  };
   const feishuClient = source.feishuClient || {
     async send() { return { ok: true, code: 'OK' }; }
   };
@@ -149,6 +171,7 @@ function controllerHarness(overrides) {
     storage,
     store,
     engine,
+    simulator,
     policy: Policy,
     notifierModule: FeishuNotifier,
     feishuClient,
@@ -188,6 +211,11 @@ test('high-privilege message schemas reject extra keys, oversized identifiers, a
     },
     { type: 'TRUSTEESHIP_OPEN_CONVERSATION', conversationId: 'conv-1' },
     { type: 'TRUSTEESHIP_RUN_NOW' },
+    {
+      type: 'TRUSTEESHIP_SIMULATE_MESSAGE',
+      conversationId: 'conv-1',
+      message: '还在看机会吗？'
+    },
     { type: 'TRUSTEESHIP_REGISTER_ACTIVE', enable: true },
     { type: 'TRUSTEESHIP_REGISTER_ACTIVE', enable: false }
   ];
@@ -215,7 +243,13 @@ test('high-privilege message schemas reject extra keys, oversized identifiers, a
     { type: 'TRUSTEESHIP_REGISTER_ACTIVE', enable: 'yes' },
     { type: 'TRUSTEESHIP_REMOVE_CONVERSATION' },
     { type: 'TRUSTEESHIP_REMOVE_CONVERSATION', conversationId: 'x'.repeat(129) },
-    { type: 'TRUSTEESHIP_REMOVE_CONVERSATION', conversationId: 'conv-1', extra: true }
+    { type: 'TRUSTEESHIP_REMOVE_CONVERSATION', conversationId: 'conv-1', extra: true },
+    { type: 'TRUSTEESHIP_SIMULATE_MESSAGE', conversationId: 'conv-1', message: '' },
+    { type: 'TRUSTEESHIP_SIMULATE_MESSAGE', conversationId: 'conv-1', message: '   ' },
+    { type: 'TRUSTEESHIP_SIMULATE_MESSAGE', conversationId: 'x'.repeat(129), message: '您好' },
+    { type: 'TRUSTEESHIP_SIMULATE_MESSAGE', conversationId: 'conv-1', message: '问'.repeat(601) },
+    { type: 'TRUSTEESHIP_SIMULATE_MESSAGE', conversationId: 'conv-1', message: '😀'.repeat(601) },
+    { type: 'TRUSTEESHIP_SIMULATE_MESSAGE', conversationId: 'conv-1', message: '您好', extra: true }
   ].forEach((message) => assert.equal(Runtime.validateUserMessage(message), false));
 });
 
@@ -737,6 +771,54 @@ test('run, schedule, and manual resolve reject a stale API proof before entering
   assert.equal(h.snapshot.conversationTrusteeship.paused, true);
   assert.equal(h.snapshot.conversationTrusteeship.pauseCode, 'PREREQUISITE_CHANGED');
   assert.deepEqual(h.calls.create, []);
+});
+
+test('simulation delegates one trimmed message without requiring the live monitor to be running', async () => {
+  const h = controllerHarness();
+  h.snapshot.conversationTrusteeship.enabled = false;
+
+  const response = await h.controller.handleMessage({
+    type: 'TRUSTEESHIP_SIMULATE_MESSAGE',
+    conversationId: 'conv-1',
+    message: '  还在看机会吗？  '
+  });
+
+  assert.equal(response.ok, true);
+  assert.equal(response.result.wouldSend, true);
+  assert.equal(response.result.simulated, true);
+  assert.deepEqual(h.calls.simulate, [{
+    conversationId: 'conv-1',
+    message: '还在看机会吗？'
+  }]);
+  assert.equal(h.calls.run, 0);
+  assert.deepEqual(h.calls.clear, []);
+  assert.deepEqual(h.calls.create, []);
+});
+
+test('simulation preserves stable failures and masks arbitrary provider errors', async () => {
+  for (const [errorCode, expectedCode] of [
+    ['AI_CLASSIFY_FAILED', 'AI_CLASSIFY_FAILED'],
+    ['provider-secret-simulation-canary', 'TRUSTEESHIP_SIMULATION_FAILED']
+  ]) {
+    const h = controllerHarness({
+      simulator: {
+        async simulate() {
+          const error = new Error('provider-secret-body-canary');
+          error.code = errorCode;
+          throw error;
+        }
+      }
+    });
+
+    const response = await h.controller.handleMessage({
+      type: 'TRUSTEESHIP_SIMULATE_MESSAGE',
+      conversationId: 'conv-1',
+      message: '您好'
+    });
+
+    assert.deepEqual(response, { ok: false, code: expectedCode });
+    assert.equal(JSON.stringify(response).includes('provider-secret'), false);
+  }
 });
 
 test('manual and scheduled checks reject a disabled or paused global trusteeship instead of reporting an empty successful cycle', async () => {
@@ -1649,6 +1731,7 @@ test('a concurrent lifecycle reconcile cannot overwrite the alarm chosen by a se
       async runCycle() { return {}; },
       async resolveApproval() { return { ok: true }; }
     },
+    simulator: { async simulate() { return {}; } },
     policy: Policy,
     notifierModule: FeishuNotifier,
     feishuClient: { async send() { return { ok: true, code: 'OK' }; } },
