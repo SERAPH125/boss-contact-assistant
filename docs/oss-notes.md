@@ -243,7 +243,9 @@ ego-lite 对徐海霞会话的精确单次发送排查得到三组现场证据�
 
 `AUTO_CLOSE` 复用现有发送肯定证据和 `SEND_RESULT_UNKNOWN` 终态，但从普通 AUTO 额度预留、成功计数、未知计数及 fresh Worker 恢复计数中完全排除。成功时会话关闭为 `ENDED_UNMATCHED` 并保留 `AUTO_CLOSE/SENT` 证据；只有显式重新托管才能恢复。存储与恢复聚焦测试为 75/75，覆盖完整/损坏延迟状态、即时和延迟意图、满额度成功、未知结果、Worker 恢复、重置及重新托管。
 
-监控引擎即时路径继续沿用 [Rasa](https://github.com/RasaHQ/rasa) 的“同一对话决策链跑真实动作”边界、[LangGraph](https://github.com/langchain-ai/langgraph) 的显式终态，以及 [Open Policy Agent](https://github.com/open-policy-agent/opa) 的模型判断与确定性授权分层：可靠文本即使没有简历事实也会先分类，但只有严格 `explicit_rejection` 允许空依据；结束语还要经过独立确定性校验和发送前最新快照二次策略门。非静默命中后引擎先创建唯一 `AUTO_CLOSE` intent，再复用现有 Boss sender 和肯定证据收束为 `ENDED_UNMATCHED`；满普通额度仍可执行且计数不变，第二周期不会再读取或发送。草稿失败、不安全草稿和 provider 异常全部降级为不含原始内容的本地待办，未知发送进入不可重放的 `SEND_RESULT_UNKNOWN`。监控引擎聚焦测试为 53/53；静默延迟调度尚未在本阶段接入。
+监控引擎即时路径继续沿用 [Rasa](https://github.com/RasaHQ/rasa) 的“同一对话决策链跑真实动作”边界、[LangGraph](https://github.com/langchain-ai/langgraph) 的显式终态，以及 [Open Policy Agent](https://github.com/open-policy-agent/opa) 的模型判断与确定性授权分层：可靠文本即使没有简历事实也会先分类，但只有严格 `explicit_rejection` 允许空依据；结束语还要经过独立确定性校验和发送前最新快照二次策略门。非静默命中后引擎先创建唯一 `AUTO_CLOSE` intent，再复用现有 Boss sender 和肯定证据收束为 `ENDED_UNMATCHED`；满普通额度仍可执行且计数不变，第二周期不会再读取或发送。草稿失败、不安全草稿和 provider 异常全部降级为不含原始内容的本地待办，未知发送进入不可重放的 `SEND_RESULT_UNKNOWN`。该即时路径落地时监控引擎聚焦测试为 53/53。
+
+静默调度阶段继续借鉴 [BullMQ](https://github.com/taskforcesh/bullmq) 的延迟任务必须持久化并在执行时重新验证状态、[LangGraph](https://github.com/langchain-ai/langgraph) 的可恢复显式节点，以及 AWS outbox 的“意图先于副作用”边界。`DEFER_AUTO_CLOSE` 只保存当前指纹、已验证的冻结结束语和置信度；`WAITING_AUTO_CLOSE` 被纳入只读轮询，但静默期间不重复调用 AI、不创建通知或发送意图。静默结束后先读取同一会话：零增量才重验草稿、授权和精确指纹并创建 `AUTO_CLOSE` intent；存在更新来信则先原子取消旧延迟对象，再处理新消息。checkpoint 现可在精确匹配延迟指纹时更新检查时间而不清除延迟对象。引擎与 store 联合测试为 122/122，覆盖静默内重复检查、跨日唤醒、新消息取消、新 engine 实例恢复及额度保持为零。
 
 ## v0.3.5 Task 9 恢复、幂等与隐私回归参考
 

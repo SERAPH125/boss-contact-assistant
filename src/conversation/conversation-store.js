@@ -1408,14 +1408,19 @@
         var snapshot = loaded.snapshot;
         var conversation = requireConversation(snapshot, conversationId);
         var source = checkpoint && typeof checkpoint === 'object' ? checkpoint : {};
+        var deferredCheckpoint = conversation.state === 'WAITING_AUTO_CLOSE' &&
+          conversation.pendingAutoClose &&
+          conversation.pendingAutoClose.fingerprint === source.baseline;
         if (typeof source.baseline !== 'string' ||
           source.baseline.length > 1000 ||
           !conversation.enabled ||
-          (conversation.state !== 'WAITING_HR' && conversation.state !== 'WAITING_CONFIRMATION')) {
+          (conversation.state !== 'WAITING_HR' &&
+            conversation.state !== 'WAITING_CONFIRMATION' &&
+            !deferredCheckpoint)) {
           throw storeError('INVALID_CHECKPOINT');
         }
         conversation.lastIncomingFingerprint = source.baseline;
-        clearPendingAutoClose(conversation);
+        if (!deferredCheckpoint) clearPendingAutoClose(conversation);
         clearClassificationRecovery(conversation);
         clearReadFailure(conversation);
         conversation.lastCheckedAt = loaded.now;

@@ -85,6 +85,8 @@
     'createSendIntent',
     'createAutoSendIntent',
     'createAutoCloseIntent',
+    'deferAutoClose',
+    'cancelDeferredAutoClose',
     'completeSend',
     'markSendUnknown',
     'markConversationChecked',
@@ -596,6 +598,95 @@
       return { sent: false, errorCode: 'SEND_RESULT_UNKNOWN' };
     }
 
+    async function processDeferredAutoClose(context, conversation, read, output) {
+      var snapshot = await store.getSnapshot();
+      var current = snapshot.managedConversations[conversation.conversationId];
+      var pending = current && current.pendingAutoClose;
+      if (!current ||
+        !current.enabled ||
+        current.state !== 'WAITING_AUTO_CLOSE' ||
+        !pending) {
+        addError(output, 'UNKNOWN_PROCESSING_FAILURE');
+        return { continueMessages: false, checkpoint: false };
+      }
+
+      if (read.messages.length > 0) {
+        try {
+          var resumed = await store.cancelDeferredAutoClose(
+            current.conversationId,
+            pending.fingerprint
+          );
+          return {
+            continueMessages: true,
+            checkpoint: false,
+            conversation: resumed
+          };
+        } catch (error) {
+          addError(output, mapStoreError(error && error.code));
+          return { continueMessages: false, checkpoint: false };
+        }
+      }
+
+      if (context.quiet) {
+        return { continueMessages: false, checkpoint: true };
+      }
+
+      var safety = policy.validateAutoCloseDraft(pending.draft);
+      if (!safety || safety.ok !== true || safety.draft !== pending.draft) {
+        try {
+          await store.cancelDeferredAutoClose(current.conversationId, pending.fingerprint);
+          await store.pauseConversation(current.conversationId, 'UNKNOWN_PROCESSING_FAILURE');
+        } catch (_) {
+          // 任何迁移失败都保留原延迟状态，不取得发送权限。
+        }
+        addError(output, 'AI_DRAFT_INVALID');
+        return { continueMessages: false, checkpoint: false };
+      }
+
+      var classification = {
+        category: 'explicit_rejection',
+        confidence: pending.confidence,
+        reasonCode: 'EXPLICIT_REJECTION',
+        evidenceIds: [],
+        fieldsNeeded: []
+      };
+      var decision = policy.decide({
+        hardRisk: { blocked: false, reasonCode: '', fieldsNeeded: [] },
+        settings: snapshot.conversationTrusteeship,
+        conversationEnabled: current.enabled,
+        quiet: policy.isQuietHours(
+          readClock(clock),
+          snapshot.conversationTrusteeship.quietHours
+        ),
+        hasPendingApproval: !!current.pendingApprovalId,
+        dailyCount: snapshot.conversationTrusteeship.autoReplyCount,
+        ai: classification
+      });
+      if (decision.action !== 'AUTO_CLOSE') {
+        return { continueMessages: false, checkpoint: true };
+      }
+
+      var intent;
+      try {
+        if (guardExternalAction) await guardExternalAction();
+        intent = await store.createAutoCloseIntent(
+          current.conversationId,
+          pending.fingerprint,
+          safety.draft
+        );
+      } catch (error) {
+        addError(output, mapStoreError(error && error.code));
+        return { continueMessages: false, checkpoint: true };
+      }
+      var sendOutcome = await executeSend(current, safety.draft, intent);
+      if (sendOutcome.sent) {
+        output.autoSent += 1;
+      } else {
+        addError(output, sendOutcome.errorCode);
+      }
+      return { continueMessages: false, checkpoint: false };
+    }
+
     async function processMessage(context, conversation, message, output) {
       var current = (await store.getSnapshot()).managedConversations[conversation.conversationId];
       if (!current || !current.enabled || current.state === 'PAUSED' || current.state === 'DISABLED') {
@@ -715,6 +806,20 @@
             draft: validatedCloseDraft.draft,
             evidenceIds: draft.evidenceIds
           };
+        }
+      }
+
+      if (decision.action === 'DEFER_AUTO_CLOSE' && draft) {
+        try {
+          await store.deferAutoClose(
+            current.conversationId,
+            message.fingerprint,
+            draft.draft,
+            classification.confidence
+          );
+          return true;
+        } catch (deferError) {
+          throw engineError(mapStoreError(deferError && deferError.code));
         }
       }
 
@@ -861,7 +966,8 @@
         var conversation = await resumeStaleReadPause(selected[selectedIndex], output);
         attemptedSlots += 1;
         if (conversation.state !== 'WAITING_HR' &&
-          conversation.state !== 'WAITING_CONFIRMATION') {
+          conversation.state !== 'WAITING_CONFIRMATION' &&
+          conversation.state !== 'WAITING_AUTO_CLOSE') {
           output.skipped += 1;
           continue;
         }
@@ -877,6 +983,23 @@
           continue;
         }
         output.checked += 1;
+        if (conversation.state === 'WAITING_AUTO_CLOSE') {
+          var deferred = await processDeferredAutoClose(context, conversation, read, output);
+          if (!deferred.continueMessages) {
+            if (deferred.checkpoint) {
+              try {
+                await store.markConversationChecked(
+                  conversation.conversationId,
+                  { baseline: read.baseline }
+                );
+              } catch (deferredCheckpointError) {
+                addError(output, mapStoreError(deferredCheckpointError && deferredCheckpointError.code));
+              }
+            }
+            continue;
+          }
+          conversation = deferred.conversation;
+        }
         if (read.messages.length > 0) {
           context.facts = await loadFactsOnce();
         }

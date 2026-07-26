@@ -1080,6 +1080,32 @@ test('defers one exact classified rejection and cancels it by fingerprint', asyn
   assert.equal(cancelled.pendingAutoClose, undefined);
 });
 
+test('WAITING_AUTO_CLOSE checkpoint preserves the exact deferred close', async () => {
+  const harness = makeHarness();
+  await registerAndEnable(harness);
+  await harness.store.beginMessage('conv-1', 'fp-reject');
+  await harness.store.deferAutoClose(
+    'conv-1',
+    'fp-reject',
+    '收到，感谢您的回复，祝工作顺利。',
+    0.96
+  );
+
+  const checked = await harness.store.markConversationChecked('conv-1', {
+    baseline: 'fp-reject'
+  });
+
+  assert.equal(checked.state, 'WAITING_AUTO_CLOSE');
+  assert.equal(checked.lastIncomingFingerprint, 'fp-reject');
+  assert.ok(checked.lastCheckedAt > 0);
+  assert.deepEqual(checked.pendingAutoClose, {
+    fingerprint: 'fp-reject',
+    draft: '收到，感谢您的回复，祝工作顺利。',
+    confidence: 0.96,
+    createdAt: Date.parse('2026-07-24T08:00:00+08:00')
+  });
+});
+
 test('AUTO_CLOSE succeeds at a full daily quota and ends unmatched without counting', async () => {
   const harness = makeHarness({
     conversationTrusteeship: {

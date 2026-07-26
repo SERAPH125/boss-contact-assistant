@@ -484,6 +484,199 @@ test('unsafe or failed AI rejection drafts become clean approvals and never reac
   assert.equal(serialized.includes(unsafeDraft), false);
 });
 
+test('quiet explicit rejection defers with zero writes then sends after a clean reread', async () => {
+  let messages = [incoming('quiet-reject', '不合适')];
+  let classifications = 0;
+  let drafts = 0;
+  const harness = await makeHarness({
+    now: Date.parse('2026-07-26T23:00:00+08:00'),
+    getResumeFacts() {
+      return [];
+    },
+    reader: {
+      async read(conversation) {
+        return readOk(conversation, messages);
+      },
+      async send(conversation, draft, intent) {
+        return {
+          success: true,
+          targetConversationId: conversation.conversationId,
+          sentFingerprint: `sent:${intent.intentId}`,
+          observedAt: Date.now()
+        };
+      }
+    },
+    classifier: {
+      async classify() {
+        classifications += 1;
+        return {
+          category: 'explicit_rejection',
+          confidence: 0.97,
+          reasonCode: 'EXPLICIT_REJECTION',
+          evidenceIds: [],
+          fieldsNeeded: []
+        };
+      },
+      async draft() {
+        drafts += 1;
+        return {
+          draft: '收到，感谢您的回复，祝工作顺利。',
+          evidenceIds: []
+        };
+      }
+    }
+  });
+  await harness.register(['conv-1']);
+  await harness.enableGlobal({
+    quietHours: { enabled: true, start: '22:00', end: '08:00' }
+  });
+
+  const quiet = await harness.engine.runCycle();
+  let snapshot = await harness.store.getSnapshot();
+  assert.equal(quiet.autoSent, 0);
+  assert.equal(quiet.pending, 0);
+  assert.deepEqual(quiet.errors, []);
+  assert.equal(harness.calls.send.length, 0);
+  assert.equal(snapshot.managedConversations['conv-1'].state, 'WAITING_AUTO_CLOSE');
+
+  messages = [];
+  harness.setTime('2026-07-26T23:05:00+08:00');
+  const stillQuiet = await harness.engine.runCycle();
+  snapshot = await harness.store.getSnapshot();
+  assert.equal(stillQuiet.checked, 1);
+  assert.equal(stillQuiet.autoSent, 0);
+  assert.equal(classifications, 1);
+  assert.equal(drafts, 1);
+  assert.equal(harness.calls.send.length, 0);
+  assert.equal(snapshot.managedConversations['conv-1'].state, 'WAITING_AUTO_CLOSE');
+
+  harness.setTime('2026-07-27T08:01:00+08:00');
+  const awake = await harness.engine.runCycle();
+  snapshot = await harness.store.getSnapshot();
+
+  assert.equal(awake.checked, 1);
+  assert.equal(awake.newMessages, 0);
+  assert.equal(awake.autoSent, 1);
+  assert.deepEqual(awake.errors, []);
+  assert.equal(harness.calls.send.length, 1);
+  assert.equal(harness.calls.send[0].intent.mode, 'AUTO_CLOSE');
+  assert.equal(snapshot.managedConversations['conv-1'].state, 'ENDED_UNMATCHED');
+  assert.equal(snapshot.conversationTrusteeship.autoReplyCount, 0);
+});
+
+test('a newer HR message cancels the deferred close before any send', async () => {
+  let messages = [incoming('reject', '不合适')];
+  const harness = await makeHarness({
+    now: Date.parse('2026-07-26T23:00:00+08:00'),
+    reader: {
+      async read(conversation) {
+        return readOk(conversation, messages);
+      },
+      async send() {
+        throw new Error('must not send');
+      }
+    },
+    classifier: {
+      async classify(input) {
+        const latest = input.targetMessages.at(-1)?.text;
+        if (latest === '不合适') {
+          return {
+            category: 'explicit_rejection',
+            confidence: 0.97,
+            reasonCode: 'EXPLICIT_REJECTION',
+            evidenceIds: [],
+            fieldsNeeded: []
+          };
+        }
+        return {
+          category: 'important',
+          confidence: 0.98,
+          reasonCode: 'RESUME_DETAIL_QUERY',
+          evidenceIds: ['resume-1'],
+          fieldsNeeded: ['projectExperience']
+        };
+      },
+      async draft(input) {
+        const latest = input.targetMessages.at(-1)?.text;
+        return {
+          draft: '我先整理一下相关经历，稍后回复您。',
+          evidenceIds: latest === '不合适' ? [] : ['resume-1']
+        };
+      }
+    }
+  });
+  await harness.register(['conv-1']);
+  await harness.enableGlobal({
+    quietHours: { enabled: true, start: '22:00', end: '08:00' }
+  });
+  await harness.engine.runCycle();
+
+  messages = [incoming('newer', '方便补充一下项目经历吗')];
+  harness.setTime('2026-07-27T08:01:00+08:00');
+  const result = await harness.engine.runCycle();
+  const snapshot = await harness.store.getSnapshot();
+  const conversation = snapshot.managedConversations['conv-1'];
+
+  assert.equal(harness.calls.send.length, 0);
+  assert.equal(result.pending, 1);
+  assert.equal(conversation.pendingAutoClose, undefined);
+  assert.equal(conversation.lastIncomingFingerprint, 'id:newer');
+  assert.equal(conversation.state, 'WAITING_CONFIRMATION');
+});
+
+test('a restarted engine rereads WAITING_AUTO_CLOSE before sending', async () => {
+  let messages = [incoming('restart-reject', '不合适')];
+  const harness = await makeHarness({
+    now: Date.parse('2026-07-26T23:00:00+08:00'),
+    getResumeFacts() {
+      return [];
+    },
+    reader: {
+      async read(conversation) {
+        return readOk(conversation, messages);
+      },
+      async send(conversation, draft, intent) {
+        return {
+          success: true,
+          targetConversationId: conversation.conversationId,
+          sentFingerprint: `sent:${intent.intentId}`,
+          observedAt: Date.now()
+        };
+      }
+    },
+    classifier: {
+      async classify() {
+        return {
+          category: 'explicit_rejection',
+          confidence: 0.96,
+          reasonCode: 'EXPLICIT_REJECTION',
+          evidenceIds: [],
+          fieldsNeeded: []
+        };
+      },
+      async draft() {
+        return { draft: '好的，感谢您的回复，祝工作顺利。', evidenceIds: [] };
+      }
+    }
+  });
+  await harness.register(['conv-1']);
+  await harness.enableGlobal({
+    quietHours: { enabled: true, start: '22:00', end: '08:00' }
+  });
+  await harness.engine.runCycle();
+
+  messages = [];
+  harness.setTime('2026-07-27T08:01:00+08:00');
+  const restartedEngine = MonitorEngine.create(harness.deps);
+  const result = await restartedEngine.runCycle();
+  const snapshot = await harness.store.getSnapshot();
+
+  assert.equal(result.autoSent, 1);
+  assert.equal(harness.calls.send.length, 1);
+  assert.equal(snapshot.managedConversations['conv-1'].state, 'ENDED_UNMATCHED');
+  assert.equal(snapshot.conversationTrusteeship.autoReplyCount, 0);
+});
+
 test('low confidence, hard risk, AI failure, non-text, and evidence mismatch become local approvals', async () => {
   const messages = {
     low: incoming('low', '您好'),
