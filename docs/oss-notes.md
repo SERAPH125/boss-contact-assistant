@@ -251,6 +251,10 @@ ego-lite 对徐海霞会话的精确单次发送排查得到三组现场证据�
 
 完全依赖 AI 判断明确拒绝意味着语义误判风险不会被本地拒绝关键词规则兜底：假阳性可能提前发送礼貌结束语，假阴性则进入普通人工确认或其他分类。本项目接受用户选择的这一权衡，但没有把自由文本直接等同于发送权限；确定性层仍只接受精确类别、原因码、`>=0.90` 置信度、空 evidence/fields 形状，并独立限制结束语、静默延迟、最新消息重读、唯一 intent、目标证明和未知发送终态。若后续需要降低假阳性，应调高结构化置信阈值或恢复人工确认，而不是增加隐藏的关键词覆盖。
 
+2026-07-26 最终分支验证：`npm test` 为 433/433；仓库内全部 JavaScript 通过 `node --check`，Manifest JSON 可解析，当前工作树与 `main...HEAD` 均无 `git diff --check` 错误。完整差异复核确认：HR 正文没有新增关键词/正则拒绝分类器；本地正则只校验拟外发结束语；`AUTO_CLOSE` 不参与普通额度 reservation、成功计数、未知计数或 Worker 恢复计数；`ENDED_UNMATCHED` 不进入 engine 读取；live drill 只使用隔离 sender，并且生产侧只能写 `LIVE_DRILL/PENDING`。
+
+浏览器验收按无外发边界执行：已在新建 ego-lite Agent 任务空间重载扩展，并确认新版侧栏存在 `AUTO_CLOSE` 演练投影和“当前尚未发送给 HR”提示。该隔离空间不继承用户窗口中的扩展本地存储，因此没有 API 配置和已登记会话，无法运行真实 AI 演练；尝试只读接入现有用户窗口时，扩展管理页原生菜单阻断了可靠自动操作，已停止而未创建待办、未发飞书、未写 Boss，并关闭隔离任务空间。自动化 live-drill 回归覆盖合成明确拒绝并证明 `AUTO_CLOSE / EXPLICIT_REJECTION_AUTO_CLOSE / wouldSend=true / sentToBoss=false`，但不能替代真实新来信生产验收。
+
 ## v0.3.5 Task 9 恢复、幂等与隐私回归参考
 
 - [Chrome Extension Service Worker 迁移文档源码](https://github.com/GoogleChrome/developer.chrome.com/blob/main/site/en/docs/extensions/migrating/to-service-workers/index.md) 与 [GoogleChrome/chrome-extensions-samples](https://github.com/GoogleChrome/chrome-extensions-samples)（Apache-2.0）用于复核 MV3 Worker 会被终止、持久存储应作为事实源、事件监听应在顶层注册，以及周期任务应使用具名 `chrome.alarms`。本项目据此验证同名 `boss-ai-chat-monitor` 只表达一个逻辑 alarm，并验证旧 `scheduledTime` 事件只触发一次当前周期。
