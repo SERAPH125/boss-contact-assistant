@@ -239,6 +239,10 @@ ego-lite 对徐海霞会话的精确单次发送排查得到三组现场证据�
 
 策略阶段延续 [Open Policy Agent](https://github.com/open-policy-agent/opa) 的“结构化输入与确定性授权分离”思路：`TrusteeshipPolicy` 不重新解释 HR 正文，只验证 AI 分类的类别、原因码、置信度和空字段形状。严格命中时返回 `AUTO_CLOSE`，静默时段返回 `DEFER_AUTO_CLOSE`；全局/单会话授权和活动待办仍先行，普通自动回复日限不参与结束动作。另一个确定性校验器只检查将要外发的 AI 结束语是否短、单行、礼貌且不包含问题、争取、经历推销或承诺，因此没有变相加入拒绝关键词分类。该阶段 19 项 policy 测试先 RED 后 GREEN；状态持久化和真实发送仍在后续任务中完成。
 
+持久化阶段复用本地知识库 `技术复用/浏览器扩展-AI会话托管可靠性复盘.md` 的既有外部副作用结论，并继续对照 [AWS Transactional Outbox 示例](https://github.com/aws-samples/transactional-outbox-pattern) 与 [BullMQ](https://github.com/taskforcesh/bullmq) 的意图/恢复边界：先原子写入唯一意图，再执行页面写入；Worker 中断只收束为未知终态，不把幂等键误当成可以安全重试的证明。本轮新增 `WAITING_AUTO_CLOSE`、`ENDED_UNMATCHED` 和 `AUTO_CLOSE` intent；延迟对象绑定当前 incoming 指纹、45 字内冻结草稿、置信度和时间，损坏或跨状态字段不会被信任。
+
+`AUTO_CLOSE` 复用现有发送肯定证据和 `SEND_RESULT_UNKNOWN` 终态，但从普通 AUTO 额度预留、成功计数、未知计数及 fresh Worker 恢复计数中完全排除。成功时会话关闭为 `ENDED_UNMATCHED` 并保留 `AUTO_CLOSE/SENT` 证据；只有显式重新托管才能恢复。存储与恢复聚焦测试为 75/75，覆盖完整/损坏延迟状态、即时和延迟意图、满额度成功、未知结果、Worker 恢复、重置及重新托管。
+
 ## v0.3.5 Task 9 恢复、幂等与隐私回归参考
 
 - [Chrome Extension Service Worker 迁移文档源码](https://github.com/GoogleChrome/developer.chrome.com/blob/main/site/en/docs/extensions/migrating/to-service-workers/index.md) 与 [GoogleChrome/chrome-extensions-samples](https://github.com/GoogleChrome/chrome-extensions-samples)（Apache-2.0）用于复核 MV3 Worker 会被终止、持久存储应作为事实源、事件监听应在顶层注册，以及周期任务应使用具名 `chrome.alarms`。本项目据此验证同名 `boss-ai-chat-monitor` 只表达一个逻辑 alarm，并验证旧 `scheduledTime` 事件只触发一次当前周期。

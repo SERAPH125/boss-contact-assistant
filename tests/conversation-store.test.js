@@ -998,6 +998,209 @@ test('persists a handled read checkpoint without storing caller extras', async (
   );
 });
 
+test('normalizes only complete deferred auto-close state', async () => {
+  const baseConversation = {
+    conversationId: 'conv-1',
+    jobId: 'job-1',
+    platform: 'boss',
+    url: 'https://www.zhipin.com/web/geek/chat?conversation=conv-1',
+    enabled: true,
+    state: 'WAITING_AUTO_CLOSE',
+    lastIncomingFingerprint: 'fp-reject',
+    processedFingerprints: ['fp-reject']
+  };
+  const valid = makeHarness({
+    managedConversations: {
+      'conv-1': Object.assign({}, baseConversation, {
+        pendingAutoClose: {
+          fingerprint: 'fp-reject',
+          draft: '收到，感谢您的回复，祝工作顺利。',
+          confidence: 0.96,
+          createdAt: 100
+        }
+      })
+    }
+  });
+  assert.deepEqual(
+    (await valid.store.getSnapshot()).managedConversations['conv-1'].pendingAutoClose,
+    {
+      fingerprint: 'fp-reject',
+      draft: '收到，感谢您的回复，祝工作顺利。',
+      confidence: 0.96,
+      createdAt: 100
+    }
+  );
+
+  for (const pendingAutoClose of [
+    null,
+    { fingerprint: '', draft: '谢谢', confidence: 0.96, createdAt: 100 },
+    { fingerprint: 'fp-reject', draft: '', confidence: 0.96, createdAt: 100 },
+    { fingerprint: 'fp-reject', draft: '谢'.repeat(46), confidence: 0.96, createdAt: 100 },
+    { fingerprint: 'fp-reject', draft: '谢谢', confidence: 2, createdAt: 100 },
+    { fingerprint: 'fp-reject', draft: '谢谢', confidence: 0.96, createdAt: 0 },
+    { fingerprint: 'different-fingerprint', draft: '谢谢', confidence: 0.96, createdAt: 100 }
+  ]) {
+    const damaged = makeHarness({
+      managedConversations: {
+        'conv-1': Object.assign({}, baseConversation, { pendingAutoClose })
+      }
+    });
+    assert.equal(
+      (await damaged.store.getSnapshot()).managedConversations['conv-1'].pendingAutoClose,
+      undefined
+    );
+  }
+});
+
+test('defers one exact classified rejection and cancels it by fingerprint', async () => {
+  const harness = makeHarness();
+  await registerAndEnable(harness);
+  await harness.store.beginMessage('conv-1', 'fp-reject');
+
+  const deferred = await harness.store.deferAutoClose(
+    'conv-1',
+    'fp-reject',
+    '收到，感谢您的回复，祝工作顺利。',
+    0.96
+  );
+  assert.equal(deferred.state, 'WAITING_AUTO_CLOSE');
+  assert.deepEqual(deferred.pendingAutoClose, {
+    fingerprint: 'fp-reject',
+    draft: '收到，感谢您的回复，祝工作顺利。',
+    confidence: 0.96,
+    createdAt: Date.parse('2026-07-24T08:00:00+08:00')
+  });
+
+  await assert.rejects(
+    () => harness.store.cancelDeferredAutoClose('conv-1', 'wrong'),
+    (error) => error.code === 'INVALID_STATE_TRANSITION'
+  );
+  const cancelled = await harness.store.cancelDeferredAutoClose('conv-1', 'fp-reject');
+  assert.equal(cancelled.state, 'WAITING_HR');
+  assert.equal(cancelled.pendingAutoClose, undefined);
+});
+
+test('AUTO_CLOSE succeeds at a full daily quota and ends unmatched without counting', async () => {
+  const harness = makeHarness({
+    conversationTrusteeship: {
+      enabled: true,
+      dailyAutoReplyLimit: 1,
+      autoReplyDay: '2026-07-24',
+      autoReplyCount: 1
+    }
+  });
+  await registerAndEnable(harness);
+  await harness.store.beginMessage('conv-1', 'fp-reject');
+
+  const intent = await harness.store.createAutoCloseIntent(
+    'conv-1',
+    'fp-reject',
+    '收到，感谢您的回复，祝工作顺利。'
+  );
+  assert.equal(intent.mode, 'AUTO_CLOSE');
+  await harness.store.completeSend(intent.intentId, {
+    success: true,
+    targetConversationId: 'conv-1',
+    sentFingerprint: 'sent-close-1',
+    observedAt: 123
+  });
+
+  const snapshot = await harness.store.getSnapshot();
+  const conversation = snapshot.managedConversations['conv-1'];
+  assert.equal(snapshot.conversationTrusteeship.autoReplyCount, 1);
+  assert.equal(conversation.state, 'ENDED_UNMATCHED');
+  assert.equal(conversation.enabled, false);
+  assert.equal(conversation.pendingAutoClose, undefined);
+  assert.equal(conversation.sendIntent.mode, 'AUTO_CLOSE');
+  assert.equal(conversation.sendIntent.status, 'SENT');
+});
+
+test('AUTO_CLOSE uses the exact deferred draft and unknown send never consumes quota', async () => {
+  const harness = makeHarness();
+  await registerAndEnable(harness);
+  await harness.store.beginMessage('conv-1', 'fp-reject');
+  await harness.store.deferAutoClose(
+    'conv-1',
+    'fp-reject',
+    '收到，感谢您的回复，祝工作顺利。',
+    0.96
+  );
+  await assert.rejects(
+    () => harness.store.createAutoCloseIntent('conv-1', 'fp-reject', '不同草稿'),
+    (error) => error.code === 'INVALID_STATE_TRANSITION'
+  );
+
+  const intent = await harness.store.createAutoCloseIntent(
+    'conv-1',
+    'fp-reject',
+    '收到，感谢您的回复，祝工作顺利。'
+  );
+  await harness.store.markSendUnknown(intent.intentId, 'raw secret');
+  const snapshot = await harness.store.getSnapshot();
+  assert.equal(snapshot.conversationTrusteeship.autoReplyCount, 0);
+  assert.equal(snapshot.managedConversations['conv-1'].state, 'PAUSED');
+  assert.equal(
+    snapshot.managedConversations['conv-1'].sendIntent.status,
+    'SEND_RESULT_UNKNOWN'
+  );
+});
+
+test('fresh-worker AUTO_CLOSE recovery is terminal and quota-free', async () => {
+  const harness = makeHarness();
+  await registerAndEnable(harness);
+  await harness.store.beginMessage('conv-1', 'fp-reject');
+  const intent = await harness.store.createAutoCloseIntent(
+    'conv-1',
+    'fp-reject',
+    '收到，感谢您的回复，祝工作顺利。'
+  );
+
+  const FreshConversationStore = loadFreshConversationStore();
+  const recoveredStore = FreshConversationStore.create(
+    harness.storage,
+    () => Date.parse('2026-07-24T08:05:00+08:00'),
+    () => 'must-not-create-an-id'
+  );
+  const recovered = await recoveredStore.getSnapshot();
+  assert.equal(recovered.conversationTrusteeship.autoReplyCount, 0);
+  assert.equal(recovered.managedConversations['conv-1'].state, 'PAUSED');
+  assert.equal(
+    recovered.managedConversations['conv-1'].sendIntent.intentId,
+    intent.intentId
+  );
+  assert.equal(
+    recovered.managedConversations['conv-1'].sendIntent.status,
+    'SEND_RESULT_UNKNOWN'
+  );
+});
+
+test('ended unmatched requires explicit re-management and deferred state is cleared by reset', async () => {
+  const harness = makeHarness();
+  await registerAndEnable(harness);
+  await harness.store.beginMessage('conv-1', 'fp-reject');
+  const intent = await harness.store.createAutoCloseIntent(
+    'conv-1',
+    'fp-reject',
+    '收到，感谢您的回复，祝工作顺利。'
+  );
+  await harness.store.completeSend(intent.intentId, {
+    success: true,
+    targetConversationId: 'conv-1',
+    sentFingerprint: 'sent-close',
+    observedAt: 123
+  });
+
+  const reenabled = await harness.store.setManaged('conv-1', true);
+  assert.equal(reenabled.enabled, true);
+  assert.equal(reenabled.state, 'WAITING_HR');
+
+  await harness.store.beginMessage('conv-1', 'fp-reject-2');
+  await harness.store.deferAutoClose('conv-1', 'fp-reject-2', '谢谢您的回复。', 0.95);
+  const reset = await harness.store.resetConversation('conv-1');
+  assert.equal(reset.state, 'WAITING_HR');
+  assert.equal(reset.pendingAutoClose, undefined);
+});
+
 test('creates an AUTO intent only for the active classified fingerprint and counts it once', async () => {
   const harness = makeHarness();
   await registerAndEnable(harness);
@@ -1482,11 +1685,14 @@ test('store exposes one notification transition API within the exact public meth
   assert.deepEqual(Object.keys(harness.store).sort(), [
     'acknowledgeUnknownSend',
     'beginMessage',
+    'cancelDeferredAutoClose',
     'completeSend',
+    'createAutoCloseIntent',
     'createAutoSendIntent',
     'createLiveDrillApproval',
     'createOrMergeApproval',
     'createSendIntent',
+    'deferAutoClose',
     'getSnapshot',
     'markConversationChecked',
     'markSendUnknown',

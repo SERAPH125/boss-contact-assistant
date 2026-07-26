@@ -40,6 +40,41 @@ function reliableRef() {
   };
 }
 
+test('fresh-worker AUTO_CLOSE recovery pauses without consuming the ordinary reply quota', async () => {
+  const storage = memoryStorage();
+  let ids = 0;
+  const firstModule = loadFreshStoreModule();
+  const firstStore = firstModule.create(storage, () => 1_000, (kind) => `${kind}-${++ids}`);
+  await firstStore.registerConversation(reliableRef());
+  await firstStore.setManaged('conv-recovery', true);
+  await firstStore.saveSettings({ enabled: true, dailyAutoReplyLimit: 1 });
+  await firstStore.beginMessage('conv-recovery', 'id:rejection');
+  const intent = await firstStore.createAutoCloseIntent(
+    'conv-recovery',
+    'id:rejection',
+    '收到，感谢您的回复，祝工作顺利。'
+  );
+
+  const recoveredModule = loadFreshStoreModule();
+  const recoveredStore = recoveredModule.create(
+    storage,
+    () => 2_000,
+    (kind) => `${kind}-${++ids}`
+  );
+  const snapshot = await recoveredStore.getSnapshot();
+
+  assert.equal(snapshot.conversationTrusteeship.autoReplyCount, 0);
+  assert.equal(snapshot.managedConversations['conv-recovery'].state, 'PAUSED');
+  assert.equal(
+    snapshot.managedConversations['conv-recovery'].sendIntent.intentId,
+    intent.intentId
+  );
+  assert.equal(
+    snapshot.managedConversations['conv-recovery'].sendIntent.status,
+    'SEND_RESULT_UNKNOWN'
+  );
+});
+
 test('a fresh worker reclassifies an interrupted CLASSIFYING message and sends it at most once', async () => {
   const storage = memoryStorage();
   let ids = 0;

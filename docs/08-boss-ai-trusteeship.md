@@ -72,7 +72,7 @@
 | --- | --- |
 | `conversationTrusteeship` | 全局开关、检查间隔、自动回复日限、按本地日期归一化的日计数、静默时段、游标与全局暂停信息 |
 | `feishuNotification` | 飞书开关、Webhook、签名密钥和最近测试结果；凭证只允许存在于此独立设置对象 |
-| `managedConversations` | 已可靠登记的 Boss 会话、状态、最近消息、最近指纹、活动待办引用，以及当前一个有界 `sendIntent` |
+| `managedConversations` | 已可靠登记的 Boss 会话、状态、最近消息、最近指纹、活动待办引用、可选的有界 `pendingAutoClose`，以及当前一个有界 `sendIntent` |
 | `pendingApprovals` | 待办内容、状态、草稿和最多两次的安全通知结果；不保存原始通知错误或凭证 |
 
 可靠会话引用必须同时满足：`platform === "boss"`、非空且不含空白的稳定 `conversationId`、非空 `jobId`，以及 HTTPS 的 `*.zhipin.com` 主机和精确 `/web/geek/chat` 或 `/web/geek/chat/` 路径；任何更深子路径都拒绝。新登记会话一律为 `enabled: false`、`DISABLED`；返回值和快照均为深拷贝，调用方修改返回对象不会反向修改存储。
@@ -85,7 +85,13 @@ WAITING_HR / WAITING_CONFIRMATION
   └─ beginMessage(新指纹) → CLASSIFYING
 
 CLASSIFYING
-  └─ createOrMergeApproval → WAITING_CONFIRMATION
+  ├─ createOrMergeApproval → WAITING_CONFIRMATION
+  ├─ deferAutoClose → WAITING_AUTO_CLOSE
+  └─ createAutoCloseIntent → SENDING
+
+WAITING_AUTO_CLOSE
+  ├─ cancelDeferredAutoClose(发现更新消息) → WAITING_HR
+  └─ createAutoCloseIntent(静默结束且重读无更新) → SENDING
 
 WAITING_CONFIRMATION
   ├─ 更多消息 → 合并进同一个活动待办
@@ -93,7 +99,11 @@ WAITING_CONFIRMATION
 
 SENDING
   ├─ completeSend(明确证据) → WAITING_HR；仅 AUTO intent 原子增加当日计数
+  ├─ completeSend(AUTO_CLOSE 明确证据) → ENDED_UNMATCHED；不增加当日计数
   └─ markSendUnknown / Worker 恢复 → PAUSED
+
+ENDED_UNMATCHED
+  └─ setManaged(true) → WAITING_HR（必须由用户显式重新托管）
 
 PAUSED
   └─ resetConversation → WAITING_HR
@@ -108,7 +118,11 @@ PAUSED
 
 ## 两阶段发送与恢复语义
 
-用户确认待办后，`createSendIntent` 先把唯一 `intentId`、`mode: "MANUAL"`、`approvalId`、冻结草稿和 `SENDING` 状态原子写入对应会话的 `sendIntent`，调用方随后才能执行外部发送。引擎通过 `createAutoSendIntent(conversationId, fingerprint, draft)` 只允许当前 `CLASSIFYING` 的活动指纹创建 `mode: "AUTO"` 意图；同一原子读改写还会重验全局已启用、未暂停，并以 `autoReplyCount + 所有 SENDING AUTO 预留数` 对比日限。共享同一 storage 的多个 store/engine 实例因此不能越过日限或在运行中暂停后继续发送。仍为 `SENDING` 的旧意图不能覆盖，已终态意图可由后续新指纹替换。`completeSend` 的终态证据必须同时满足 `success === true`、`targetConversationId` 精确匹配当前会话、`sentFingerprint` 非空且 `observedAt` 是正有限数；`ok: false`、空证据或目标不匹配均拒绝，并保持意图与待办在 `SENDING`。同一意图一旦进入 `SENT` 或 `SEND_RESULT_UNKNOWN` 就不能再次消费；AUTO 的成功与未知结果都各自在终态持久写中消耗一次当日额度，MANUAL 不增加。
+用户确认待办后，`createSendIntent` 先把唯一 `intentId`、`mode: "MANUAL"`、`approvalId`、冻结草稿和 `SENDING` 状态原子写入对应会话的 `sendIntent`，调用方随后才能执行外部发送。引擎通过 `createAutoSendIntent(conversationId, fingerprint, draft)` 只允许当前 `CLASSIFYING` 的活动指纹创建 `mode: "AUTO"` 意图；同一原子读改写还会重验全局已启用、未暂停，并以 `autoReplyCount + 所有 SENDING AUTO 预留数` 对比日限。共享同一 storage 的多个 store/engine 实例因此不能越过日限或在运行中暂停后继续发送。
+
+明确拒绝使用独立 `mode: "AUTO_CLOSE"`：`deferAutoClose` 只接受当前 `CLASSIFYING` 活动指纹，并原子持久化 45 code-points 内的冻结结束语、置信度与创建时间；`cancelDeferredAutoClose` 只接受同一精确指纹。`createAutoCloseIntent` 可从同一 `CLASSIFYING` 指纹或完整的 `WAITING_AUTO_CLOSE` 缓存创建，但延迟路径还要求草稿逐字一致。三个入口都会重验全局/单会话授权、活动待办和发送中意图；它们不读取或预留普通自动回复额度。
+
+仍为 `SENDING` 的旧意图不能覆盖，已终态意图可由后续新指纹替换。`completeSend` 的终态证据必须同时满足 `success === true`、`targetConversationId` 精确匹配当前会话、`sentFingerprint` 非空且 `observedAt` 是正有限数；`ok: false`、空证据或目标不匹配均拒绝，并保持意图与待办在 `SENDING`。同一意图一旦进入 `SENT` 或 `SEND_RESULT_UNKNOWN` 就不能再次消费；AUTO 的成功与未知结果都各自在终态持久写中消耗一次当日额度，MANUAL 与 AUTO_CLOSE 不增加。AUTO_CLOSE 成功后会话写为 `enabled=false / ENDED_UNMATCHED`，清除活动待办、延迟结束和分类恢复元数据，保留 `AUTO_CLOSE/SENT` 意图作为不可重放证据。只有用户再次执行 `setManaged(true)` 才回到 `WAITING_HR`。
 
 Task 6 为状态机补充受限转换 API，而没有新增顶层存储键或通用更新方法：
 
@@ -116,9 +130,9 @@ Task 6 为状态机补充受限转换 API，而没有新增顶层存储键或通
 - `pauseConversation(conversationId, code)` 只接受 `TARGET_UNCERTAIN`、`SELECTOR_UNAVAILABLE`、`SEND_RESULT_UNKNOWN`、`MESSAGE_ORDER_UNCERTAIN`、`CONVERSATION_UNAVAILABLE`、`RECOVERY_STATE_UNCERTAIN`，写入固定码并清空原始原因。
 - `resolveApprovalWithoutSend(approvalId)` 只消费当前活动的 `PENDING` 待办，将其置为终态 `NO_REPLY`、清除会话链接，并回到 `WAITING_HR` 或 `DISABLED`。
 - `recordNotificationAttempt(approvalId, operation)` 是唯一公开通知转换入口，只接受 `RESERVE`、`COMPLETE`、`CANCEL` 三个 phase；不再公开独立 reserve/complete 方法，也不接受旧版单阶段结果。
-- AUTO / MANUAL 的模式随 intent 持久化；损坏或旧版无模式意图按 MANUAL 归一化，避免历史人工发送错误增加自动计数。
+- AUTO / AUTO_CLOSE / MANUAL 的模式随 intent 持久化；损坏或旧版无模式意图按 MANUAL 归一化，避免历史人工发送错误增加自动计数。
 
-store 的公开方法预算固定为 15 个：`getSnapshot`、`saveSettings`、`registerConversation`、`setManaged`、`beginMessage`、`createOrMergeApproval`、`createSendIntent`、`createAutoSendIntent`、`completeSend`、`markSendUnknown`、`markConversationChecked`、`pauseConversation`、`resolveApprovalWithoutSend`、`recordNotificationAttempt`、`resetConversation`。
+store 的公开方法预算固定为 22 个：`getSnapshot`、`saveSettings`、`registerConversation`、`setManaged`、`beginMessage`、`createOrMergeApproval`、`createLiveDrillApproval`、`createSendIntent`、`createAutoSendIntent`、`deferAutoClose`、`cancelDeferredAutoClose`、`createAutoCloseIntent`、`completeSend`、`markSendUnknown`、`markConversationChecked`、`pauseConversation`、`recordReadFailure`、`acknowledgeUnknownSend`、`resolveApprovalWithoutSend`、`recordNotificationAttempt`、`resetConversation`、`removeConversation`。
 
 Manifest V3 Service Worker 可能在发送请求与响应之间终止。恢复所有权属于当前加载的模块/Worker，而不是某个 store 实例：同一模块和 storage 上创建第二个 store 时不得把仍在执行的 `SENDING` 误判为中断；只有全新模块加载（即新 Worker）首次读取持久状态时，如发现会话或意图仍为 `SENDING`，才原地改写为下列终态。该分支优先于同一损坏快照上的 `CLASSIFYING` 恢复，不能回退到重新分类：
 
@@ -129,7 +143,7 @@ sendIntent.status = SEND_RESULT_UNKNOWN
 approval.status = SEND_RESULT_UNKNOWN
 ```
 
-恢复写入成功后才把该模块中对应 storage 的 `recoveryInitialized` 标为完成；若第一次 `storage.set` 短暂失败，下一次调用会再次执行恢复。若肯定发送后的 `completeSend` 落盘失败，紧接着 `markSendUnknown` 也落盘失败，store 会重新置空恢复所有权；引擎最多触发一次有界 `getSnapshot`，使同模块下一次读取立即把仍持久化的 `SENDING` 收束为 `PAUSED / SEND_RESULT_UNKNOWN`。AUTO 额度只消耗一次，且任何路径都不会重发。普通同日 `getSnapshot` 不写 storage，只有实际的未知发送恢复或跨日计数归一化才在读取路径持久化。
+恢复写入成功后才把该模块中对应 storage 的 `recoveryInitialized` 标为完成；若第一次 `storage.set` 短暂失败，下一次调用会再次执行恢复。若肯定发送后的 `completeSend` 落盘失败，紧接着 `markSendUnknown` 也落盘失败，store 会重新置空恢复所有权；引擎最多触发一次有界 `getSnapshot`，使同模块下一次读取立即把仍持久化的 `SENDING` 收束为 `PAUSED / SEND_RESULT_UNKNOWN`。AUTO 额度只消耗一次，AUTO_CLOSE 在成功、未知结果、禁用/重置或 fresh Worker 恢复中都不消耗额度，任何模式都不会重发。普通同日 `getSnapshot` 不写 storage，只有实际的未知发送恢复或跨日计数归一化才在读取路径持久化。
 
 该意图永久不可重放，只能由用户核对 Boss 实际消息后重置会话。未知发送的意图原因、会话 `pauseCode` 和 `pauseReason` 固定为 `SEND_RESULT_UNKNOWN`，忽略调用方原始错误文本；其他持久 `pauseReason` 一律归一化为空。AUTO 额度在成功或未知终态中都只消费一次，即使首次恢复写失败后重试也不会重复增加。在 `SENDING` 期间禁用或重置也必须真实持久化这个固定值。飞书待办通知通过单一 `recordNotificationAttempt` 执行 `RESERVE → 外部通知 → COMPLETE`：`RESERVE` 在同一原子读改写中重验最新全局 enabled、paused、store 时钟、静默时段，以及 owner 会话仍启用、仍为 `WAITING_CONFIRMATION`、精确链接该待办且同会话恰好只有一个 `PENDING`。多 engine 并发只有一个能取得预留。引擎在预留后重读快照；Feishu client 完成时钟、签名、卡片回扫和请求序列化后只生成一个同步 fetch thunk，不直接出站。runtime 随后再次异步读取最新快照；background 保护层在入口只验证 API proof，在 runtime 提供同一份最新快照时先同步复核该 proof lease，再同步调用 engine 传入的全局、静默、飞书、owner、link 与唯一待办断言，最后在同一调用栈调用 thunk。包装层不得以 API-proof 断言替换调用方断言，也不得用没有快照的入口调用 owner 断言；最终组合断言与 `fetchFn` invocation 之间没有 `await`。仅首次已经落盘的已知失败 `FAILED` 允许一次补发；首次成功、未知结果、仍在 `SENDING`、终结写失败或第二次尝试都永久阻止自动重试。未出站前若二次门禁不再允许，`CANCEL` 删除 reservation；若签名期间才失效，当前 reservation 收束为安全 `UNKNOWN` 并永久阻止自动重试。待办只记录预留 ID、状态、次数、时间和固定通知码；不记录 Webhook、签名密钥、Token、原始异常或响应体。
 
