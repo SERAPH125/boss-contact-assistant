@@ -284,6 +284,8 @@ sender 属于不同的高权限路径。它只接受当前焦点窗口中 active
 
 达到阈值后的 `PAUSED/CONVERSATION_UNAVAILABLE` 或 `PAUSED/SELECTOR_UNAVAILABLE` 仍然没有外部写入。岗位卡因此显示“重试托管”；store 只在会话没有活动待办、也没有 `SENDING` intent 时把它恢复为 `WAITING_HR`，保留 `lastIncomingFingerprint`、`lastCheckedAt` 和去重窗口。`TARGET_UNCERTAIN`、`MESSAGE_ORDER_UNCERTAIN`、`SEND_RESULT_UNKNOWN`、`RECOVERY_STATE_UNCERTAIN` 与 `UNKNOWN_PROCESSING_FAILURE` 仍要求更强的人工核对，不能走该捷径。runtime 和 engine 会原样保留安全的 `MESSAGE_ORDER_UNCERTAIN`，侧栏显示“Boss 消息结构发生变化，已停止自动回复”，不再归一化成无法定位根因的“会话暂不可用”。“立即检查”会展示 `checked/newMessages/pending/autoSent` 的安全计数；summary 含稳定错误时明确显示“检查未全部完成”，不再把零成功、已暂停的周期描述为完成。
 
+runtime 只从固定状态 allowlist 向侧栏投影会话状态，新增 `WAITING_AUTO_CLOSE` 和 `ENDED_UNMATCHED`；未知持久状态不会把原始 provider 文本带入 DOM。岗位卡把前者显示为“等待静默结束后礼貌回复”，仍算正在托管；后者显示为“已结束－未匹配”，不计入顶栏正在托管数量，也不显示已勾选的托管开关或“重试托管”，只保留“打开会话”和“从列表移除”。用户若确实要恢复该会话，必须通过显式重新托管入口重新授权，不能由周期自动恢复。
+
 分类与草稿 adapter 只能调用 `ReplyAI.build*Messages`、既有 `callLLM` 和 `ReplyAI.parse*`，不会手工拼接 prompt，也不会把配置对象、API Key 或飞书凭证传给 ReplyAI。`getResumeFacts` 是 engine 的每轮一次 seam：每次调用只读取一份最新 `resumeText`，按非空行生成最多 100 条 `resume-line-N`，每条最多 600 code points；ReplyAI 仍按自身契约只选取 prompt 所需的有界窗口。
 
 既有 Boss `SEND_ACTIVE` 已明确成功后，只有同时返回可靠 `conversationRef` 和字符串 `baselineIncomingFingerprint` 时，后台才调用唯一 store 登记；新记录仍为 `enabled: false / DISABLED`，并只在首次登记时保存该基线（包括空字符串）。ref、基线或 store 校验失败不会追溯改变本轮联系成功，也不会产生可用托管开关。原有 `PREPARE_DELIVERY / CONFIRM_DELIVERY / CANCEL_DELIVERY` 保持不变，旧 `START_DELIVER` 仍以 `CONFIRMATION_REQUIRED` 拒绝。
@@ -447,10 +449,10 @@ Task 10 必须分阶段且每阶段单独获授权：先做一个完整工作日
 | --- | --- |
 | `还在看机会吗？` | 只有已填写问答或简历可直接作答时才允许 `AUTO_REPLY`；否则转人工确认 |
 | `薪资是多少？` | 硬风险先于模型结论，必须 `REQUIRE_CONFIRMATION` |
-| `不合适` | 若 AI 严格分类为明确拒绝，非静默时只自动发送一次合规礼貌结束语并进入 `ENDED_UNMATCHED`；不得因缺少简历依据降级成格式错误 |
+| `不合适` | 演练报告 `AUTO_CLOSE / EXPLICIT_REJECTION_AUTO_CLOSE` 和拟结束语，但仍只创建人工待确认；真实监控非静默时才会单次自动结束 |
 | `经验可能不太匹配` | 含糊拒绝，只生成草稿并等待人工确认 |
 
-`src/conversation/trusteeship-live-drill.js` 先把目标会话、设置与当天计数复制到一次性内存 store，用合成 reader 运行真实 `MonitorEngine`、受保护 AI、简历事实和策略；隔离 sender 只捕获建议草稿，不访问 Boss。评估成功后，它才调用生产 store 的专用 `createLiveDrillApproval`：创建 `origin=LIVE_DRILL` 的本地 `PENDING`，并复用生产通知 reservation/租约发送飞书。该专用写入不得修改真实 `lastIncomingFingerprint`、`processedFingerprints`、`recentMessages`、monitor cursor、自动回复额度或真实读取时间。
+`src/conversation/trusteeship-live-drill.js` 先把目标会话、设置与当天计数复制到一次性内存 store，用合成 reader 运行真实 `MonitorEngine`、受保护 AI、简历事实和策略；隔离 sender 只捕获建议草稿和 intent 模式，不访问 Boss。若真实 engine 在隔离环境中产生 `AUTO_CLOSE` intent，演练结果会投影为 `AUTO_CLOSE / EXPLICIT_REJECTION_AUTO_CLOSE / wouldSend=true`；这只是“真实监控将如何决策”的报告。评估成功后，它仍只调用生产 store 的专用 `createLiveDrillApproval`：创建 `origin=LIVE_DRILL` 的本地 `PENDING`，并复用生产通知 reservation/租约发送飞书，绝不把隔离 intent 写入生产 store。该专用写入不得修改真实 `lastIncomingFingerprint`、`processedFingerprints`、`recentMessages`、monitor cursor、自动回复额度或真实读取时间。
 
 演练待办和真实监控待办使用同一个插件确认发送入口。用户执行 `SEND_EDITED` 时，生产 engine 仍会冻结一次性意图、重新打开并读取目标会话、核对 canonical peer/alias、scoped identity 和发送后 outgoing 证据；演练入口本身绝不直接发送 Boss。已有活动待办、会话暂停/禁用、全局托管未运行、API 证明过期或目标不再处于 `WAITING_HR` 时均失败关闭，不允许演练覆盖真实待办或真实游标。
 

@@ -156,6 +156,10 @@
     if (failureCode) throw liveDrillError(failureCode);
 
     var wouldSend = observations.sentDraft !== '';
+    var autoClose = wouldSend &&
+      observations.sentMode === 'AUTO_CLOSE' &&
+      observations.classification &&
+      observations.classification.category === 'explicit_rejection';
     if (!wouldSend && !approval) throw liveDrillError('TRUSTEESHIP_LIVE_DRILL_FAILED');
     var draft = wouldSend
       ? observations.sentDraft
@@ -172,9 +176,13 @@
       message: input.message,
       classification: safeClassification(observations.classification),
       decision: {
-        action: wouldSend ? 'AUTO_REPLY' : 'REQUIRE_CONFIRMATION',
-        reasonCode: wouldSend
-          ? 'AUTO_REPLY_ALLOWED'
+        action: autoClose
+          ? 'AUTO_CLOSE'
+          : (wouldSend ? 'AUTO_REPLY' : 'REQUIRE_CONFIRMATION'),
+        reasonCode: autoClose
+          ? 'EXPLICIT_REJECTION_AUTO_CLOSE'
+          : wouldSend
+            ? 'AUTO_REPLY_ALLOWED'
           : approval.reasonCode
       },
       draft: draft.slice(0, 300),
@@ -214,6 +222,7 @@
           classification: null,
           draft: null,
           sentDraft: '',
+          sentMode: '',
           failureCode: ''
         };
         var fingerprint = 'live-drill:' + source.idFactory('message');
@@ -241,6 +250,9 @@
             },
             send: async function (current, draft, intent) {
               observations.sentDraft = draft;
+              observations.sentMode = intent && intent.mode === 'AUTO_CLOSE'
+                ? 'AUTO_CLOSE'
+                : 'AUTO';
               return {
                 success: true,
                 targetConversationId: current.conversationId,
@@ -321,6 +333,7 @@
           draft: evaluation.draft,
           draftEvidenceIds: evaluation.draftEvidenceIds,
           approvalId: approval.approvalId,
+          wouldSend: evaluation.wouldSend,
           sentToBoss: false,
           notificationStatus: notificationStatus(latest, approval.approvalId),
           liveDrill: true

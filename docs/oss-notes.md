@@ -247,6 +247,10 @@ ego-lite 对徐海霞会话的精确单次发送排查得到三组现场证据�
 
 静默调度阶段继续借鉴 [BullMQ](https://github.com/taskforcesh/bullmq) 的延迟任务必须持久化并在执行时重新验证状态、[LangGraph](https://github.com/langchain-ai/langgraph) 的可恢复显式节点，以及 AWS outbox 的“意图先于副作用”边界。`DEFER_AUTO_CLOSE` 只保存当前指纹、已验证的冻结结束语和置信度；`WAITING_AUTO_CLOSE` 被纳入只读轮询，但静默期间不重复调用 AI、不创建通知或发送意图。静默结束后先读取同一会话：零增量才重验草稿、授权和精确指纹并创建 `AUTO_CLOSE` intent；存在更新来信则先原子取消旧延迟对象，再处理新消息。checkpoint 现可在精确匹配延迟指纹时更新检查时间而不清除延迟对象。引擎与 store 联合测试为 122/122，覆盖静默内重复检查、跨日唤醒、新消息取消、新 engine 实例恢复及额度保持为零。
 
+演练与 UI 阶段继续采用 Rasa 对话测试“生产决策链、隔离外部动作”的做法：一次性 store 中真实运行 engine，隔离 sender 只记录 `AUTO_CLOSE` 模式和草稿；投影可报告 `wouldSend=true`，但生产侧始终只创建 `LIVE_DRILL/PENDING`，不会创建或复制隔离发送意图。runtime 的会话状态改为固定 allowlist，侧栏显示 `WAITING_AUTO_CLOSE=等待静默结束后礼貌回复`、`ENDED_UNMATCHED=已结束－未匹配`；结束卡不计入活跃托管数量、没有开关或重试，仅可打开或移除。五组 runtime/live-drill/sidepanel/background 聚焦回归为 112/112。
+
+完全依赖 AI 判断明确拒绝意味着语义误判风险不会被本地拒绝关键词规则兜底：假阳性可能提前发送礼貌结束语，假阴性则进入普通人工确认或其他分类。本项目接受用户选择的这一权衡，但没有把自由文本直接等同于发送权限；确定性层仍只接受精确类别、原因码、`>=0.90` 置信度、空 evidence/fields 形状，并独立限制结束语、静默延迟、最新消息重读、唯一 intent、目标证明和未知发送终态。若后续需要降低假阳性，应调高结构化置信阈值或恢复人工确认，而不是增加隐藏的关键词覆盖。
+
 ## v0.3.5 Task 9 恢复、幂等与隐私回归参考
 
 - [Chrome Extension Service Worker 迁移文档源码](https://github.com/GoogleChrome/developer.chrome.com/blob/main/site/en/docs/extensions/migrating/to-service-workers/index.md) 与 [GoogleChrome/chrome-extensions-samples](https://github.com/GoogleChrome/chrome-extensions-samples)（Apache-2.0）用于复核 MV3 Worker 会被终止、持久存储应作为事实源、事件监听应在顶层注册，以及周期任务应使用具名 `chrome.alarms`。本项目据此验证同名 `boss-ai-chat-monitor` 只表达一个逻辑 alarm，并验证旧 `scheduledTime` 事件只触发一次当前周期。

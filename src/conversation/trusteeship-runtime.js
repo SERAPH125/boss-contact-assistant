@@ -68,6 +68,17 @@
     'RECOVERY_STATE_UNCERTAIN',
     'UNKNOWN_PROCESSING_FAILURE'
   ]);
+  var PUBLIC_CONVERSATION_STATES = new Set([
+    'DISABLED',
+    'WAITING_HR',
+    'CLASSIFYING',
+    'DRAFTING_AUTO',
+    'SENDING',
+    'WAITING_CONFIRMATION',
+    'WAITING_AUTO_CLOSE',
+    'ENDED_UNMATCHED',
+    'PAUSED'
+  ]);
 
   function clone(value) {
     if (value === undefined) return undefined;
@@ -840,7 +851,7 @@
         ? source.peerSource
         : 'legacy-dom',
       enabled: source.enabled === true,
-      state: typeof source.state === 'string' ? source.state : '',
+      state: PUBLIC_CONVERSATION_STATES.has(source.state) ? source.state : '',
       pauseCode: safePauseCode(source.pauseCode),
       lastCheckedAt: Number.isSafeInteger(source.lastCheckedAt) && source.lastCheckedAt >= 0
         ? source.lastCheckedAt : 0,

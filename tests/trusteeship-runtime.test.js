@@ -361,6 +361,40 @@ test('safe conversation DTO provides bounded last checked time for the sidepanel
   assert.equal(state.managedConversations['conv-1'].updatedAt, 5678);
 });
 
+test('safe conversation DTO exposes deferred and ended states from a strict allowlist', async () => {
+  const h = controllerHarness({
+    snapshot: {
+      conversationTrusteeship: { enabled: true, paused: false, intervalMinutes: 10 },
+      feishuNotification: {},
+      managedConversations: {
+        deferred: conversation({
+          conversationId: 'deferred',
+          state: 'WAITING_AUTO_CLOSE',
+          enabled: true
+        }),
+        ended: conversation({
+          conversationId: 'ended',
+          state: 'ENDED_UNMATCHED',
+          enabled: false
+        }),
+        poisoned: conversation({
+          conversationId: 'poisoned',
+          state: 'provider-secret-state',
+          enabled: true
+        })
+      },
+      pendingApprovals: {}
+    }
+  });
+
+  const state = await h.controller.handleMessage({ type: 'TRUSTEESHIP_GET_STATE' });
+
+  assert.equal(state.managedConversations.deferred.state, 'WAITING_AUTO_CLOSE');
+  assert.equal(state.managedConversations.ended.state, 'ENDED_UNMATCHED');
+  assert.equal(state.managedConversations.poisoned.state, '');
+  assert.equal(JSON.stringify(state).includes('provider-secret-state'), false);
+});
+
 test('safe conversation DTO projects read backoff progress so the sidepanel can explain a retry', async () => {
   const h = controllerHarness({
     snapshot: {

@@ -204,12 +204,12 @@ test('stages a hard-risk message for manual confirmation with an empty editable 
   assert.equal(harness.calls.staged[0].reasonCode, 'HARD_RISK_SALARY');
 });
 
-test('explicit rejection classification never sends directly and remains manually reviewable', async () => {
+test('live drill reports AUTO_CLOSE but still stages approval instead of sending Boss', async () => {
   const harness = createHarness({
     classifier: {
       async classify() {
         return {
-          category: 'important',
+          category: 'explicit_rejection',
           confidence: 0.99,
           reasonCode: 'EXPLICIT_REJECTION',
           evidenceIds: [],
@@ -219,7 +219,7 @@ test('explicit rejection classification never sends directly and remains manuall
       async draft() {
         return {
           draft: '好的，感谢您的回复，祝工作顺利。',
-          evidenceIds: ['faq-line-1']
+          evidenceIds: []
         };
       }
     }
@@ -232,10 +232,13 @@ test('explicit rejection classification never sends directly and remains manuall
 
   assert.equal(result.classification.reasonCode, 'EXPLICIT_REJECTION');
   assert.deepEqual(result.decision, {
-    action: 'REQUIRE_CONFIRMATION',
-    reasonCode: 'CATEGORY_REQUIRES_CONFIRMATION'
+    action: 'AUTO_CLOSE',
+    reasonCode: 'EXPLICIT_REJECTION_AUTO_CLOSE'
   });
+  assert.equal(result.wouldSend, true);
   assert.equal(result.sentToBoss, false);
+  assert.equal(harness.calls.staged.length, 1);
+  assert.equal(harness.calls.staged[0].reasonCode, 'EXPLICIT_REJECTION_AUTO_CLOSE');
 });
 
 test('rejects missing, unsupported, empty, and oversized live drill inputs with stable codes', async () => {

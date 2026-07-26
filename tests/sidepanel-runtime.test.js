@@ -306,6 +306,51 @@ test('full sidepanel uses the global enabled gate and rolls back a confirmed con
   assert.equal(checkbox.checked, true);
 });
 
+test('full sidepanel renders deferred and ended unmatched without counting or retrying the ended card', async () => {
+  const deferred = {
+    conversationId: 'deferred',
+    company: '甲公司',
+    position: '前端',
+    hrName: '李',
+    enabled: true,
+    state: 'WAITING_AUTO_CLOSE',
+    lastCheckedAt: 1234
+  };
+  const ended = {
+    conversationId: 'ended',
+    company: '乙公司',
+    position: '运营',
+    hrName: '王',
+    enabled: true,
+    state: 'ENDED_UNMATCHED',
+    lastCheckedAt: 5678
+  };
+  const h = await loadFullSidepanel({
+    state: {
+      settings: { enabled: true, paused: false },
+      managedConversations: { deferred, ended },
+      pendingApprovalCount: 0
+    },
+    approvals: []
+  });
+
+  assert.equal(h.ids.trusteeshipStatus.textContent, '正在托管 1 个岗位');
+  const rendered = JSON.stringify(h.ids.managedConversations.children.map((card) =>
+    card.children.map((child) => child.textContent)
+  ));
+  assert.match(rendered, /等待静默结束后礼貌回复/);
+  assert.match(rendered, /已结束－未匹配/);
+
+  const endedCard = h.ids.managedConversations.children.find((card) =>
+    card.children[0].textContent.includes('乙公司')
+  );
+  assert.equal(findDescendants(endedCard, 'input').length, 0);
+  assert.deepEqual(
+    findDescendants(endedCard, 'button').map((button) => button.textContent),
+    ['打开会话', '从列表移除']
+  );
+});
+
 test('full sidepanel gives stable Chinese recovery guidance for login and Boss verification pauses', async () => {
   const h = await loadFullSidepanel({
     state: {
@@ -644,6 +689,27 @@ test('full sidepanel stages one bounded live drill only after explicit consent',
   assert.match(rendered, /approval-live-drill/);
   assert.match(rendered, /飞书通知已发送/);
   assert.match(rendered, /已创建真实发送待确认，当前尚未发送给 HR/);
+  h.context.renderTrusteeshipLiveDrillResult({
+    ...result,
+    classification: {
+      category: 'explicit_rejection',
+      confidence: 0.99,
+      reasonCode: 'EXPLICIT_REJECTION',
+      evidenceIds: [],
+      fieldsNeeded: []
+    },
+    decision: {
+      action: 'AUTO_CLOSE',
+      reasonCode: 'EXPLICIT_REJECTION_AUTO_CLOSE'
+    },
+    draft: '好的，感谢您的回复，祝工作顺利。'
+  });
+  assert.match(
+    h.ids.trusteeshipLiveDrillResult.children
+      .map((child) => child.textContent)
+      .join('|'),
+    /AUTO_CLOSE/
+  );
   assert.equal(h.ids.btnRunTrusteeshipLiveDrill.disabled, false);
   assert.equal(h.ids.trusteeshipLiveDrillConsent.checked, false);
 });

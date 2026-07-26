@@ -420,7 +420,11 @@ function applyTrusteeshipState(state) {
   renderHrFaq(trusteeshipSnapshot.hrFaq);
   const pending = Number(trusteeshipSnapshot.pendingApprovalCount) || 0;
   const conversations = Object.values(trusteeshipSnapshot.managedConversations || {});
-  const active = conversations.filter((conversation) => conversation && conversation.enabled === true).length;
+  const active = conversations.filter((conversation) =>
+    conversation &&
+    conversation.enabled === true &&
+    conversation.state !== 'ENDED_UNMATCHED'
+  ).length;
   const status = settings.enabled !== true ? '托管已关闭'
     : settings.paused === true ? '托管已暂停'
       : pending > 0 ? '等待确认 ' + pending + ' 条'
@@ -517,7 +521,9 @@ function renderTrusteeshipLiveDrillResult(result) {
     ['引用依据', Array.isArray(classification.evidenceIds) && classification.evidenceIds.length
       ? classification.evidenceIds.map((id) => simulationText(id, 160)).join('、')
       : '无'],
-    ['策略动作', decision.action === 'AUTO_REPLY' || decision.action === 'REQUIRE_CONFIRMATION'
+    ['策略动作', decision.action === 'AUTO_REPLY' ||
+      decision.action === 'AUTO_CLOSE' ||
+      decision.action === 'REQUIRE_CONFIRMATION'
       ? decision.action
       : 'REQUIRE_CONFIRMATION'],
     ['策略原因', simulationText(decision.reasonCode, 120) || '—'],
@@ -684,13 +690,22 @@ function renderManagedConversations(conversations) {
       }
     });
     actions.append(open, remove);
-    card.append(title, details, label, actions);
+    card.append(title, details);
+    if (conversation.state !== 'ENDED_UNMATCHED') card.append(label);
+    card.append(actions);
     container.appendChild(card);
   });
 }
 
 function managedStateText(state) {
-  const map = { WAITING_HR: '等待 HR', WAITING_CONFIRMATION: '等待确认', PAUSED: '已暂停', DISABLED: '已关闭' };
+  const map = {
+    WAITING_HR: '等待 HR',
+    WAITING_CONFIRMATION: '等待确认',
+    WAITING_AUTO_CLOSE: '等待静默结束后礼貌回复',
+    ENDED_UNMATCHED: '已结束－未匹配',
+    PAUSED: '已暂停',
+    DISABLED: '已关闭'
+  };
   return map[state] || '状态待确认';
 }
 
