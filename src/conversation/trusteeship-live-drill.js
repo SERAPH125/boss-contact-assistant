@@ -1,7 +1,7 @@
-// AI 托管安全干跑：复用真实编排，但所有状态与发送证据只存在于一次性内存中。
+// AI 托管真实外发演练：合成消息只在内存评估，结果进入生产待确认队列后才能人工发送。
 (function (g, factory) {
   var api = factory();
-  g.TrusteeshipSimulator = api;
+  g.TrusteeshipLiveDrill = api;
   if (typeof module !== 'undefined' && module.exports) module.exports = api;
 })(typeof globalThis !== 'undefined' ? globalThis : self, function () {
   var AI_FAILURE_CODES = new Set([
@@ -16,7 +16,7 @@
     return JSON.parse(JSON.stringify(value));
   }
 
-  function simulatorError(code) {
+  function liveDrillError(code) {
     var error = new Error(code);
     error.code = code;
     return error;
@@ -37,7 +37,7 @@
       typeof input.message !== 'string' ||
       input.message.trim() === '' ||
       Array.from(input.message.trim()).length > 600) {
-      throw simulatorError('TRUSTEESHIP_MESSAGE_INVALID');
+      throw liveDrillError('TRUSTEESHIP_MESSAGE_INVALID');
     }
     return {
       conversationId: input.conversationId.trim(),
@@ -139,7 +139,7 @@
 
   function projectResult(input, observations, snapshot, summary) {
     if (observations.failureCode === 'API_PROOF_STALE') {
-      throw simulatorError('API_PROOF_STALE');
+      throw liveDrillError('API_PROOF_STALE');
     }
     var approvalIds = Object.keys(snapshot.pendingApprovals || {}).sort();
     var approval = approvalIds.length > 0
@@ -153,10 +153,10 @@
         return AI_FAILURE_CODES.has(code);
       });
     }
-    if (failureCode) throw simulatorError(failureCode);
+    if (failureCode) throw liveDrillError(failureCode);
 
     var wouldSend = observations.sentDraft !== '';
-    if (!wouldSend && !approval) throw simulatorError('TRUSTEESHIP_SIMULATION_FAILED');
+    if (!wouldSend && !approval) throw liveDrillError('TRUSTEESHIP_LIVE_DRILL_FAILED');
     var draft = wouldSend
       ? observations.sentDraft
       : (approval && typeof approval.draft === 'string' ? approval.draft : '');
@@ -179,20 +179,31 @@
       },
       draft: draft.slice(0, 300),
       draftEvidenceIds: draftEvidenceIds,
-      wouldSend: wouldSend,
-      simulated: true
+      wouldSend: wouldSend
     };
+  }
+
+  function notificationStatus(snapshot, approvalId) {
+    var approval = snapshot && snapshot.pendingApprovals &&
+      snapshot.pendingApprovals[approvalId];
+    var attempts = approval && Array.isArray(approval.feishuNotifyAttempts)
+      ? approval.feishuNotifyAttempts
+      : [];
+    var latest = attempts.length > 0 ? attempts[attempts.length - 1] : null;
+    return latest && ['SUCCESS', 'FAILED', 'UNKNOWN'].indexOf(latest.status) !== -1
+      ? latest.status
+      : 'NOT_SENT';
   }
 
   function create(deps) {
     var source = deps && typeof deps === 'object' ? deps : {};
     return {
-      simulate: async function (input) {
+      stage: async function (input) {
         input = validateInput(input);
         var production = await source.productionStore.getSnapshot();
         var conversation = production.managedConversations[input.conversationId];
-        if (!conversation) throw simulatorError('CONVERSATION_NOT_FOUND');
-        if (conversation.platform !== 'boss') throw simulatorError('UNSUPPORTED_PLATFORM');
+        if (!conversation) throw liveDrillError('CONVERSATION_NOT_FOUND');
+        if (conversation.platform !== 'boss') throw liveDrillError('UNSUPPORTED_PLATFORM');
         var memory = createMemoryStorage(seedSnapshot(production, conversation));
         var isolatedStore = source.storeModule.create(
           memory,
@@ -205,7 +216,7 @@
           sentDraft: '',
           failureCode: ''
         };
-        var fingerprint = 'simulation:' + source.idFactory('message');
+        var fingerprint = 'live-drill:' + source.idFactory('message');
         var engine = source.engineModule.create({
           store: isolatedStore,
           reader: {
@@ -233,7 +244,7 @@
               return {
                 success: true,
                 targetConversationId: current.conversationId,
-                sentFingerprint: 'simulation-sent:' + intent.intentId,
+                sentFingerprint: 'live-drill-evaluation:' + intent.intentId,
                 observedAt: source.clock()
               };
             }
@@ -275,14 +286,45 @@
         try {
           summary = await engine.runCycle();
         } catch (_) {
-          throw simulatorError('TRUSTEESHIP_SIMULATION_FAILED');
+          throw liveDrillError('TRUSTEESHIP_LIVE_DRILL_FAILED');
         }
-        return projectResult(
+        var evaluation = projectResult(
           input,
           observations,
           await isolatedStore.getSnapshot(),
           summary
         );
+        var approval = await source.productionStore.createLiveDrillApproval({
+          conversationId: input.conversationId,
+          drillFingerprint: fingerprint,
+          message: input.message,
+          reasonCode: evaluation.decision.reasonCode,
+          fieldsNeeded: evaluation.classification
+            ? evaluation.classification.fieldsNeeded
+            : [],
+          draft: evaluation.draft
+        });
+        try {
+          await source.productionEngine.notifyPending();
+        } catch (_) {}
+        var latest;
+        try {
+          latest = await source.productionStore.getSnapshot();
+        } catch (_) {
+          latest = null;
+        }
+        return {
+          conversationId: evaluation.conversationId,
+          message: evaluation.message,
+          classification: evaluation.classification,
+          decision: evaluation.decision,
+          draft: evaluation.draft,
+          draftEvidenceIds: evaluation.draftEvidenceIds,
+          approvalId: approval.approvalId,
+          sentToBoss: false,
+          notificationStatus: notificationStatus(latest, approval.approvalId),
+          liveDrill: true
+        };
       }
     };
   }

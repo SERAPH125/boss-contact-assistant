@@ -457,18 +457,20 @@ function harness(options = {}) {
         return engine;
       }
     },
-    TrusteeshipSimulator: {
+    TrusteeshipLiveDrill: {
       create() {
         return {
-          async simulate() {
+          async stage() {
             return {
               decision: {
                 action: 'REQUIRE_CONFIRMATION',
                 reasonCode: 'CATEGORY_REQUIRES_CONFIRMATION'
               },
               draft: '',
-              wouldSend: false,
-              simulated: true
+              approvalId: 'approval-live-drill',
+              sentToBoss: false,
+              notificationStatus: 'SUCCESS',
+              liveDrill: true
             };
           }
         };

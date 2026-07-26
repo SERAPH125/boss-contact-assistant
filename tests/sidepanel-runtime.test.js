@@ -181,8 +181,8 @@ async function loadFullSidepanel(options) {
         }
         else if (message.type === 'TRUSTEESHIP_RESOLVE_APPROVAL') callback(options.resolve ? options.resolve(message) : { ok: true });
         else if (message.type === 'TRUSTEESHIP_RUN_NOW') callback(options.runNow ? options.runNow(message) : { ok: true });
-        else if (message.type === 'TRUSTEESHIP_SIMULATE_MESSAGE') {
-          callback(options.simulate ? options.simulate(message) : { ok: false, code: 'TRUSTEESHIP_SIMULATION_FAILED' });
+        else if (message.type === 'TRUSTEESHIP_STAGE_LIVE_DRILL') {
+          callback(options.liveDrill ? options.liveDrill(message) : { ok: false, code: 'TRUSTEESHIP_LIVE_DRILL_FAILED' });
         }
         else if (message.type === 'TRUSTEESHIP_SET_CONVERSATION') callback({ ok: false, code: 'CONVERSATION_NOT_REGISTERED' });
         else if (message.type === 'GET_STATE') callback({ phase: 'idle' });
@@ -580,7 +580,7 @@ test('full sidepanel tells the user to enable and save trusteeship when a manual
   );
 });
 
-test('full sidepanel submits one bounded dry-run and renders the non-sending decision', async () => {
+test('full sidepanel stages one bounded live drill only after explicit consent', async () => {
   const result = {
     conversationId: 'conv-1',
     message: '还在看机会吗？',
@@ -594,8 +594,10 @@ test('full sidepanel submits one bounded dry-run and renders the non-sending dec
     decision: { action: 'AUTO_REPLY', reasonCode: 'AUTO_REPLY_ALLOWED' },
     draft: '是的，我还在看合适机会。',
     draftEvidenceIds: ['faq-line-1'],
-    wouldSend: true,
-    simulated: true
+    approvalId: 'approval-live-drill',
+    sentToBoss: false,
+    notificationStatus: 'SUCCESS',
+    liveDrill: true
   };
   const h = await loadFullSidepanel({
     state: {
@@ -613,30 +615,37 @@ test('full sidepanel submits one bounded dry-run and renders the non-sending dec
       pendingApprovalCount: 0
     },
     approvals: [],
-    simulate: () => ({ ok: true, result })
+    liveDrill: () => ({ ok: true, result })
   });
-  h.ids.trusteeshipSimulationConversation.value = 'conv-1';
-  h.ids.trusteeshipSimulationMessage.value = '  还在看机会吗？  ';
+  h.ids.trusteeshipLiveDrillConversation.value = 'conv-1';
+  h.ids.trusteeshipLiveDrillMessage.value = '  还在看机会吗？  ';
 
-  await h.ids.btnRunTrusteeshipSimulation.trigger('click');
+  await h.ids.btnRunTrusteeshipLiveDrill.trigger('click');
+  assert.match(h.ids.trusteeshipLiveDrillStatus.textContent, /请先确认本轮演练可能真实发送/);
+  assert.equal(h.sent.some((item) => item.type === 'TRUSTEESHIP_STAGE_LIVE_DRILL'), false);
 
+  h.ids.trusteeshipLiveDrillConsent.checked = true;
+  await h.ids.btnRunTrusteeshipLiveDrill.trigger('click');
   assert.deepEqual({
-    ...h.sent.find((item) => item.type === 'TRUSTEESHIP_SIMULATE_MESSAGE')
+    ...h.sent.find((item) => item.type === 'TRUSTEESHIP_STAGE_LIVE_DRILL')
   }, {
-    type: 'TRUSTEESHIP_SIMULATE_MESSAGE',
+    type: 'TRUSTEESHIP_STAGE_LIVE_DRILL',
     conversationId: 'conv-1',
     message: '还在看机会吗？'
   });
-  const rendered = h.ids.trusteeshipSimulationResult.children
+  const rendered = h.ids.trusteeshipLiveDrillResult.children
     .map((child) => child.textContent)
     .join('|');
   assert.match(rendered, /AUTO_REPLY/);
   assert.match(rendered, /是的，我还在看合适机会/);
-  assert.match(rendered, /仅模拟，未发送/);
-  assert.equal(h.ids.btnRunTrusteeshipSimulation.disabled, false);
+  assert.match(rendered, /approval-live-drill/);
+  assert.match(rendered, /飞书通知已发送/);
+  assert.match(rendered, /已创建真实发送待确认，当前尚未发送给 HR/);
+  assert.equal(h.ids.btnRunTrusteeshipLiveDrill.disabled, false);
+  assert.equal(h.ids.trusteeshipLiveDrillConsent.checked, false);
 });
 
-test('full sidepanel validates dry-run inputs and masks simulation failures', async () => {
+test('full sidepanel validates live drill inputs and masks provider failures', async () => {
   const h = await loadFullSidepanel({
     state: {
       settings: { enabled: true, paused: false },
@@ -644,21 +653,22 @@ test('full sidepanel validates dry-run inputs and masks simulation failures', as
       pendingApprovalCount: 0
     },
     approvals: [],
-    simulate: () => ({ ok: false, code: 'provider-secret-simulation-canary' })
+    liveDrill: () => ({ ok: false, code: 'provider-secret-live-drill-canary' })
   });
 
-  await h.ids.btnRunTrusteeshipSimulation.trigger('click');
-  assert.match(h.ids.trusteeshipSimulationStatus.textContent, /请选择已登记会话/);
-  assert.equal(h.sent.some((item) => item.type === 'TRUSTEESHIP_SIMULATE_MESSAGE'), false);
+  await h.ids.btnRunTrusteeshipLiveDrill.trigger('click');
+  assert.match(h.ids.trusteeshipLiveDrillStatus.textContent, /请选择已登记会话/);
+  assert.equal(h.sent.some((item) => item.type === 'TRUSTEESHIP_STAGE_LIVE_DRILL'), false);
 
-  h.ids.trusteeshipSimulationConversation.value = 'conv-1';
-  await h.ids.btnRunTrusteeshipSimulation.trigger('click');
-  assert.match(h.ids.trusteeshipSimulationStatus.textContent, /请输入模拟 HR 消息/);
+  h.ids.trusteeshipLiveDrillConversation.value = 'conv-1';
+  await h.ids.btnRunTrusteeshipLiveDrill.trigger('click');
+  assert.match(h.ids.trusteeshipLiveDrillStatus.textContent, /请输入模拟 HR 消息/);
 
-  h.ids.trusteeshipSimulationMessage.value = '您好';
-  await h.ids.btnRunTrusteeshipSimulation.trigger('click');
-  assert.equal(h.ids.trusteeshipSimulationStatus.textContent.includes('provider-secret'), false);
-  assert.equal(h.ids.btnRunTrusteeshipSimulation.disabled, false);
+  h.ids.trusteeshipLiveDrillMessage.value = '您好';
+  h.ids.trusteeshipLiveDrillConsent.checked = true;
+  await h.ids.btnRunTrusteeshipLiveDrill.trigger('click');
+  assert.equal(h.ids.trusteeshipLiveDrillStatus.textContent.includes('provider-secret'), false);
+  assert.equal(h.ids.btnRunTrusteeshipLiveDrill.disabled, false);
 });
 
 test('full sidepanel status and managed DOM mask unknown provider and credential-shaped pause canaries', async () => {

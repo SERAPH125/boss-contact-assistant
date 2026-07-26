@@ -259,6 +259,58 @@ test('no new messages keeps WAITING_HR and stores the handled baseline', async (
   assert.ok(conversation.lastCheckedAt > 0);
 });
 
+test('a stable monitor cursor handles one new incoming message exactly once across repeated cycles', async () => {
+  let readCount = 0;
+  const harness = await makeHarness({
+    initial: { feishuNotification: { enabled: true } },
+    reader: {
+      async read(conversation) {
+        readCount += 1;
+        if (readCount === 1) return readOk(conversation, [], 'id:baseline');
+        if (readCount === 2) {
+          return readOk(
+            conversation,
+            [incoming('salary-once', '你现在薪资多少，期望多少')],
+            'id:salary-once'
+          );
+        }
+        return readOk(conversation, [], 'id:salary-once');
+      },
+      async send() {
+        throw new Error('must not send before confirmation');
+      }
+    }
+  });
+  await harness.register(['conv-1']);
+  await harness.store.markConversationChecked('conv-1', { baseline: 'id:baseline' });
+  await harness.enableGlobal();
+
+  const first = await harness.engine.runCycle();
+  const second = await harness.engine.runCycle();
+  const third = await harness.engine.runCycle();
+  const snapshot = await harness.store.getSnapshot();
+  const approvals = Object.values(snapshot.pendingApprovals);
+
+  assert.deepEqual(
+    [first.newMessages, second.newMessages, third.newMessages],
+    [0, 1, 0]
+  );
+  assert.equal(first.checked, 1);
+  assert.equal(second.checked, 1);
+  assert.equal(third.checked, 1);
+  assert.equal(approvals.length, 1);
+  assert.equal(approvals[0].origin, 'LIVE_MONITOR');
+  assert.equal(approvals[0].reasonCode, 'HARD_RISK_SALARY');
+  assert.deepEqual(approvals[0].incomingFingerprints, ['id:salary-once']);
+  assert.equal(harness.calls.classify.length, 1);
+  assert.equal(harness.calls.send.length, 0);
+  assert.equal(harness.calls.notifyApproval.length, 1);
+  assert.equal(
+    snapshot.managedConversations['conv-1'].lastIncomingFingerprint,
+    'id:salary-once'
+  );
+});
+
 test('confidence 0.85 with valid resume evidence sends once after a second policy check', async () => {
   let reads = 0;
   const harness = await makeHarness({
@@ -506,6 +558,59 @@ test('quiet-hour messages remain one local approval and emit one merged notifica
     harness.calls.notifyApproval[0].latestSummary,
     'HR 有新消息，请在插件内查看完整上下文'
   );
+});
+
+test('notifyPending sends a live drill approval once without reading or sending Boss', async () => {
+  const harness = await makeHarness({
+    initial: {
+      feishuNotification: {
+        enabled: true,
+        webhook: 'https://open.feishu.cn/open-apis/bot/v2/hook/example',
+        signingSecret: '',
+        lastTestOk: true,
+        lastTestAt: Date.parse('2026-07-24T08:00:00+08:00')
+      }
+    }
+  });
+  await harness.register(['conv-1']);
+  await harness.enableGlobal();
+  const approval = await harness.store.createLiveDrillApproval({
+    conversationId: 'conv-1',
+    drillFingerprint: 'live-drill:salary',
+    message: '你现在薪资多少，期望多少',
+    reasonCode: 'HARD_RISK_SALARY',
+    fieldsNeeded: [],
+    draft: ''
+  });
+
+  const first = await harness.engine.notifyPending();
+  const second = await harness.engine.notifyPending();
+
+  assert.deepEqual(first, {
+    checked: 0,
+    newMessages: 0,
+    autoSent: 0,
+    pending: 0,
+    skipped: 0,
+    errors: []
+  });
+  assert.deepEqual(second, first);
+  assert.equal(harness.calls.read.length, 0);
+  assert.equal(harness.calls.send.length, 0);
+  assert.equal(harness.calls.notifyApproval.length, 1);
+  assert.deepEqual(harness.calls.notifyApproval[0], {
+    approvalId: approval.approvalId,
+    conversationId: 'conv-1',
+    company: '公司-conv-1',
+    position: '前端工程师',
+    hrName: 'HR',
+    stage: 'WAITING_CONFIRMATION',
+    origin: 'LIVE_DRILL',
+    latestSummary: 'HR 有新消息，请在插件内查看完整上下文',
+    latestMessage: '你现在薪资多少，期望多少',
+    draft: '',
+    bossChatUrl: 'https://www.zhipin.com/web/geek/chat?conversationId=conv-1'
+  });
 });
 
 test('daily limit and missing resume facts force confirmation and getResumeFacts runs at most once', async () => {

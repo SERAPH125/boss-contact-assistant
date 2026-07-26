@@ -323,6 +323,12 @@
   }
 
   function notificationPayload(approval, conversation) {
+    var messages = approval && Array.isArray(approval.messages)
+      ? approval.messages
+      : [];
+    var latestMessage = messages.length > 0 && typeof messages[messages.length - 1] === 'string'
+      ? messages[messages.length - 1]
+      : '';
     return {
       approvalId: approval.approvalId,
       conversationId: approval.conversationId,
@@ -330,7 +336,10 @@
       position: conversation ? conversation.position : '',
       hrName: conversation ? conversation.hrName : '',
       stage: 'WAITING_CONFIRMATION',
+      origin: approval.origin === 'LIVE_DRILL' ? 'LIVE_DRILL' : 'LIVE_MONITOR',
       latestSummary: 'HR 有新消息，请在插件内查看完整上下文',
+      latestMessage: latestMessage,
+      draft: typeof approval.draft === 'string' ? approval.draft : '',
       bossChatUrl: conversation ? conversation.url : ''
     };
   }
@@ -851,6 +860,18 @@
       return output;
     }
 
+    async function notifyPendingInternal() {
+      var output = summary();
+      var snapshot = await store.getSnapshot();
+      var settings = snapshot.conversationTrusteeship;
+      if (settings.enabled !== true || settings.paused === true) return output;
+      var quiet = policy.isQuietHours(readClock(clock), settings.quietHours);
+      await notifyPendingApprovals({
+        feishuEnabled: snapshot.feishuNotification.enabled === true
+      }, quiet, new Set(), output);
+      return output;
+    }
+
     async function notifyResolution(approval, action) {
       try {
         await notifier.notifyResolved({
@@ -936,6 +957,9 @@
 
     return {
       runCycle: runCycle,
+      notifyPending: function () {
+        return serializedOperation(notifyPendingInternal);
+      },
       resolveApproval: resolveApproval
     };
   }

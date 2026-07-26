@@ -40,15 +40,16 @@
     'CONVERSATION_UNAVAILABLE', 'LOGIN_REQUIRED', 'BOSS_BLOCKED',
     'TRUSTEESHIP_RESOLVE_FAILED', 'TRUSTEESHIP_PREREQUISITE_FAILED'
   ];
-  var SIMULATION_CODES = new Set([
+  var LIVE_DRILL_CODES = new Set([
     'CONVERSATION_NOT_FOUND',
     'UNSUPPORTED_PLATFORM',
+    'LIVE_DRILL_NOT_ALLOWED',
     'API_PROOF_STALE',
     'AI_CLASSIFY_FAILED',
     'AI_CLASSIFICATION_INVALID',
     'AI_DRAFT_FAILED',
     'AI_DRAFT_INVALID',
-    'TRUSTEESHIP_SIMULATION_FAILED'
+    'TRUSTEESHIP_LIVE_DRILL_FAILED'
   ]);
   var PUBLIC_PAUSE_CODES = new Set([
     'LOGIN_REQUIRED',
@@ -248,7 +249,7 @@
       return exactKeys(message, ['type', 'enable']) &&
         typeof message.enable === 'boolean';
     }
-    if (message.type === 'TRUSTEESHIP_SIMULATE_MESSAGE') {
+    if (message.type === 'TRUSTEESHIP_STAGE_LIVE_DRILL') {
       return exactKeys(message, ['type', 'conversationId', 'message']) &&
         boundedString(message.conversationId, 128, false) &&
         typeof message.message === 'string' &&
@@ -827,7 +828,7 @@
     var storage = source.storage;
     var store = source.store;
     var engine = source.engine;
-    var simulator = source.simulator;
+    var liveDrill = source.liveDrill;
     var policy = source.policy;
     var notifierModule = source.notifierModule;
     var feishuClient = source.feishuClient;
@@ -835,7 +836,7 @@
     var runApiTest = source.runApiTest;
     var now = typeof source.now === 'function' ? source.now : Date.now;
     if (!chromeApi || !chromeApi.alarms || !chromeApi.tabs ||
-      !storage || !store || !engine || !simulator || typeof simulator.simulate !== 'function' ||
+      !storage || !store || !engine || !liveDrill || typeof liveDrill.stage !== 'function' ||
       !policy || !notifierModule || !feishuClient ||
       typeof saveApi !== 'function' || typeof runApiTest !== 'function') {
       throw new Error('INVALID_CONTROLLER_DEPENDENCIES');
@@ -1369,20 +1370,24 @@
       if (input.type === 'TRUSTEESHIP_REMOVE_CONVERSATION') return removeConversation(input);
       if (input.type === 'TRUSTEESHIP_REGISTER_ACTIVE') return registerActiveConversation(input);
       if (input.type === 'TRUSTEESHIP_LIST_APPROVALS') return listApprovals();
-      if (input.type === 'TRUSTEESHIP_SIMULATE_MESSAGE') {
+      if (input.type === 'TRUSTEESHIP_STAGE_LIVE_DRILL') {
+        var liveDrillPrerequisiteFailure = await checkCurrentPrerequisitesUnsafe();
+        if (liveDrillPrerequisiteFailure) return liveDrillPrerequisiteFailure;
+        var liveDrillRunningFailure = await checkRunningStateUnsafe();
+        if (liveDrillRunningFailure) return liveDrillRunningFailure;
         try {
           return {
             ok: true,
-            result: await simulator.simulate({
+            result: await liveDrill.stage({
               conversationId: input.conversationId,
               message: input.message.trim()
             })
           };
         } catch (error) {
-          var simulationCode = error && error.code;
-          return safeError(SIMULATION_CODES.has(simulationCode)
-            ? simulationCode
-            : 'TRUSTEESHIP_SIMULATION_FAILED');
+          var liveDrillCode = error && error.code;
+          return safeError(LIVE_DRILL_CODES.has(liveDrillCode)
+            ? liveDrillCode
+            : 'TRUSTEESHIP_LIVE_DRILL_FAILED');
         }
       }
       if (input.type === 'TRUSTEESHIP_RESOLVE_APPROVAL') {

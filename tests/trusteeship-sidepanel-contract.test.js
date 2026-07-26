@@ -119,29 +119,34 @@ test('exposes HR FAQ controls on the AI trusteeship pane', () => {
   assert.doesNotMatch(presetBlock, /月薪|期望薪资|面试时间|到岗|微信|电话/);
 });
 
-test('provides an accessible trusteeship dry-run that is visibly non-sending', () => {
+test('provides an accessible live drill with explicit real-send consent and warnings', () => {
   for (const id of [
-    'trusteeshipSimulation',
-    'trusteeshipSimulationConversation',
-    'trusteeshipSimulationMessage',
-    'btnRunTrusteeshipSimulation',
-    'trusteeshipSimulationStatus',
-    'trusteeshipSimulationResult'
+    'trusteeshipLiveDrill',
+    'trusteeshipLiveDrillConversation',
+    'trusteeshipLiveDrillMessage',
+    'trusteeshipLiveDrillConsent',
+    'btnRunTrusteeshipLiveDrill',
+    'trusteeshipLiveDrillStatus',
+    'trusteeshipLiveDrillResult'
   ]) {
     assert.match(html, new RegExp('id="' + id + '"'));
   }
-  assert.match(html, /for="trusteeshipSimulationConversation"/);
-  assert.match(html, /for="trusteeshipSimulationMessage"/);
-  assert.match(html, /id="trusteeshipSimulationMessage"[^>]*maxlength="600"/);
-  assert.match(html, /id="trusteeshipSimulationStatus"[^>]*aria-live="polite"/);
-  assert.match(html, /id="trusteeshipSimulationResult"[^>]*aria-live="polite"/);
-  assert.match(html, /使用真实 AI，但不会读取或写入 BOSS，不会修改托管状态或发送飞书。/);
-  assert.match(html, /仅模拟，未发送/);
-  assert.match(script, /TRUSTEESHIP_SIMULATE_MESSAGE/);
-  assert.match(css, /\.trusteeship-simulation/);
-  assert.match(css, /\.trusteeship-simulation-result/);
+  assert.match(html, /for="trusteeshipLiveDrillConversation"/);
+  assert.match(html, /for="trusteeshipLiveDrillMessage"/);
+  assert.match(html, /for="trusteeshipLiveDrillConsent"/);
+  assert.match(html, /id="trusteeshipLiveDrillMessage"[^>]*maxlength="600"/);
+  assert.match(html, /id="trusteeshipLiveDrillStatus"[^>]*aria-live="polite"/);
+  assert.match(html, /id="trusteeshipLiveDrillResult"[^>]*aria-live="polite"/);
+  assert.match(html, /真实外发演练/);
+  assert.match(html, /飞书将收到模拟 HR 正文/);
+  assert.match(html, /确认发送后会真实发送给所选 HR/);
+  assert.match(script, /TRUSTEESHIP_STAGE_LIVE_DRILL/);
+  assert.doesNotMatch(html, /仅模拟，未发送|运行安全模拟/);
+  assert.doesNotMatch(script, /TRUSTEESHIP_SIMULATE_MESSAGE/);
+  assert.match(css, /\.trusteeship-live-drill/);
+  assert.match(css, /\.trusteeship-live-drill-result/);
 
-  const rendererStart = script.indexOf('function renderTrusteeshipSimulationResult(');
+  const rendererStart = script.indexOf('function renderTrusteeshipLiveDrillResult(');
   const rendererEnd = script.indexOf('\nfunction ', rendererStart + 1);
   assert.ok(rendererStart >= 0 && rendererEnd > rendererStart);
   const renderer = script.slice(rendererStart, rendererEnd);

@@ -8,6 +8,7 @@
   var SAFE_BOSS_QUERY_KEYS = ['conversationId', 'uid', 'jobId', 'encryptJobId'];
   var SAFE_QUERY_VALUE = /^[A-Za-z0-9_~-]{1,128}$/;
   var SAFE_STAGES = new Set(['WAITING_CONFIRMATION', 'RESOLVED']);
+  var SAFE_ORIGINS = new Set(['LIVE_MONITOR', 'LIVE_DRILL']);
   var SAFE_SUMMARIES = new Set([
     'HR 有新消息，请在插件内查看完整上下文',
     '本地待确认任务已处理',
@@ -24,6 +25,7 @@
     field: 80,
     fields: 8,
     draft: 600,
+    message: 600,
     wait: 120
   };
   var DEFAULT_TIMEOUT_MS = 8000;
@@ -142,6 +144,7 @@
   function buildApprovalCard(input) {
     var source = plainObject(input) ? input : {};
     var stage = SAFE_STAGES.has(source.stage) ? source.stage : '';
+    var origin = SAFE_ORIGINS.has(source.origin) ? source.origin : 'LIVE_MONITOR';
     var latestSummary = SAFE_SUMMARIES.has(source.latestSummary)
       ? source.latestSummary
       : '';
@@ -154,6 +157,18 @@
     ].filter(function (item) { return item[1].trim() !== ''; });
     var elements = [];
     if (facts.length > 0) elements.push({ tag: 'div', fields: facts.map(function (item) { return field(item[0], item[1]); }) });
+
+    var latestMessage = sanitizedText(source.latestMessage, MAX.message);
+    if (latestMessage.trim() !== '') {
+      elements.push({
+        tag: 'div',
+        text: plainText((origin === 'LIVE_DRILL' ? '模拟 HR 正文：' : 'HR 正文：') + latestMessage)
+      });
+    }
+    var draft = sanitizedText(source.draft, MAX.draft);
+    if (draft.trim() !== '') {
+      elements.push({ tag: 'div', text: plainText('拟回复：' + draft) });
+    }
 
     var wait = source.wait === true ? '等待对方回复' : '';
     if (wait.trim() !== '') elements.push({ tag: 'div', text: plainText('状态：' + wait) });

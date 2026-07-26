@@ -293,6 +293,120 @@ test('merges later messages into one bounded active approval in order', async ()
   assert.equal(snapshot.managedConversations['conv-1'].recentMessages.length, 20);
 });
 
+test('creates one live drill approval without changing the real monitoring baseline or context', async () => {
+  const harness = makeHarness({
+    conversationTrusteeship: {
+      enabled: true,
+      intervalMinutes: 10,
+      dailyAutoReplyLimit: 10,
+      autoReplyDay: '2026-07-24',
+      autoReplyCount: 3,
+      monitorCursor: 7
+    }
+  });
+  await registerAndEnable(harness);
+  await harness.store.markConversationChecked('conv-1', {
+    baseline: 'id:real-baseline'
+  });
+  const before = await harness.store.getSnapshot();
+
+  const approval = await harness.store.createLiveDrillApproval({
+    conversationId: 'conv-1',
+    drillFingerprint: 'live-drill:one',
+    message: '你现在薪资多少，期望多少',
+    reasonCode: 'HARD_RISK_SALARY',
+    fieldsNeeded: ['current_salary', 'expected_salary'],
+    draft: ''
+  });
+
+  assert.equal(approval.status, 'PENDING');
+  assert.equal(approval.origin, 'LIVE_DRILL');
+  assert.equal(approval.incomingFingerprint, 'live-drill:one');
+  assert.deepEqual(approval.messages, ['你现在薪资多少，期望多少']);
+  assert.deepEqual(approval.fieldsNeeded, ['current_salary', 'expected_salary']);
+
+  const after = await harness.store.getSnapshot();
+  const beforeConversation = before.managedConversations['conv-1'];
+  const afterConversation = after.managedConversations['conv-1'];
+  assert.equal(afterConversation.state, 'WAITING_CONFIRMATION');
+  assert.equal(afterConversation.pendingApprovalId, approval.approvalId);
+  assert.deepEqual({
+    lastIncomingFingerprint: afterConversation.lastIncomingFingerprint,
+    processedFingerprints: afterConversation.processedFingerprints,
+    recentMessages: afterConversation.recentMessages,
+    monitorCursor: after.conversationTrusteeship.monitorCursor,
+    autoReplyCount: after.conversationTrusteeship.autoReplyCount
+  }, {
+    lastIncomingFingerprint: beforeConversation.lastIncomingFingerprint,
+    processedFingerprints: beforeConversation.processedFingerprints,
+    recentMessages: beforeConversation.recentMessages,
+    monitorCursor: before.conversationTrusteeship.monitorCursor,
+    autoReplyCount: before.conversationTrusteeship.autoReplyCount
+  });
+});
+
+test('live drill approval rejects disabled, paused, pending, and sending conversations', async () => {
+  async function expectRejected(prepare) {
+    const harness = makeHarness();
+    await harness.store.registerConversation(reliableRef());
+    await prepare(harness);
+    await assert.rejects(
+      () => harness.store.createLiveDrillApproval({
+        conversationId: 'conv-1',
+        drillFingerprint: 'live-drill:blocked',
+        message: '测试消息',
+        reasonCode: 'LIVE_DRILL_CONFIRMATION',
+        fieldsNeeded: [],
+        draft: '测试回复'
+      }),
+      (error) => error && error.code === 'LIVE_DRILL_NOT_ALLOWED'
+    );
+  }
+
+  await expectRejected(async () => {});
+  await expectRejected(async (harness) => {
+    await harness.store.setManaged('conv-1', true);
+    await harness.store.pauseConversation('conv-1', 'CONVERSATION_UNAVAILABLE');
+  });
+  await expectRejected(async (harness) => {
+    await harness.store.setManaged('conv-1', true);
+    await createPendingApproval(harness, 'fp-pending', ['真实消息']);
+  });
+  await expectRejected(async (harness) => {
+    await harness.store.setManaged('conv-1', true);
+    const approval = await createPendingApproval(harness, 'fp-sending', ['真实消息']);
+    await harness.store.createSendIntent(approval.approvalId, '发送中');
+  });
+});
+
+test('normalizes legacy approvals as live monitor and preserves explicit live drill origin', async () => {
+  const harness = makeHarness({
+    pendingApprovals: {
+      legacy: {
+        approvalId: 'legacy',
+        conversationId: 'conv-legacy',
+        incomingFingerprint: 'fp-legacy',
+        incomingFingerprints: ['fp-legacy'],
+        messages: ['旧消息'],
+        status: 'PENDING'
+      },
+      drill: {
+        approvalId: 'drill',
+        conversationId: 'conv-drill',
+        origin: 'LIVE_DRILL',
+        incomingFingerprint: 'live-drill:stored',
+        incomingFingerprints: ['live-drill:stored'],
+        messages: ['模拟消息'],
+        status: 'PENDING'
+      }
+    }
+  });
+
+  const snapshot = await harness.store.getSnapshot();
+  assert.equal(snapshot.pendingApprovals.legacy.origin, 'LIVE_MONITOR');
+  assert.equal(snapshot.pendingApprovals.drill.origin, 'LIVE_DRILL');
+});
+
 test('disabling and resetting delete recent context and the active approval link', async () => {
   const harness = makeHarness();
   await registerAndEnable(harness);
@@ -1369,6 +1483,7 @@ test('store exposes one notification transition API within the exact public meth
     'beginMessage',
     'completeSend',
     'createAutoSendIntent',
+    'createLiveDrillApproval',
     'createOrMergeApproval',
     'createSendIntent',
     'getSnapshot',

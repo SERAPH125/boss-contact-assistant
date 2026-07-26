@@ -183,8 +183,9 @@ function stableTrusteeshipError(code) {
     AI_CLASSIFICATION_INVALID: 'AI 分类结果无法安全接受',
     AI_DRAFT_FAILED: 'AI 草稿生成失败，请检查 API 后重试',
     AI_DRAFT_INVALID: 'AI 草稿结果无法安全接受',
-    UNSUPPORTED_PLATFORM: '仅支持模拟已登记的 Boss 会话',
-    TRUSTEESHIP_SIMULATION_FAILED: '安全模拟失败，请稍后重试'
+    UNSUPPORTED_PLATFORM: '仅支持已登记的 Boss 会话',
+    LIVE_DRILL_NOT_ALLOWED: '该会话当前不可演练，请先处理待确认、暂停或发送中的任务',
+    TRUSTEESHIP_LIVE_DRILL_FAILED: '真实外发演练失败，请稍后重试'
   };
   return messages[code] || '操作未完成，请稍后重试';
 }
@@ -457,8 +458,8 @@ function setManagedConversationEnabled(conversationId, enabled) {
   if (checkbox) checkbox.checked = enabled === true;
 }
 
-function renderTrusteeshipSimulationConversations(conversations) {
-  const select = $('trusteeshipSimulationConversation');
+function renderTrusteeshipLiveDrillConversations(conversations) {
+  const select = $('trusteeshipLiveDrillConversation');
   if (!select) return;
   const previous = select.value;
   select.replaceChildren();
@@ -494,8 +495,8 @@ function simulationText(value, limit) {
     : '';
 }
 
-function renderTrusteeshipSimulationResult(result) {
-  const root = $('trusteeshipSimulationResult');
+function renderTrusteeshipLiveDrillResult(result) {
+  const root = $('trusteeshipLiveDrillResult');
   if (!root) return;
   root.replaceChildren();
   const source = result && typeof result === 'object' ? result : {};
@@ -519,7 +520,15 @@ function renderTrusteeshipSimulationResult(result) {
       : 'REQUIRE_CONFIRMATION'],
     ['策略原因', simulationText(decision.reasonCode, 120) || '—'],
     ['拟回复', simulationText(source.draft, 300) || '无'],
-    ['生产行为', source.wouldSend === true ? '会尝试自动发送' : '不会自动发送']
+    ['待确认编号', simulationText(source.approvalId, 160) || '—'],
+    ['飞书通知', source.notificationStatus === 'SUCCESS'
+      ? '飞书通知已发送'
+      : source.notificationStatus === 'FAILED'
+        ? '飞书通知失败，可在后续周期按规则重试'
+        : source.notificationStatus === 'UNKNOWN'
+          ? '飞书通知结果未知'
+          : '本轮未发送飞书通知'],
+    ['当前状态', '已创建待确认，尚未发送给 HR']
   ];
   rows.forEach(([label, value]) => {
     const line = document.createElement('p');
@@ -527,13 +536,13 @@ function renderTrusteeshipSimulationResult(result) {
     root.appendChild(line);
   });
   const marker = document.createElement('p');
-  marker.className = 'simulation-marker';
-  marker.textContent = '仅模拟，未发送';
+  marker.className = 'live-drill-marker';
+  marker.textContent = '已创建真实发送待确认，当前尚未发送给 HR';
   root.appendChild(marker);
 }
 
 function renderManagedConversations(conversations) {
-  renderTrusteeshipSimulationConversations(conversations);
+  renderTrusteeshipLiveDrillConversations(conversations);
   const container = $('managedConversations');
   if (!container) return;
   const heading = $('managedConversationsHeading');
@@ -1103,16 +1112,17 @@ $('btnRunTrusteeshipNow').addEventListener('click', async () => {
   }
 });
 
-if ($('btnRunTrusteeshipSimulation')) {
-  $('btnRunTrusteeshipSimulation').addEventListener('click', async () => {
-    const button = $('btnRunTrusteeshipSimulation');
+if ($('btnRunTrusteeshipLiveDrill')) {
+  $('btnRunTrusteeshipLiveDrill').addEventListener('click', async () => {
+    const button = $('btnRunTrusteeshipLiveDrill');
     const conversationId = String(
-      ($('trusteeshipSimulationConversation') || {}).value || ''
+      ($('trusteeshipLiveDrillConversation') || {}).value || ''
     ).trim();
     const message = String(
-      ($('trusteeshipSimulationMessage') || {}).value || ''
+      ($('trusteeshipLiveDrillMessage') || {}).value || ''
     ).trim();
-    const status = $('trusteeshipSimulationStatus');
+    const consent = $('trusteeshipLiveDrillConsent');
+    const status = $('trusteeshipLiveDrillStatus');
     if (!conversationId) {
       if (status) status.textContent = '请选择已登记会话。';
       return;
@@ -1125,30 +1135,37 @@ if ($('btnRunTrusteeshipSimulation')) {
       if (status) status.textContent = '模拟消息不能超过 600 个字符。';
       return;
     }
+    if (!consent || consent.checked !== true) {
+      if (status) status.textContent = '请先确认本轮演练可能真实发送给所选 HR。';
+      return;
+    }
     button.disabled = true;
-    if (status) status.textContent = '正在使用真实 AI 进行安全模拟…';
-    if ($('trusteeshipSimulationResult')) {
-      $('trusteeshipSimulationResult').replaceChildren();
+    if (status) status.textContent = '正在使用真实 AI 创建生产待确认…';
+    if ($('trusteeshipLiveDrillResult')) {
+      $('trusteeshipLiveDrillResult').replaceChildren();
     }
     try {
       const response = await sendRuntimeMessage({
-        type: 'TRUSTEESHIP_SIMULATE_MESSAGE',
+        type: 'TRUSTEESHIP_STAGE_LIVE_DRILL',
         conversationId,
         message
       });
       if (!response || response.ok !== true) {
         if (status) {
-          status.textContent = '模拟失败：' + stableTrusteeshipError(
+          status.textContent = '演练失败：' + stableTrusteeshipError(
             response && (response.code || response.errorCode)
           );
         }
         return;
       }
-      renderTrusteeshipSimulationResult(response.result);
-      if (status) status.textContent = '模拟完成：仅模拟，未发送。';
+      renderTrusteeshipLiveDrillResult(response.result);
+      if (consent) consent.checked = false;
+      if (status) status.textContent = '已创建真实发送待确认，当前尚未发送给 HR。';
+      await refreshTrusteeshipState();
+      await refreshApprovals();
     } catch (_) {
       if (status) {
-        status.textContent = '模拟失败：' +
+        status.textContent = '演练失败：' +
           stableTrusteeshipError('SERVICE_WORKER_INTERRUPTED');
       }
     } finally {

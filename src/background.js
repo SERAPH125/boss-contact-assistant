@@ -16,7 +16,7 @@ importScripts(
   '/src/platform/boss/peer-identity.js',
   '/src/platform/boss/conversation-reader.js',
   '/src/conversation/monitor-engine.js',
-  '/src/conversation/trusteeship-simulator.js',
+  '/src/conversation/trusteeship-live-drill.js',
   '/src/conversation/trusteeship-runtime.js'
 );
 
@@ -1384,22 +1384,12 @@ const protectedTrusteeshipNotifier = {
 const getTrusteeshipResumeFacts = TrusteeshipRuntime.createResumeFacts(
   () => PlatformConfig.loadFlat()
 );
-function makeTrusteeshipSimulationId(kind) {
+function makeTrusteeshipLiveDrillId(kind) {
   const suffix = (typeof crypto !== 'undefined' && crypto.randomUUID)
     ? crypto.randomUUID()
     : (Date.now() + '-' + Math.random().toString(16).slice(2));
-  return 'simulation-' + kind + '-' + suffix;
+  return kind + '-' + suffix;
 }
-const trusteeshipSimulator = TrusteeshipSimulator.create({
-  storeModule: ConversationStore,
-  engineModule: MonitorEngine,
-  productionStore: conversationStore,
-  classifier: protectedTrusteeshipClassifier,
-  policy: TrusteeshipPolicy,
-  getResumeFacts: getTrusteeshipResumeFacts,
-  clock: () => Date.now(),
-  idFactory: makeTrusteeshipSimulationId
-});
 monitorEngine = MonitorEngine.create({
   store: conversationStore,
   reader: protectedTrusteeshipPageAdapter,
@@ -1410,12 +1400,23 @@ monitorEngine = MonitorEngine.create({
   getResumeFacts: getTrusteeshipResumeFacts,
   guardExternalAction: loadCurrentProvenApiConfig
 });
+const trusteeshipLiveDrill = TrusteeshipLiveDrill.create({
+  storeModule: ConversationStore,
+  engineModule: MonitorEngine,
+  productionStore: conversationStore,
+  productionEngine: monitorEngine,
+  classifier: protectedTrusteeshipClassifier,
+  policy: TrusteeshipPolicy,
+  getResumeFacts: getTrusteeshipResumeFacts,
+  clock: () => Date.now(),
+  idFactory: makeTrusteeshipLiveDrillId
+});
 trusteeshipRuntime = TrusteeshipRuntime.createController({
   chromeApi: chrome,
   storage: chrome.storage.local,
   store: conversationStore,
   engine: monitorEngine,
-  simulator: trusteeshipSimulator,
+  liveDrill: trusteeshipLiveDrill,
   policy: TrusteeshipPolicy,
   notifierModule: FeishuNotifier,
   feishuClient: trusteeshipFeishuClient,

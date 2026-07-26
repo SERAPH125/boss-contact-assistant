@@ -84,15 +84,15 @@ body {
 .sensitive-row input { flex: 1; min-width: 0; }
 .sensitive-row .btn-mini { flex-shrink: 0; }
 .risk-note { margin-top: 10px; padding: 9px; border-left: 3px solid #c45c06; border-radius: 4px; background: #fff7ed; color: #78350f; font-size: 12px; line-height: 1.5; }
-.trusteeship-simulation {
+.trusteeship-live-drill {
   margin-top: 12px; padding: 10px; border: 1px solid #bfdbfe; border-radius: 9px;
   background: #f8fbff;
 }
-.trusteeship-simulation summary { cursor: pointer; color: #0b6e99; font-weight: 700; }
-.trusteeship-simulation-result {
+.trusteeship-live-drill summary { cursor: pointer; color: #991b1b; font-weight: 700; }
+.trusteeship-live-drill-result {
   margin-top: 8px; min-width: 0; overflow-wrap: anywhere; word-break: break-word;
 }
-.trusteeship-simulation-result p { margin-top: 5px; line-height: 1.45; }
+.trusteeship-live-drill-result p { margin-top: 5px; line-height: 1.45; }
 .managed-conversations, .approval-list { display: grid; gap: 8px; margin-top: 8px; }
 .managed-conversation, .approval-card { padding: 11px; border: 1px solid #dbe4ea; border-radius: 9px; background: #fff; }
 .managed-conversation h3, .approval-card h3 { font-size: 13px; line-height: 1.4; min-width: 0; overflow-wrap: anywhere; word-break: break-word; }

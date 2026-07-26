@@ -195,19 +195,20 @@ browser-harness 的 2026-05-01 实号记录说明，历史接口的普通消息�
 
 扩展精确重载后，API proof、HR FAQ、风险确认和飞书 proof 均仍有效；恢复全局托管并现场运行得到 `checked=2 / newMessages=0 / pending=0 / autoSent=0 / errors=[]`，两条会话 `lastCheckedAt` 都更新且读失败计数为 0，同名 10 分钟 alarm 已重建。侧栏当前显示“正在托管 2 个岗位”和“检查 2 个”。本轮没有新消息，也没有任何 Boss 发送。
 
-## v0.3.6 AI 托管安全模拟器
+## v0.3.6 AI 托管真实外发演练
 
 本轮先检索并对照三个开源实现：
 
 - [Rasa](https://github.com/RasaHQ/rasa) 的 conversation-driven 测试把一组预设用户消息送入同一对话决策链，再断言动作结果；本项目据此复用生产 engine，而不是另写一套“看起来相同”的判断器。
-- [Botium Bindings WebdriverIO](https://github.com/codeforequity-at/botium-bindings-webdriverio) 把合成输入和受控输出适配器放在真实对话逻辑边界之外；本项目据此注入一次性 reader 和 recorder sender，让 AI/策略真实运行而 Boss/飞书副作用为零。
-- [LangGraph](https://github.com/langchain-ai/langgraph) 的 interrupt / human-in-the-loop 模型把自动执行与人工确认作为显式状态；本项目继续使用 `AUTO_REPLY / REQUIRE_CONFIRMATION / NO_REPLY` 的确定性策略结果，不让模拟 UI 绕过人工门禁。
+- [Botium Bindings WebdriverIO](https://github.com/codeforequity-at/botium-bindings-webdriverio) 把合成输入和受控输出适配器放在真实对话逻辑边界之外；本项目据此让合成 HR 输入只参与一次性 AI/策略评估，不污染真实消息游标。
+- [LangGraph](https://github.com/langchain-ai/langgraph) 的 interrupt / human-in-the-loop 模型把自动执行与人工确认作为显式状态；本项目据此把演练输出先持久化为 `LIVE_DRILL / PENDING`，最终 Boss 写入继续经过插件内人工确认。
+- [larksuite/node-sdk](https://github.com/larksuite/node-sdk) 用于复核飞书机器人 Webhook 与交互式应用能力的边界：当前自定义 Webhook 仍是单向通知，插件不能假装从飞书按钮直接完成确认。
 
-上述参考只用于验证架构与测试边界，没有复制其源码，也没有新增运行时依赖。当前独立实现新增 `trusteeship-simulator.js`：只读一次生产快照，把单个已登记 Boss 会话复制进一次性内存 store，以合成新消息运行真实 `MonitorEngine`、真实受保护 AI、简历事实和策略；sender 仅记录草稿，飞书关闭，production store 和 alarm 完全不触碰。runtime 只接受精确 `{ type, conversationId, message }`，限制 ID 与 1–600 code-points 消息，并将 provider 异常收敛成稳定错误码。侧栏结果使用 DOM 节点与 `textContent` 渲染，不把模型文本拼接成 HTML。
+上述参考只用于验证架构与测试边界，没有复制其源码，也没有新增运行时依赖。当前独立实现将旧隔离模拟器升级为 `trusteeship-live-drill.js`：合成消息仍在一次性 store 中运行真实 `MonitorEngine`、受保护 AI、简历事实和策略；评估结束后才通过专用生产 store 方法创建 `origin=LIVE_DRILL` 的待确认，并复用 production notification reservation 发飞书。专用写入不得改动真实 baseline、已处理指纹、最近消息、monitor cursor 或自动回复额度。runtime 只接受精确 `{ type, conversationId, message }`，限制 ID 与 1–600 code-points 消息，并将 provider 异常收敛成稳定错误码。侧栏要求逐次勾选外发确认，结果使用 DOM 节点与 `textContent` 渲染。
 
-TDD 先用缺失 simulator、runtime schema/dispatch、background 组合和 sidepanel 控件/事件处理器得到 RED，再逐层转为 GREEN。显式拒绝样本同时暴露生产 engine 的证据归一化冲突：分类器按提示词正确返回 `important / EXPLICIT_REJECTION` 且无简历依据，却被通用 evidence 规则误判为 `AI_CLASSIFICATION_INVALID`。修复后只有 `resume_fact` 分类和所有草稿继续强制 evidence；策略发送门仍要求可核对依据，因此没有放宽自动回复安全边界。
+飞书 payload 现在可包含经过 code-point 限长和敏感模式清洗的“模拟 HR 正文 / HR 正文”与拟回复；API Key、Webhook token、签名密钥、provider error 和未声明对象字段仍禁止外发。飞书仍不能批准；用户在插件待确认页执行 `SEND_EDITED` 后，生产 engine 才重新读取并验证目标会话，再调用真实 sender。
 
-模拟结果只能证明合成消息经过真实 AI 与生产决策链时的行为，不能替代真实 Boss 新来信检测、目标绑定、发送、飞书和 Worker alarm 验收。推荐固定回归样本为“还在看机会吗？”“薪资是多少？”“不合适”“经验可能不太匹配”。
+真实外发演练可以逐段证明 AI/策略、持久待办、飞书和人工确认发送，但不能替代真实 Boss 新来信检测。新增三周期 fixture 证明同一入站指纹的 `newMessages` 为 `0 → 1 → 0`，只生成一个 `LIVE_MONITOR` 待办、一次通知且确认前发送为 0；实号监控最终仍必须由登记 baseline 之后真正到达的一条 HR 消息验证。推荐固定演练样本为“还在看机会吗？”“薪资是多少？”“不合适”“经验可能不太匹配”。
 
 ## v0.3.5 Task 9 恢复、幂等与隐私回归参考
 

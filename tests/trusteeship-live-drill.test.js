@@ -4,7 +4,7 @@ const assert = require('node:assert/strict');
 const ConversationStore = require('../src/conversation/conversation-store.js');
 const MonitorEngine = require('../src/conversation/monitor-engine.js');
 const Policy = require('../src/conversation/trusteeship-policy.js');
-const Simulator = require('../src/conversation/trusteeship-simulator.js');
+const LiveDrill = require('../src/conversation/trusteeship-live-drill.js');
 
 const NOW = Date.parse('2026-07-26T10:00:00+08:00');
 
@@ -58,7 +58,8 @@ function createHarness(overrides) {
   if (typeof source.mutateSnapshot === 'function') source.mutateSnapshot(snapshot);
   const before = structuredClone(snapshot);
   const calls = {
-    productionWrites: [],
+    staged: [],
+    notifyPending: 0,
     classify: [],
     draft: [],
     facts: 0
@@ -67,9 +68,50 @@ function createHarness(overrides) {
     async getSnapshot() {
       return structuredClone(snapshot);
     },
-    async saveSettings() {
-      calls.productionWrites.push('saveSettings');
-      throw new Error('production store must stay read-only');
+    async createLiveDrillApproval(input) {
+      calls.staged.push(structuredClone(input));
+      if (source.stageError) {
+        const error = new Error(source.stageError);
+        error.code = source.stageError;
+        throw error;
+      }
+      const approval = {
+        approvalId: 'approval-live-drill',
+        conversationId: input.conversationId,
+        origin: 'LIVE_DRILL',
+        incomingFingerprint: input.drillFingerprint,
+        incomingFingerprints: [input.drillFingerprint],
+        messages: [input.message],
+        reasonCode: input.reasonCode,
+        fieldsNeeded: input.fieldsNeeded,
+        draft: input.draft,
+        status: 'PENDING',
+        feishuNotifyAttempts: []
+      };
+      snapshot.pendingApprovals[approval.approvalId] = approval;
+      snapshot.managedConversations[input.conversationId].state = 'WAITING_CONFIRMATION';
+      snapshot.managedConversations[input.conversationId].pendingApprovalId = approval.approvalId;
+      return structuredClone(approval);
+    }
+  };
+  const productionEngine = {
+    async notifyPending() {
+      calls.notifyPending += 1;
+      const approval = snapshot.pendingApprovals['approval-live-drill'];
+      if (approval) {
+        approval.feishuNotifyAttempts.push({
+          status: source.notificationStatus || 'SUCCESS',
+          code: source.notificationStatus === 'FAILED' ? 'NETWORK_ERROR' : 'OK'
+        });
+      }
+      return {
+        checked: 0,
+        newMessages: 0,
+        autoSent: 0,
+        pending: 0,
+        skipped: 0,
+        errors: []
+      };
     }
   };
   const classifier = source.classifier || {
@@ -92,10 +134,11 @@ function createHarness(overrides) {
     }
   };
   let sequence = 0;
-  const simulator = Simulator.create({
+  const liveDrill = LiveDrill.create({
     storeModule: ConversationStore,
     engineModule: MonitorEngine,
     productionStore,
+    productionEngine,
     classifier,
     policy: Policy,
     async getResumeFacts() {
@@ -103,15 +146,15 @@ function createHarness(overrides) {
       return [{ id: 'faq-line-1', text: '问：还在看机会吗？；答：是的，我还在看合适机会。' }];
     },
     clock: () => NOW,
-    idFactory: (kind) => `${kind}-simulation-${++sequence}`
+    idFactory: (kind) => `${kind}-live-drill-${++sequence}`
   });
-  return { simulator, snapshot, before, calls };
+  return { liveDrill, snapshot, before, calls };
 }
 
-test('runs the real engine in isolated memory and reports wouldSend without production writes', async () => {
+test('evaluates with the real engine then stages one production approval without sending Boss', async () => {
   const harness = createHarness();
 
-  const result = await harness.simulator.simulate({
+  const result = await harness.liveDrill.stage({
     conversationId: 'conv-1',
     message: '还在看机会吗？'
   });
@@ -120,21 +163,34 @@ test('runs the real engine in isolated memory and reports wouldSend without prod
     action: 'AUTO_REPLY',
     reasonCode: 'AUTO_REPLY_ALLOWED'
   });
-  assert.equal(result.wouldSend, true);
+  assert.equal(result.sentToBoss, false);
   assert.equal(result.draft, '是的，我还在看合适机会。');
-  assert.equal(result.simulated, true);
+  assert.equal(result.liveDrill, true);
+  assert.equal(result.approvalId, 'approval-live-drill');
+  assert.equal(result.notificationStatus, 'SUCCESS');
   assert.equal(result.classification.category, 'still_looking');
-  assert.deepEqual(harness.snapshot, harness.before);
-  assert.deepEqual(harness.calls.productionWrites, []);
+  assert.deepEqual(harness.calls.staged, [{
+    conversationId: 'conv-1',
+    drillFingerprint: 'live-drill:message-live-drill-1',
+    message: '还在看机会吗？',
+    reasonCode: 'AUTO_REPLY_ALLOWED',
+    fieldsNeeded: [],
+    draft: '是的，我还在看合适机会。'
+  }]);
+  assert.equal(harness.calls.notifyPending, 1);
+  assert.equal(
+    harness.snapshot.managedConversations['conv-1'].lastIncomingFingerprint,
+    harness.before.managedConversations['conv-1'].lastIncomingFingerprint
+  );
   assert.equal(harness.calls.classify.length, 1);
   assert.equal(harness.calls.draft.length, 1);
   assert.equal(harness.calls.facts, 1);
 });
 
-test('projects the isolated pending approval reason for a hard-risk message', async () => {
+test('stages a hard-risk message for manual confirmation with an empty editable draft', async () => {
   const harness = createHarness();
 
-  const result = await harness.simulator.simulate({
+  const result = await harness.liveDrill.stage({
     conversationId: 'conv-1',
     message: '薪资是多少？'
   });
@@ -143,11 +199,12 @@ test('projects the isolated pending approval reason for a hard-risk message', as
     action: 'REQUIRE_CONFIRMATION',
     reasonCode: 'HARD_RISK_SALARY'
   });
-  assert.equal(result.wouldSend, false);
-  assert.deepEqual(harness.snapshot, harness.before);
+  assert.equal(result.sentToBoss, false);
+  assert.equal(result.approvalId, 'approval-live-drill');
+  assert.equal(harness.calls.staged[0].reasonCode, 'HARD_RISK_SALARY');
 });
 
-test('explicit rejection classification never records a simulated send', async () => {
+test('explicit rejection classification never sends directly and remains manually reviewable', async () => {
   const harness = createHarness({
     classifier: {
       async classify() {
@@ -168,7 +225,7 @@ test('explicit rejection classification never records a simulated send', async (
     }
   });
 
-  const result = await harness.simulator.simulate({
+  const result = await harness.liveDrill.stage({
     conversationId: 'conv-1',
     message: '不合适'
   });
@@ -178,13 +235,13 @@ test('explicit rejection classification never records a simulated send', async (
     action: 'REQUIRE_CONFIRMATION',
     reasonCode: 'CATEGORY_REQUIRES_CONFIRMATION'
   });
-  assert.equal(result.wouldSend, false);
+  assert.equal(result.sentToBoss, false);
 });
 
-test('rejects missing, unsupported, empty, and oversized simulation inputs with stable codes', async () => {
+test('rejects missing, unsupported, empty, and oversized live drill inputs with stable codes', async () => {
   const missing = createHarness();
   await assert.rejects(
-    () => missing.simulator.simulate({ conversationId: 'missing', message: '您好' }),
+    () => missing.liveDrill.stage({ conversationId: 'missing', message: '您好' }),
     (error) => error && error.code === 'CONVERSATION_NOT_FOUND'
   );
 
@@ -194,14 +251,14 @@ test('rejects missing, unsupported, empty, and oversized simulation inputs with 
     }
   });
   await assert.rejects(
-    () => unsupported.simulator.simulate({ conversationId: 'conv-1', message: '您好' }),
+    () => unsupported.liveDrill.stage({ conversationId: 'conv-1', message: '您好' }),
     (error) => error && error.code === 'UNSUPPORTED_PLATFORM'
   );
 
   const invalid = createHarness();
   for (const message of ['', '   ', '问'.repeat(601)]) {
     await assert.rejects(
-      () => invalid.simulator.simulate({ conversationId: 'conv-1', message }),
+      () => invalid.liveDrill.stage({ conversationId: 'conv-1', message }),
       (error) => error && error.code === 'TRUSTEESHIP_MESSAGE_INVALID'
     );
   }
@@ -219,7 +276,7 @@ test('turns classifier and draft failures into stable errors without provider de
     }
   });
   await assert.rejects(
-    () => classifyFailure.simulator.simulate({
+    () => classifyFailure.liveDrill.stage({
       conversationId: 'conv-1',
       message: '还在看机会吗？'
     }),
@@ -247,7 +304,7 @@ test('turns classifier and draft failures into stable errors without provider de
     }
   });
   await assert.rejects(
-    () => draftFailure.simulator.simulate({
+    () => draftFailure.liveDrill.stage({
       conversationId: 'conv-1',
       message: '还在看机会吗？'
     }),
@@ -274,10 +331,26 @@ test('preserves a stale API proof code through the engine classification boundar
   });
 
   await assert.rejects(
-    () => harness.simulator.simulate({
+    () => harness.liveDrill.stage({
       conversationId: 'conv-1',
       message: '还在看机会吗？'
     }),
     (error) => error && error.code === 'API_PROOF_STALE'
   );
+});
+
+test('does not notify or persist a second approval when production staging rejects the conversation state', async () => {
+  const harness = createHarness({ stageError: 'LIVE_DRILL_NOT_ALLOWED' });
+
+  await assert.rejects(
+    () => harness.liveDrill.stage({
+      conversationId: 'conv-1',
+      message: '还在看机会吗？'
+    }),
+    (error) => error && error.code === 'LIVE_DRILL_NOT_ALLOWED'
+  );
+
+  assert.equal(harness.calls.staged.length, 1);
+  assert.equal(harness.calls.notifyPending, 0);
+  assert.deepEqual(harness.snapshot.pendingApprovals, {});
 });

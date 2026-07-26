@@ -57,6 +57,25 @@ function assertPublicSafe(value, label) {
   }
 }
 
+function assertFeishuBodyContainsAuthorizedChat(value, label) {
+  const text = serialized(value);
+  for (const name of [
+    'apiKey',
+    'webhookToken',
+    'signingSecret',
+    'providerBody',
+    'classifyError',
+    'draftError',
+    'sendError',
+    'faqAnswer'
+  ]) {
+    assert.equal(text.includes(CANARIES[name]), false, `${label} leaked ${name}`);
+  }
+  for (const name of ['chatStart', 'chatBoundary', 'chatTail']) {
+    assert.equal(text.includes(CANARIES[name]), true, `${label} omitted authorized ${name}`);
+  }
+}
+
 function chatFixture() {
   const message = `${CANARIES.chatStart}:${'甲'.repeat(115)}:${CANARIES.chatBoundary}:${'乙'.repeat(320)}:${CANARIES.chatTail}`;
   assert.ok(message.indexOf(CANARIES.chatBoundary) >= 120);
@@ -222,16 +241,18 @@ async function privacyHarness(mode) {
     storage,
     store,
     engine,
-    simulator: {
-      async simulate() {
+    liveDrill: {
+      async stage() {
         return {
           decision: {
             action: 'REQUIRE_CONFIRMATION',
             reasonCode: 'CATEGORY_REQUIRES_CONFIRMATION'
           },
           draft: '',
-          wouldSend: false,
-          simulated: true
+          approvalId: 'approval-live-drill',
+          sentToBoss: false,
+          notificationStatus: 'SUCCESS',
+          liveDrill: true
         };
       }
     },
@@ -248,7 +269,7 @@ async function privacyHarness(mode) {
   return { calls, controllerResponse, cycleSummary, snapshot, fullChat };
 }
 
-test('classification errors keep full chat local while the real Feishu HTTP body contains no chat or credential canary', async () => {
+test('classification errors send authorized HR body to Feishu without credentials or provider errors', async () => {
   const result = await privacyHarness('classify-error');
   const approval = Object.values(result.snapshot.pendingApprovals)[0];
 
@@ -266,7 +287,10 @@ test('classification errors keep full chat local while the real Feishu HTTP body
   );
   assertPublicSafe(result.cycleSummary, 'cycle summary');
   assertPublicSafe(result.controllerResponse, 'runtime controller response');
-  assertPublicSafe(JSON.parse(result.calls.fetchRequests[0].body), 'final Feishu HTTP body');
+  assertFeishuBodyContainsAuthorizedChat(
+    JSON.parse(result.calls.fetchRequests[0].body),
+    'final Feishu HTTP body'
+  );
 });
 
 test('draft errors execute the real draft branch but never expose provider or raw error canaries', async () => {
@@ -283,7 +307,10 @@ test('draft errors execute the real draft branch but never expose provider or ra
   assert.ok(approval.messages.includes(result.fullChat));
   assertPublicSafe(result.cycleSummary, 'draft-error cycle summary');
   assertPublicSafe(result.controllerResponse, 'draft-error runtime controller response');
-  assertPublicSafe(JSON.parse(result.calls.fetchRequests[0].body), 'draft-error Feishu HTTP body');
+  assertFeishuBodyContainsAuthorizedChat(
+    JSON.parse(result.calls.fetchRequests[0].body),
+    'draft-error Feishu HTTP body'
+  );
 });
 
 test('send errors execute the sender once and expose only a stable unknown code', async () => {
@@ -305,7 +332,7 @@ test('send errors execute the sender once and expose only a stable unknown code'
   assertPublicSafe(result.controllerResponse, 'send-error runtime controller response');
 });
 
-test('successful confirmation keeps model echoes local but excludes draft and fields from the real Feishu HTTP body', async () => {
+test('successful confirmation includes authorized HR body and draft but excludes credentials from Feishu', async () => {
   const result = await privacyHarness('success-confirmation');
   const approval = Object.values(result.snapshot.pendingApprovals)[0];
 
@@ -325,7 +352,7 @@ test('successful confirmation keeps model echoes local but excludes draft and fi
   assert.ok(approval.draft.includes(CANARIES.chatTail));
   assertPublicSafe(result.cycleSummary, 'successful confirmation cycle summary');
   assertPublicSafe(result.controllerResponse, 'successful confirmation runtime controller response');
-  assertPublicSafe(
+  assertFeishuBodyContainsAuthorizedChat(
     JSON.parse(result.calls.fetchRequests[0].body),
     'successful confirmation Feishu HTTP body'
   );

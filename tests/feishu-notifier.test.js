@@ -54,13 +54,15 @@ test('signs timestamp with HMAC-SHA256 and an empty message', async function () 
   );
 });
 
-test('builds a bounded allowlisted approval card without context or credentials', function () {
+test('builds a bounded allowlisted approval card with authorized message body but without credentials', function () {
   const card = Feishu.buildApprovalCard({
     company: '星河科技',
     position: '前端工程师',
     hr: '李老师',
     stage: 'WAITING_CONFIRMATION',
+    origin: 'LIVE_MONITOR',
     latestSummary: 'HR 有新消息，请在插件内查看完整上下文',
+    latestMessage: '请问你现在是否还在看机会？',
     reason: '需要人工确认候选人意向。',
     fieldsNeeded: Array.from({ length: 12 }, function (_, index) { return '字段-' + index + '-' + 'x'.repeat(100); }),
     draft: '您好，感谢联系，我正在评估新的机会。' + 'x'.repeat(700),
@@ -75,31 +77,35 @@ test('builds a bounded allowlisted approval card without context or credentials'
   const serialized = JSON.stringify(card);
 
   assert.match(serialized, /星河科技|前端工程师|李老师|WAITING_CONFIRMATION/);
+  assert.match(serialized, /HR 正文|请问你现在是否还在看机会|拟回复|感谢联系/);
   assert.match(serialized, /等待对方回复/);
   assert.match(serialized, /www\.zhipin\.com\/web\/geek\/chat/);
   assert.equal((serialized.match(/字段-/g) || []).length, 0);
-  assert.doesNotMatch(serialized, /建议草稿|感谢联系|需要人工确认候选人意向/);
+  assert.doesNotMatch(serialized, /需要人工确认候选人意向/);
   assert.doesNotMatch(serialized, /完整上下文不得泄露|example-token-123|signing-secret-value|api-key-secret|unknown-input/);
   assert.doesNotMatch(serialized, /x{601}/);
 });
 
-test('card builder ignores HR-driven free text and accepts only fixed notification templates', function () {
+test('card builder labels a live drill body and sanitizes its authorized free text', function () {
   const marker = 'HR-DRIVEN-FREE-TEXT-CANARY';
   const card = Feishu.buildApprovalCard({
     company: '安全公司',
     position: '安全岗位',
     hrName: '安全 HR',
-    stage: marker,
-    latestSummary: marker,
+    stage: 'WAITING_CONFIRMATION',
+    origin: 'LIVE_DRILL',
+    latestSummary: 'HR 有新消息，请在插件内查看完整上下文',
+    latestMessage: marker + ' @all https://evil.example/path',
     reason: marker,
     fieldsNeeded: [marker],
-    draft: marker,
+    draft: '候选回复 ' + marker,
     wait: marker
   });
   const serialized = JSON.stringify(card);
 
-  assert.match(serialized, /安全公司|安全岗位|安全 HR/);
-  assert.doesNotMatch(serialized, new RegExp(marker));
+  assert.match(serialized, /安全公司|安全岗位|安全 HR|模拟 HR 正文|候选回复/);
+  assert.match(serialized, new RegExp(marker));
+  assert.doesNotMatch(serialized, /@all|evil\.example/);
 
   const fixed = JSON.stringify(Feishu.buildApprovalCard({
     stage: 'WAITING_CONFIRMATION',

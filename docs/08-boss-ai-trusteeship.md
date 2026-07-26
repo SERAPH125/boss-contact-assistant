@@ -379,7 +379,7 @@ Task 8 新检索的开源参考：[GoogleChrome/chrome-extensions-samples](https
 
 ### 隐私边界与静态扫描
 
-新增的真实模块组合测试执行 classifier error、draft error、send error，以及成功进入人工确认的模型回显分支；每条链使用 actual store → engine → runtime controller/notifier → 真实 `FeishuNotifier.create()`，只用 fake fetch 捕获最终 HTTP body。成功分支让 classifier 的 `fieldsNeeded` 和 draft 故意回显 HR 文本开头、旧 160 code-points 边界附近和末尾的三个 marker，并证明这些内容只保留于本地待办；最终请求 body、周期摘要及 controller response 均不得包含任一 marker、API Key、Webhook token、签名密钥、provider body 或 raw error。飞书卡片使用固定文案“HR 有新消息，请在插件内查看完整上下文”，不接受聊天、草稿、待补字段、reason 或任意自由文本摘要。
+真实模块组合测试执行 classifier error、draft error、send error，以及成功进入人工确认的模型回显分支；每条链使用 actual store → engine → runtime controller/notifier → 真实 `FeishuNotifier.create()`，只用 fake fetch 捕获最终 HTTP body。当前授权后的通知契约允许最新 HR 正文和拟回复进入卡片，但必须先做 code-point 长度限制与 URL、`@`、凭证特征清洗；API Key、Webhook token、签名密钥、provider body、raw error 和未声明的任意对象字段仍不得进入最终请求、周期摘要或 controller response。卡片来源只接受 `LIVE_MONITOR` / `LIVE_DRILL`，并分别标记“HR 正文”或“模拟 HR 正文”。
 
 对 `src` / `tests` 的 `apiKey`、`feishuWebhook`、`signingSecret`、`recentMessages`、`console`、`LOG` 和 `runtime.sendMessage` 定向扫描确认：托管模块没有 raw console/log 输出，凭证只出现在配置校验、签名或测试 fixture，聊天只进入有界本地状态与 AI 输入。`src/background.js` 仍含 Task 9 范围外的既有联系/扫描 raw error 日志；本任务没有按要求顺手重构该旧链路。独立的生产 background VM 测试证明 `TEST_API` 的 provider/credential canary 不进入响应、runtime 消息或其中的 `LOG/BLOCKED/PHASE` 事件；完整 sidepanel VM 证明未知原始错误码不进入 status 或 managed-conversation DOM。这里是多个真实边界测试的组合证据，不宣称一次单链执行跨过所有浏览器 UI 表面。
 
@@ -410,14 +410,15 @@ Task 9 的自动化测试使用内存存储、fake Chrome、fake fetch、Node VM
 
 Task 10 必须分阶段且每阶段单独获授权：先做一个完整工作日的只读监控；再用测试岗位人工确认发送一条；然后仅一个会话、日限 1 条观察一条低风险自动回复；最后验证登录失效、验证码/风控和页面变化停机。任一阶段未通过都不能进入下一阶段，也不能宣称真实 Boss 发送已验证。
 
-## AI 托管模拟器（不发送）
+## 真实外发演练
 
-侧边栏「配置 → AI 托管」提供折叠面板「模拟 HR 新消息（不发送）」。它用于在没有真实 HR 新消息时验证当前 API、分类器、提示词、确定性风险策略和草稿生成链路：
+侧边栏「配置 → AI 托管」提供折叠面板「真实外发演练」。它用于在暂时没有真实 HR 新消息时验证当前 API、分类器、提示词、确定性风险策略、待确认、飞书通知和人工确认发送链路：
 
-1. 选择一个已经登记的 Boss 会话。
+1. 选择一个已登记、已开启托管且处于 `WAITING_HR` 的 Boss 会话。
 2. 输入 1–600 个 Unicode 字符的模拟 HR 消息。
-3. 点击「运行安全模拟」。
-4. 查看分类、置信度、AI 理由、依据 ID、策略动作、策略原因、草稿，以及生产环境中是否会尝试发送。
+3. 阅读风险说明，并为本次操作勾选“我确认继续后会创建可真实发送给所选 HR 的待确认任务”。
+4. 点击「创建真实发送待确认」。
+5. 在飞书或插件「待确认」页核对目标、模拟 HR 正文和拟回复；只有在插件内执行 `SEND_EDITED` 才会重新验证目标并真实发送。
 
 推荐依次使用四条固定样本：
 
@@ -428,11 +429,20 @@ Task 10 必须分阶段且每阶段单独获授权：先做一个完整工作日
 | `不合适` | 明确拒绝，不自动回复；策略结果不得因缺少简历依据而降级成 AI 格式错误 |
 | `经验可能不太匹配` | 含糊拒绝，只生成草稿并等待人工确认 |
 
-模拟器只读取一次当前托管快照，再把目标会话、设置与当天计数复制到一次性内存 store。它复用生产 `MonitorEngine`、真实 AI 分类/草稿器、真实简历事实加载器和真实确定性策略，但用合成 reader 注入消息，并用只记录结果的 sender 代替 Boss 发送器。飞书在隔离设置中关闭，alarm 不启动，生产 store、会话游标、待确认、发送意图、额度和暂停状态均不写入。结果固定显示「仅模拟，未发送」。
+`src/conversation/trusteeship-live-drill.js` 先把目标会话、设置与当天计数复制到一次性内存 store，用合成 reader 运行真实 `MonitorEngine`、受保护 AI、简历事实和策略；隔离 sender 只捕获建议草稿，不访问 Boss。评估成功后，它才调用生产 store 的专用 `createLiveDrillApproval`：创建 `origin=LIVE_DRILL` 的本地 `PENDING`，并复用生产通知 reservation/租约发送飞书。该专用写入不得修改真实 `lastIncomingFingerprint`、`processedFingerprints`、`recentMessages`、monitor cursor、自动回复额度或真实读取时间。
 
-该功能不要求实时监控循环正在运行，但真实 API 证明必须有效。稳定错误包括会话不存在、平台不支持、API 证明过期、AI 分类/草稿失败或格式无效；未知 provider 错误不会直接显示在侧边栏。输入协议只接受精确的 `conversationId` 和 `message` 两个字段，避免把任意对象带入后台。
+演练待办和真实监控待办使用同一个插件确认发送入口。用户执行 `SEND_EDITED` 时，生产 engine 仍会冻结一次性意图、重新打开并读取目标会话、核对 canonical peer/alias、scoped identity 和发送后 outgoing 证据；演练入口本身绝不直接发送 Boss。已有活动待办、会话暂停/禁用、全局托管未运行、API 证明过期或目标不再处于 `WAITING_HR` 时均失败关闭，不允许演练覆盖真实待办或真实游标。
 
-模拟通过仅证明“给定一条合成来信时，当前真实 AI 与生产决策链会如何处理”。它**不证明** Boss 页面能检测到新消息、能定位目标会话、能真实发送、能发出飞书通知，也不替代 Task 10 的分阶段真机验收。真实监控仍需在登记 baseline 之后收到一条新的 HR 消息；真实发送仍需单会话、日限 1 条并单独授权验证。
+飞书卡片会把演练来源标记为“模拟 HR 正文”，并可携带经过 Unicode 长度限制、URL/@/凭证特征清洗的正文和拟回复；真实监控通知标记为“HR 正文”。飞书 Webhook 仍是单向通知，不提供确认按钮；最终批准继续在插件内完成。输入协议只接受精确的 `conversationId` 和 `message` 两个字段，未知 provider 错误不会直接显示在侧边栏。
+
+演练通过只能证明“合成输入 → 真实 AI/策略 → 生产待确认 → 飞书 → 插件确认 → 真实 sender”的相应已执行阶段。它**不能证明** Boss 页面已经检测到真实新来信，也不能替代 Task 10 的真实入站验收。真实监控必须满足：
+
+1. 登记并保存稳定 baseline 后，由 HR 新发一条消息；
+2. 手动周期或 alarm 显示 `checked > 0` 且 `newMessages > 0`；
+3. 该消息只生成一次预期的 `LIVE_MONITOR` 待办、结束动作或低风险回复；
+4. 再次检查显示 `newMessages = 0`，不得重复分类、通知或回复。
+
+自动化回归使用三轮稳定 reader fixture 验证 `newMessages` 为 `0 → 1 → 0`，同一消息只产生一个 `LIVE_MONITOR` 待办、一次通知且确认前 Boss send 为 0。这证明消息游标和幂等状态机契约，但真实站点的新来信捕获仍需上述实号事件才能最终验收。
 
 本轮还修正了分类证据归一化边界：`resume_fact` 自动回答仍必须提供可核对的简历/问答 evidence；明确拒绝等非事实分类可以没有简历 evidence，但策略仍禁止无依据的自动回复。这样“明确拒绝 → 不回复”和“含糊拒绝 → 人工确认”不会被错误改写成 `AI_CLASSIFICATION_INVALID`。
 

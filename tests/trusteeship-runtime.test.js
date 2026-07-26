@@ -81,7 +81,7 @@ function controllerHarness(overrides) {
     removeConversation: [],
     run: 0,
     resolve: [],
-    simulate: [],
+    stageDrill: [],
     saveApi: [],
     apiTest: 0
   };
@@ -134,9 +134,9 @@ function controllerHarness(overrides) {
       return { ok: true, status: 'NO_REPLY' };
     }
   };
-  const simulator = source.simulator || {
-    async simulate(input) {
-      calls.simulate.push(structuredClone(input));
+  const liveDrill = source.liveDrill || {
+    async stage(input) {
+      calls.stageDrill.push(structuredClone(input));
       return {
         conversationId: input.conversationId,
         message: input.message,
@@ -150,8 +150,10 @@ function controllerHarness(overrides) {
         decision: { action: 'AUTO_REPLY', reasonCode: 'AUTO_REPLY_ALLOWED' },
         draft: '是的，我还在看合适机会。',
         draftEvidenceIds: ['faq-line-1'],
-        wouldSend: true,
-        simulated: true
+        approvalId: 'approval-live-drill',
+        sentToBoss: false,
+        notificationStatus: 'SUCCESS',
+        liveDrill: true
       };
     }
   };
@@ -171,7 +173,7 @@ function controllerHarness(overrides) {
     storage,
     store,
     engine,
-    simulator,
+    liveDrill,
     policy: Policy,
     notifierModule: FeishuNotifier,
     feishuClient,
@@ -212,7 +214,7 @@ test('high-privilege message schemas reject extra keys, oversized identifiers, a
     { type: 'TRUSTEESHIP_OPEN_CONVERSATION', conversationId: 'conv-1' },
     { type: 'TRUSTEESHIP_RUN_NOW' },
     {
-      type: 'TRUSTEESHIP_SIMULATE_MESSAGE',
+      type: 'TRUSTEESHIP_STAGE_LIVE_DRILL',
       conversationId: 'conv-1',
       message: '还在看机会吗？'
     },
@@ -244,12 +246,12 @@ test('high-privilege message schemas reject extra keys, oversized identifiers, a
     { type: 'TRUSTEESHIP_REMOVE_CONVERSATION' },
     { type: 'TRUSTEESHIP_REMOVE_CONVERSATION', conversationId: 'x'.repeat(129) },
     { type: 'TRUSTEESHIP_REMOVE_CONVERSATION', conversationId: 'conv-1', extra: true },
-    { type: 'TRUSTEESHIP_SIMULATE_MESSAGE', conversationId: 'conv-1', message: '' },
-    { type: 'TRUSTEESHIP_SIMULATE_MESSAGE', conversationId: 'conv-1', message: '   ' },
-    { type: 'TRUSTEESHIP_SIMULATE_MESSAGE', conversationId: 'x'.repeat(129), message: '您好' },
-    { type: 'TRUSTEESHIP_SIMULATE_MESSAGE', conversationId: 'conv-1', message: '问'.repeat(601) },
-    { type: 'TRUSTEESHIP_SIMULATE_MESSAGE', conversationId: 'conv-1', message: '😀'.repeat(601) },
-    { type: 'TRUSTEESHIP_SIMULATE_MESSAGE', conversationId: 'conv-1', message: '您好', extra: true }
+    { type: 'TRUSTEESHIP_STAGE_LIVE_DRILL', conversationId: 'conv-1', message: '' },
+    { type: 'TRUSTEESHIP_STAGE_LIVE_DRILL', conversationId: 'conv-1', message: '   ' },
+    { type: 'TRUSTEESHIP_STAGE_LIVE_DRILL', conversationId: 'x'.repeat(129), message: '您好' },
+    { type: 'TRUSTEESHIP_STAGE_LIVE_DRILL', conversationId: 'conv-1', message: '问'.repeat(601) },
+    { type: 'TRUSTEESHIP_STAGE_LIVE_DRILL', conversationId: 'conv-1', message: '😀'.repeat(601) },
+    { type: 'TRUSTEESHIP_STAGE_LIVE_DRILL', conversationId: 'conv-1', message: '您好', extra: true }
   ].forEach((message) => assert.equal(Runtime.validateUserMessage(message), false));
 });
 
@@ -773,45 +775,56 @@ test('run, schedule, and manual resolve reject a stale API proof before entering
   assert.deepEqual(h.calls.create, []);
 });
 
-test('simulation delegates one trimmed message without requiring the live monitor to be running', async () => {
+test('live drill delegates one trimmed message only while production trusteeship is running', async () => {
   const h = controllerHarness();
   h.snapshot.conversationTrusteeship.enabled = false;
 
+  const stopped = await h.controller.handleMessage({
+    type: 'TRUSTEESHIP_STAGE_LIVE_DRILL',
+    conversationId: 'conv-1',
+    message: '还在看机会吗？'
+  });
+  assert.deepEqual(stopped, { ok: false, code: 'TRUSTEESHIP_NOT_RUNNING' });
+  assert.deepEqual(h.calls.stageDrill, []);
+
+  h.snapshot.conversationTrusteeship.enabled = true;
   const response = await h.controller.handleMessage({
-    type: 'TRUSTEESHIP_SIMULATE_MESSAGE',
+    type: 'TRUSTEESHIP_STAGE_LIVE_DRILL',
     conversationId: 'conv-1',
     message: '  还在看机会吗？  '
   });
 
   assert.equal(response.ok, true);
-  assert.equal(response.result.wouldSend, true);
-  assert.equal(response.result.simulated, true);
-  assert.deepEqual(h.calls.simulate, [{
+  assert.equal(response.result.sentToBoss, false);
+  assert.equal(response.result.liveDrill, true);
+  assert.deepEqual(h.calls.stageDrill, [{
     conversationId: 'conv-1',
     message: '还在看机会吗？'
   }]);
   assert.equal(h.calls.run, 0);
-  assert.deepEqual(h.calls.clear, []);
+  assert.deepEqual(h.calls.clear, ['boss-ai-chat-monitor']);
   assert.deepEqual(h.calls.create, []);
 });
 
-test('simulation preserves stable failures and masks arbitrary provider errors', async () => {
+test('live drill preserves stable failures and masks arbitrary provider errors', async () => {
   for (const [errorCode, expectedCode] of [
     ['AI_CLASSIFY_FAILED', 'AI_CLASSIFY_FAILED'],
-    ['provider-secret-simulation-canary', 'TRUSTEESHIP_SIMULATION_FAILED']
+    ['LIVE_DRILL_NOT_ALLOWED', 'LIVE_DRILL_NOT_ALLOWED'],
+    ['provider-secret-live-drill-canary', 'TRUSTEESHIP_LIVE_DRILL_FAILED']
   ]) {
     const h = controllerHarness({
-      simulator: {
-        async simulate() {
+      liveDrill: {
+        async stage() {
           const error = new Error('provider-secret-body-canary');
           error.code = errorCode;
           throw error;
         }
       }
     });
+    h.snapshot.conversationTrusteeship.enabled = true;
 
     const response = await h.controller.handleMessage({
-      type: 'TRUSTEESHIP_SIMULATE_MESSAGE',
+      type: 'TRUSTEESHIP_STAGE_LIVE_DRILL',
       conversationId: 'conv-1',
       message: '您好'
     });
@@ -1731,7 +1744,7 @@ test('a concurrent lifecycle reconcile cannot overwrite the alarm chosen by a se
       async runCycle() { return {}; },
       async resolveApproval() { return { ok: true }; }
     },
-    simulator: { async simulate() { return {}; } },
+    liveDrill: { async stage() { return {}; } },
     policy: Policy,
     notifierModule: FeishuNotifier,
     feishuClient: { async send() { return { ok: true, code: 'OK' }; } },

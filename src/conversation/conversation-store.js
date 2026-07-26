@@ -70,6 +70,10 @@
     'WAITING_HR',
     'WAITING_CONFIRMATION'
   ]);
+  var APPROVAL_ORIGINS = new Set([
+    'LIVE_MONITOR',
+    'LIVE_DRILL'
+  ]);
 
   function clone(value) {
     if (value === undefined) return undefined;
@@ -364,6 +368,7 @@
     return {
       approvalId: id,
       conversationId: safeString(source.conversationId, 500),
+      origin: APPROVAL_ORIGINS.has(source.origin) ? source.origin : 'LIVE_MONITOR',
       incomingFingerprint: safeString(source.incomingFingerprint, 1000),
       incomingFingerprints: safeStringList(source.incomingFingerprints, RECENT_MESSAGE_LIMIT),
       messages: safeStringList(source.messages, RECENT_MESSAGE_LIMIT),
@@ -927,6 +932,7 @@
           approval = {
             approvalId: approvalId,
             conversationId: conversation.conversationId,
+            origin: 'LIVE_MONITOR',
             incomingFingerprint: fingerprint,
             incomingFingerprints: [fingerprint],
             messages: [],
@@ -952,6 +958,67 @@
           .concat(messages)
           .slice(-RECENT_MESSAGE_LIMIT);
         conversation.pendingApprovalId = approval.approvalId;
+        conversation.state = 'WAITING_CONFIRMATION';
+        conversation.updatedAt = loaded.now;
+        clearClassificationRecovery(conversation);
+        await persist(snapshot);
+        return clone(approval);
+      });
+    }
+
+    function createLiveDrillApproval(input) {
+      return serialized(async function () {
+        var loaded = await load();
+        var snapshot = loaded.snapshot;
+        var source = input && typeof input === 'object' ? input : {};
+        var conversation = requireConversation(snapshot, source.conversationId);
+        var fingerprint = safeString(source.drillFingerprint, 1000);
+        var message = typeof source.message === 'string' ? source.message.trim() : '';
+        var activeApproval = conversation.pendingApprovalId &&
+          snapshot.pendingApprovals[conversation.pendingApprovalId];
+        var hasActiveApproval = !!(activeApproval &&
+          (activeApproval.status === 'PENDING' || activeApproval.status === 'SENDING'));
+        var hasSendingIntent = !!(conversation.sendIntent &&
+          conversation.sendIntent.status === 'SENDING');
+        if (!conversation.enabled ||
+          conversation.platform !== 'boss' ||
+          conversation.state !== 'WAITING_HR' ||
+          hasActiveApproval ||
+          hasSendingIntent ||
+          !fingerprint ||
+          !message ||
+          Array.from(message).length > 600) {
+          throw storeError('LIVE_DRILL_NOT_ALLOWED');
+        }
+        var duplicateFingerprint = Object.keys(snapshot.pendingApprovals).some(function (approvalId) {
+          var candidate = snapshot.pendingApprovals[approvalId];
+          return candidate.incomingFingerprint === fingerprint ||
+            candidate.incomingFingerprints.indexOf(fingerprint) !== -1;
+        });
+        if (duplicateFingerprint) throw storeError('LIVE_DRILL_NOT_ALLOWED');
+
+        var approvalId = safeString(makeId('approval'), 500);
+        if (!approvalId || snapshot.pendingApprovals[approvalId]) {
+          throw storeError('INVALID_GENERATED_ID');
+        }
+        var approval = {
+          approvalId: approvalId,
+          conversationId: conversation.conversationId,
+          origin: 'LIVE_DRILL',
+          incomingFingerprint: fingerprint,
+          incomingFingerprints: [fingerprint],
+          messages: [message],
+          stage: 'WAITING_CONFIRMATION',
+          reasonCode: safeString(source.reasonCode, 120) || 'LIVE_DRILL_CONFIRMATION',
+          fieldsNeeded: safeStringList(source.fieldsNeeded, RECENT_MESSAGE_LIMIT),
+          draft: typeof source.draft === 'string' ? source.draft.slice(0, 10000) : '',
+          status: 'PENDING',
+          createdAt: loaded.now,
+          updatedAt: loaded.now,
+          feishuNotifyAttempts: []
+        };
+        snapshot.pendingApprovals[approvalId] = approval;
+        conversation.pendingApprovalId = approvalId;
         conversation.state = 'WAITING_CONFIRMATION';
         conversation.updatedAt = loaded.now;
         clearClassificationRecovery(conversation);
@@ -1354,6 +1421,7 @@
       setManaged: setManaged,
       beginMessage: beginMessage,
       createOrMergeApproval: createOrMergeApproval,
+      createLiveDrillApproval: createLiveDrillApproval,
       createSendIntent: createSendIntent,
       createAutoSendIntent: createAutoSendIntent,
       completeSend: completeSend,
