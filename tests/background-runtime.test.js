@@ -1335,6 +1335,20 @@ test('reader, notifier, and manual sender assert the same lease at their real si
       }
     });
     h.calls.managedSend = 0;
+    h.chrome.tabs.query = function () {
+      return Promise.resolve([{
+        id: 1,
+        active: true,
+        status: 'complete',
+        url: h.snapshot.managedConversations['conv-1'].url
+      }]);
+    };
+    const originalGet = h.chrome.tabs.get.bind(h.chrome.tabs);
+    h.chrome.tabs.get = function (id, callback) {
+      const pending = originalGet(id).then((tab) => ({ ...tab, active: true }));
+      if (typeof callback === 'function') pending.then(callback);
+      return pending;
+    };
     h.rotateOnNextTabsGet(rotation);
     await assert.rejects(
       h.protectedDependencies.reader.send(

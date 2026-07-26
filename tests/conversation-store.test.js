@@ -1480,6 +1480,7 @@ test('notification CANCEL removes only a persisted SENDING reservation and fails
 test('store exposes one notification transition API within the exact public method budget', () => {
   const harness = makeHarness();
   assert.deepEqual(Object.keys(harness.store).sort(), [
+    'acknowledgeUnknownSend',
     'beginMessage',
     'completeSend',
     'createAutoSendIntent',
@@ -1499,4 +1500,23 @@ test('store exposes one notification transition API within the exact public meth
     'saveSettings',
     'setManaged'
   ]);
+});
+
+test('acknowledges a manually checked unknown send and removes only its local pending item', async () => {
+  const harness = makeHarness();
+  await registerAndEnable(harness);
+  const approval = await createPendingApproval(harness, 'fp-unknown-ack', ['还在看机会吗']);
+  const intent = await harness.store.createSendIntent(approval.approvalId, '是的，仍在看机会。');
+  await harness.store.markSendUnknown(intent.intentId, 'SEND_RESULT_UNKNOWN');
+
+  const result = await harness.store.acknowledgeUnknownSend(approval.approvalId);
+  const snapshot = await harness.store.getSnapshot();
+  const conversation = snapshot.managedConversations['conv-1'];
+
+  assert.deepEqual(result, { ok: true, approvalId: approval.approvalId, conversationId: 'conv-1' });
+  assert.equal(snapshot.pendingApprovals[approval.approvalId], undefined);
+  assert.equal(conversation.state, 'WAITING_HR');
+  assert.equal(conversation.pauseCode, '');
+  assert.equal(conversation.pendingApprovalId, undefined);
+  assert.equal(conversation.sendIntent.status, 'SEND_RESULT_UNKNOWN');
 });

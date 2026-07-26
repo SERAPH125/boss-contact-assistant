@@ -28,6 +28,16 @@
     return isPeerId(value) ? value : '';
   }
 
+  function asNumericUid(value) {
+    if (typeof value === 'number' && Number.isSafeInteger(value) && value > 0) {
+      return String(value);
+    }
+    if (typeof value === 'string' && /^[1-9][0-9]{0,19}$/.test(value)) {
+      return value;
+    }
+    return '';
+  }
+
   function uniqueIds(values) {
     var out = [];
     (Array.isArray(values) ? values : []).forEach(function (value) {
@@ -95,6 +105,7 @@
     if (position && /^(HR|hr|招聘者|人事|猎头)$/.test(position)) position = '';
     return {
       encryptUid: encryptUid,
+      peerUid: asNumericUid(friend.uid),
       ids: ids,
       name: typeof friend.name === 'string' ? friend.name.slice(0, 80) : '',
       company: typeof friend.brandName === 'string'
@@ -153,6 +164,33 @@
       openParam: 'uid',
       url: url,
       aliases: aliases,
+      peerUid: friend.peerUid,
+      peerSource: 'encryptUid',
+      matchedName: friend.name,
+      matchedCompany: friend.company,
+      matchedPosition: friend.position || ''
+    };
+  }
+
+  function resolvePeerByCanonicalId(input) {
+    var source = input && typeof input === 'object' ? input : {};
+    var peerId = asPeerId(source.peerId);
+    var origin = typeof source.origin === 'string' ? source.origin : '';
+    var matched = sanitizeFriendList(source.friends).filter(function (friend) {
+      return friend.encryptUid === peerId || friend.ids.indexOf(peerId) !== -1;
+    });
+    if (!peerId || matched.length !== 1 || !matched[0].peerUid) {
+      return { ok: false, errorCode: 'PEER_ID_UNRESOLVED' };
+    }
+    var friend = matched[0];
+    var url = canonicalChatUrl(origin, peerId);
+    if (!url) return { ok: false, errorCode: 'PEER_ID_UNRESOLVED' };
+    return {
+      ok: true,
+      peerId: peerId,
+      url: url,
+      aliases: normalizeAliases(friend.ids, peerId),
+      peerUid: friend.peerUid,
       peerSource: 'encryptUid',
       matchedName: friend.name,
       matchedCompany: friend.company,
@@ -173,15 +211,18 @@
     return managedIdentitySet(conversation).indexOf(id) !== -1;
   }
 
-  function toCanonicalRef(peerId, origin, aliases) {
+  function toCanonicalRef(peerId, origin, aliases, peerUid) {
     if (!isPeerId(peerId)) return null;
     var url = canonicalChatUrl(origin || 'https://www.zhipin.com', peerId);
     if (!url) return null;
-    return {
+    var output = {
       conversationId: peerId,
       url: url,
       aliases: normalizeAliases(aliases, peerId)
     };
+    var normalizedPeerUid = asNumericUid(peerUid);
+    if (normalizedPeerUid) output.peerUid = normalizedPeerUid;
+    return output;
   }
 
   return {
@@ -190,9 +231,11 @@
     isPeerId: isPeerId,
     uniqueIds: uniqueIds,
     normalizeAliases: normalizeAliases,
+    asNumericUid: asNumericUid,
     canonicalChatUrl: canonicalChatUrl,
     sanitizeFriendList: sanitizeFriendList,
     resolvePeerIdentity: resolvePeerIdentity,
+    resolvePeerByCanonicalId: resolvePeerByCanonicalId,
     matchesManagedIdentity: matchesManagedIdentity,
     managedIdentitySet: managedIdentitySet,
     toCanonicalRef: toCanonicalRef

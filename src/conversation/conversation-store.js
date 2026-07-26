@@ -98,6 +98,15 @@
     return value.trim().slice(0, maxLength || 1000);
   }
 
+  function safePeerUid(value) {
+    if (typeof value === 'number' && Number.isSafeInteger(value) && value > 0) {
+      return String(value);
+    }
+    return typeof value === 'string' && /^[1-9][0-9]{0,19}$/.test(value)
+      ? value
+      : '';
+  }
+
   function normalizePauseCode(value) {
     var code = safeString(value, 120);
     if (!code) return '';
@@ -258,6 +267,7 @@
       company: typeof source.company === 'string' ? source.company.slice(0, 1000) : '',
       position: typeof source.position === 'string' ? source.position.slice(0, 1000) : '',
       hrName: typeof source.hrName === 'string' ? source.hrName.slice(0, 1000) : '',
+      peerUid: safePeerUid(source.peerUid),
       aliases: normalizeAliases(source.aliases, id),
       peerSource: normalizePeerSource(source.peerSource),
       enabled: source.enabled === true,
@@ -811,6 +821,7 @@
         conversation.company = typeof ref.company === 'string' ? ref.company.slice(0, 1000) : '';
         conversation.position = typeof ref.position === 'string' ? ref.position.slice(0, 1000) : '';
         conversation.hrName = typeof ref.hrName === 'string' ? ref.hrName.slice(0, 1000) : '';
+        conversation.peerUid = safePeerUid(ref.peerUid) || conversation.peerUid || '';
         conversation.aliases = normalizeAliases(
           (conversation.aliases || []).concat(incomingAliases),
           id
@@ -1299,6 +1310,39 @@
       });
     }
 
+    function acknowledgeUnknownSend(approvalId) {
+      return serialized(async function () {
+        var loaded = await load();
+        var snapshot = loaded.snapshot;
+        var approval = requireApproval(snapshot, approvalId);
+        var conversation = requireConversation(snapshot, approval.conversationId);
+        var intent = conversation.sendIntent;
+        if (approval.status !== 'SEND_RESULT_UNKNOWN' ||
+          conversation.pendingApprovalId !== approval.approvalId ||
+          conversation.state !== 'PAUSED' ||
+          conversation.pauseCode !== 'SEND_RESULT_UNKNOWN' ||
+          !intent ||
+          intent.status !== 'SEND_RESULT_UNKNOWN' ||
+          intent.approvalId !== approval.approvalId) {
+          throw storeError('UNKNOWN_SEND_NOT_ACKNOWLEDGEABLE');
+        }
+        delete snapshot.pendingApprovals[approval.approvalId];
+        delete conversation.pendingApprovalId;
+        conversation.state = conversation.enabled ? 'WAITING_HR' : 'DISABLED';
+        conversation.pauseCode = '';
+        conversation.pauseReason = '';
+        clearClassificationRecovery(conversation);
+        clearReadFailure(conversation);
+        conversation.updatedAt = loaded.now;
+        await persist(snapshot);
+        return {
+          ok: true,
+          approvalId: approval.approvalId,
+          conversationId: conversation.conversationId
+        };
+      });
+    }
+
     function recordNotificationAttempt(approvalId, operation) {
       return serialized(async function () {
         var loaded = await load();
@@ -1429,6 +1473,7 @@
       markConversationChecked: markConversationChecked,
       pauseConversation: pauseConversation,
       recordReadFailure: recordReadFailure,
+      acknowledgeUnknownSend: acknowledgeUnknownSend,
       resolveApprovalWithoutSend: resolveApprovalWithoutSend,
       recordNotificationAttempt: recordNotificationAttempt,
       resetConversation: resetConversation,

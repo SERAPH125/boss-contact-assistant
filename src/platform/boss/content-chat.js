@@ -343,6 +343,24 @@
     return parts.join(' | ').slice(0, 1200);
   }
 
+  function nearestManagedControlPane(container) {
+    const inputSelector = SELECTORS.chat.chatInput;
+    const sendSelector = SELECTORS.chat.btnSend;
+    if (!container || !inputSelector || !sendSelector) return null;
+    let current = container.parentElement;
+    for (let depth = 0; current && depth < 8; depth++) {
+      try {
+        const inputs = Array.from(current.querySelectorAll(inputSelector)).filter(isVisible);
+        const buttons = Array.from(current.querySelectorAll(sendSelector)).filter(isVisible);
+        if (inputs.length && buttons.length) return current;
+      } catch (_) {
+        return null;
+      }
+      current = current.parentElement;
+    }
+    return null;
+  }
+
   function elementHref(element) {
     if (!element) return '';
     if (typeof element.href === 'string' && element.href) return element.href;
@@ -441,6 +459,7 @@
       : link;
     const pane = container.parentElement;
     if (!pane) return selectorFailure('目标会话消息容器缺少明确父级面板');
+    const controlPane = nearestManagedControlPane(container);
 
     const activeIds = ownDatasetIds(activeItem === link ? [link] : [activeItem, link]);
     const containerIds = ownDatasetIds([container]);
@@ -507,7 +526,8 @@
         link: link,
         activeItem: activeItem,
         container: container,
-        pane: pane
+        pane: pane,
+        controlPane: controlPane
       }
     };
   }
@@ -522,7 +542,8 @@
       const canonical = BossPeerIdentity.toCanonicalRef(
         peerId,
         'https://www.zhipin.com',
-        aliases
+        aliases,
+        expectedRef.peerUid
       );
       if (!canonical) return null;
       if (typeof expectedRef.url === 'string' && expectedRef.url &&
@@ -543,7 +564,8 @@
         url: typeof expectedRef.url === 'string' && expectedRef.url
           ? expectedRef.url
           : canonical.url,
-        aliases: canonical.aliases
+        aliases: canonical.aliases,
+        peerUid: canonical.peerUid || ''
       };
     }
     const ref = BossConversationReader.extractConversationRef({
@@ -582,7 +604,8 @@
       conversationRef = {
         conversationId: wanted.conversationId,
         url: wanted.url,
-        aliases: managed.aliases
+        aliases: managed.aliases,
+        peerUid: wanted.peerUid || ''
       };
     }
     if (!MessageSend.matchesExpectedConversation(scopedConversationText(active.scope), expected || {})) {
@@ -679,7 +702,8 @@
       conversationRef: {
         conversationId: resolved.peerId,
         url: resolved.url,
-        aliases: resolved.aliases
+        aliases: resolved.aliases,
+        peerUid: resolved.peerUid || ''
       },
       peerSource: resolved.peerSource,
       domId: resolved.peerId,
@@ -748,10 +772,40 @@
       ', time=' + cursorFieldShape(message.time);
   }
 
-  async function readHistoryMessages(conversationId) {
+  function historyParticipantUid(value) {
+    if (!value || typeof value !== 'object') return '';
+    if (typeof BossPeerIdentity !== 'undefined' &&
+        typeof BossPeerIdentity.asNumericUid === 'function') {
+      return BossPeerIdentity.asNumericUid(value.uid);
+    }
+    if (typeof value.uid === 'number' && Number.isSafeInteger(value.uid) && value.uid > 0) {
+      return String(value.uid);
+    }
+    return typeof value.uid === 'string' && /^[1-9][0-9]{0,19}$/.test(value.uid)
+      ? value.uid
+      : '';
+  }
+
+  function historyDirection(message, peerUid) {
+    const fromUid = historyParticipantUid(message && message.from);
+    const toUid = historyParticipantUid(message && message.to);
+    if (!peerUid || !fromUid || !toUid || fromUid === toUid) return '';
+    if (fromUid === peerUid && toUid !== peerUid) return 'incoming';
+    if (toUid === peerUid && fromUid !== peerUid) return 'outgoing';
+    return '';
+  }
+
+  async function readHistoryMessages(conversationId, peerUid) {
     if (typeof conversationId !== 'string' ||
         !BossConversationReader.ID_RE.test(conversationId)) {
       return targetFailure('当前活动会话缺少可靠的历史消息标识');
+    }
+    const normalizedPeerUid = typeof BossPeerIdentity !== 'undefined' &&
+      typeof BossPeerIdentity.asNumericUid === 'function'
+      ? BossPeerIdentity.asNumericUid(peerUid)
+      : '';
+    if (!normalizedPeerUid) {
+      return messageOrderFailure('Boss 会话缺少可靠的对端身份，已停止读取');
     }
     let response;
     let data;
@@ -781,7 +835,8 @@
     }
 
     // 顶层 type 的口径在各公开实现之间并不一致（一处记为 3=普通/4=系统，另一处记为
-    // 1=文本…5=系统），因此它只作为诊断标量，不再当作判据。方向由布尔 received 决定，
+    // 1=文本…5=系统），因此它只作为诊断标量，不再当作判据。实号接口里的 received
+    // 可能对双方消息同时为 true，方向必须由已登记对端 uid 与 from/to 交叉确认。
     // 游标由 mid/time 决定，正文种类由 body.type 决定；无法归类的正文降级为非文本，
     // 由上层策略强制人工确认，而不是让整批读取失败关闭。
     let hasUntrackableMessage = false;
@@ -789,12 +844,17 @@
     const rawItems = data.zpData.messages.slice(0, 200).reverse().map((message) => {
       if (!message || typeof message !== 'object') return null;
       if (message.type === 4) return null;
-      if (typeof message.received !== 'boolean') return null;
       const body = message.body && typeof message.body === 'object'
         ? message.body
         : {};
       const bodyType = Number(body.type);
       if (!Number.isFinite(bodyType) || HISTORY_SYSTEM_BODY_TYPES.has(bodyType)) return null;
+      const direction = historyDirection(message, normalizedPeerUid);
+      if (!direction) {
+        hasUntrackableMessage = true;
+        if (!untrackableShape) untrackableShape = historyMessageShape(message);
+        return null;
+      }
       const id = safeHistoryMessageId(message.mid);
       const at = safeHistoryTime(message.time);
       if (!id && at === null) {
@@ -806,7 +866,7 @@
       const isText = bodyType === 1 && text.trim() !== '';
       return {
         id: id,
-        direction: message.received ? 'incoming' : 'outgoing',
+        direction: direction,
         kind: isText ? 'text' : 'attachment',
         text: isText ? text : '',
         at: at
@@ -834,12 +894,15 @@
   async function captureManagementMetadata(expected) {
     const active = validateManagedTarget(expected);
     if (!active.success) return null;
-    const read = await readHistoryMessages(active.conversationRef.conversationId);
-    if (!read.success) return null;
     const owned = resolveOwnedConversation();
     if (!owned.success) return null;
     const peer = await resolvePeerFromActive(owned);
     if (!peer.success) return null;
+    const read = await readHistoryMessages(
+      peer.conversationRef.conversationId,
+      peer.conversationRef.peerUid
+    );
+    if (!read.success) return null;
     return {
       conversationRef: peer.conversationRef,
       peerSource: peer.peerSource,
@@ -958,11 +1021,16 @@
     if (preflight) return preflight;
     const active = validateManagedTarget(msg.expected);
     if (!active.success) return active;
-    const read = await readHistoryMessages(active.conversationRef.conversationId);
+    const peer = await resolvePeerFromActive(active);
+    if (!peer.success) return peer;
+    const read = await readHistoryMessages(
+      peer.conversationRef.conversationId,
+      peer.conversationRef.peerUid
+    );
     if (!read.success) return read;
     return {
       success: true,
-      conversationRef: active.conversationRef,
+      conversationRef: peer.conversationRef,
       baselineIncomingFingerprint: lastIncomingFingerprint(read.messages)
     };
   }
@@ -1048,7 +1116,10 @@
     }
     const peer = await resolvePeerFromActive(active);
     if (!peer.success) return peer;
-    const read = await readHistoryMessages(peer.conversationRef.conversationId);
+    const read = await readHistoryMessages(
+      peer.conversationRef.conversationId,
+      peer.conversationRef.peerUid
+    );
     if (!read.success) return read;
     return {
       success: true,
@@ -1196,6 +1267,45 @@
     };
   }
 
+  async function ensureStoredPeerUid(conversationRef) {
+    const wanted = sanitizedExpectedRef(conversationRef);
+    if (!wanted) return targetFailure('登记会话缺少可靠的稳定标识');
+    if (wanted.peerUid) return { success: true, conversationRef: wanted };
+    const list = await fetchGeekFriendList();
+    if (!list.ok || typeof BossPeerIdentity.resolvePeerByCanonicalId !== 'function') {
+      return {
+        success: false,
+        errorCode: 'CONVERSATION_UNAVAILABLE',
+        error: '无法补全 Boss 会话对端身份'
+      };
+    }
+    const resolved = BossPeerIdentity.resolvePeerByCanonicalId({
+      peerId: wanted.conversationId,
+      friends: list.friends,
+      origin: location.origin || 'https://www.zhipin.com'
+    });
+    if (!resolved.ok) {
+      return {
+        success: false,
+        errorCode: 'TARGET_UNCERTAIN',
+        targetUncertain: true,
+        error: '无法补全 Boss 会话对端身份'
+      };
+    }
+    return {
+      success: true,
+      conversationRef: {
+        conversationId: wanted.conversationId,
+        url: wanted.url,
+        aliases: BossPeerIdentity.normalizeAliases(
+          (wanted.aliases || []).concat(resolved.aliases || []),
+          wanted.conversationId
+        ),
+        peerUid: resolved.peerUid
+      }
+    };
+  }
+
   async function readActiveConversation(msg) {
     // 只读检查不点击列表、不切换会话、不写入任何页面状态，因此不要求独占后台标签；
     // `document.visibilityState` 是否可见与读取结果无关。独占与接管检测只属于发送路径。
@@ -1213,9 +1323,12 @@
     // canonical peerId 已在用户登记时通过好友列表建立并由 store 严格保存。
     // 周期只读直接使用该稳定引用；重复依赖易漂移的好友列表会让历史接口
     // 仍可用的已登记会话被整批误暂停。页面/身份激活仍只属于发送路径。
-    const peer = verifyStoredConversationRef(msg.conversationRef);
+    const peer = await ensureStoredPeerUid(msg.conversationRef);
     if (!peer.success) return peer;
-    const read = await readHistoryMessages(peer.conversationRef.conversationId);
+    const read = await readHistoryMessages(
+      peer.conversationRef.conversationId,
+      peer.conversationRef.peerUid
+    );
     if (!read.success) return read;
 
     const baseline = msg.lastFingerprint;
@@ -1249,9 +1362,13 @@
     }
     let inputs;
     let buttons;
+    const controlPane = scope && scope.controlPane;
+    if (!controlPane) {
+      return selectorFailure('未找到与目标消息容器同属会话的托管输入区');
+    }
     try {
-      inputs = Array.from(scope.pane.querySelectorAll(inputSelector)).filter(isVisible);
-      buttons = Array.from(scope.pane.querySelectorAll(sendSelector)).filter(isVisible);
+      inputs = Array.from(controlPane.querySelectorAll(inputSelector)).filter(isVisible);
+      buttons = Array.from(controlPane.querySelectorAll(sendSelector)).filter(isVisible);
     } catch (e) {
       return selectorFailure('托管输入框或发送按钮选择器不可用');
     }
@@ -1292,7 +1409,8 @@
       left.link === right.link &&
       left.activeItem === right.activeItem &&
       left.container === right.container &&
-      left.pane === right.pane;
+      left.pane === right.pane &&
+      left.controlPane === right.controlPane;
   }
 
   function unknownSendFailure() {
@@ -1305,16 +1423,26 @@
   }
 
   async function sendManagedReply(msg) {
-    const preflight = managedBackgroundPreflight();
+    const allowVisible = msg && msg.allowVisible === true;
+    const preflight = allowVisible ? managedPreflight() : managedBackgroundPreflight();
     if (preflight) return preflight;
-    const active = await activateManagedConversation(msg.expected, msg.conversationRef);
+    const peer = await ensureStoredPeerUid(msg.conversationRef);
+    if (!peer.success) return peer;
+    const active = await activateManagedConversation(
+      msg.expected,
+      peer.conversationRef,
+      { allowVisible: allowVisible }
+    );
     if (!active.success) return active;
 
     const draft = typeof msg.draft === 'string' ? msg.draft.trim() : '';
     if (!draft || Array.from(draft).length > 300) {
       return { success: false, errorCode: 'DRAFT_INVALID', error: '托管回复草稿无效' };
     }
-    const beforeRead = await readHistoryMessages(active.conversationRef.conversationId);
+    const beforeRead = await readHistoryMessages(
+      active.conversationRef.conversationId,
+      active.conversationRef.peerUid
+    );
     if (!beforeRead.success) return beforeRead;
     const beforeOutgoing = new Set(
       beforeRead.messages
@@ -1334,12 +1462,12 @@
     let preActionFailure = null;
     let fallbackUnsafe = false;
     function revalidateBeforeAction() {
-      const ownership = managedBackgroundPreflight();
+      const ownership = allowVisible ? managedPreflight() : managedBackgroundPreflight();
       if (ownership) {
         preActionFailure = ownership;
         return null;
       }
-      const latest = validateManagedTarget(msg.expected, msg.conversationRef);
+      const latest = validateManagedTarget(msg.expected, peer.conversationRef);
       if (!latest.success) {
         preActionFailure = latest;
         return null;
@@ -1401,11 +1529,14 @@
       return actionStarted ? unknownSendFailure() : (preActionFailure || unknownSendFailure());
     }
 
-    const postTarget = validateManagedTarget(msg.expected, msg.conversationRef);
+    const postTarget = validateManagedTarget(msg.expected, peer.conversationRef);
     if (!postTarget.success || !sameOwnedScope(active.scope, postTarget.scope)) {
       return unknownSendFailure();
     }
-    const read = await readHistoryMessages(postTarget.conversationRef.conversationId);
+    const read = await readHistoryMessages(
+      postTarget.conversationRef.conversationId,
+      postTarget.conversationRef.peerUid
+    );
     if (!read.success) return unknownSendFailure();
     const evidence = read.messages.filter((message) =>
       message.direction === 'outgoing' &&
@@ -1414,7 +1545,7 @@
       !beforeOutgoing.has(message.fingerprint)
     );
     if (evidence.length !== 1 || !evidence[0].fingerprint) return unknownSendFailure();
-    const finalTarget = validateManagedTarget(msg.expected, msg.conversationRef);
+    const finalTarget = validateManagedTarget(msg.expected, peer.conversationRef);
     if (!finalTarget.success || !sameOwnedScope(active.scope, finalTarget.scope)) {
       return unknownSendFailure();
     }

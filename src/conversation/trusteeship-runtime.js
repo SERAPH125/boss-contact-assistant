@@ -265,6 +265,10 @@
       return exactKeys(message, ['type', 'conversationId']) &&
         boundedString(message.conversationId, 128, false);
     }
+    if (message.type === 'TRUSTEESHIP_ACK_UNKNOWN_SEND') {
+      return exactKeys(message, ['type', 'approvalId']) &&
+        boundedString(message.approvalId, 128, false);
+    }
     if (message.type === 'TRUSTEESHIP_OPEN_CONVERSATION') {
       return exactKeys(message, ['type', 'conversationId']) &&
         boundedString(message.conversationId, 128, false);
@@ -470,7 +474,7 @@
 
     // 只读检查在页面里只发一次同源历史消息请求，不点击列表、不切换会话、不改动 DOM。
     // 因此可以直接复用用户已经打开的 Boss 聊天页，省掉每个会话一次的 SPA 冷启动；
-    // 发送路径不走这里，仍然只使用本轮独占的 inactive 临时标签。
+    // 发送路径不走这里；写操作只使用当前焦点窗口的 active Boss 聊天标签。
     async function findReusableChatTab(assertLease) {
       assertLeaseCurrent(assertLease);
       var tabs;
@@ -492,6 +496,47 @@
         }
       }
       return null;
+    }
+
+    async function findActiveChatTab(assertLease) {
+      assertLeaseCurrent(assertLease);
+      var tabs;
+      try {
+        tabs = await callChrome(chromeApi, chromeApi.tabs, 'query', [{
+          active: true,
+          lastFocusedWindow: true,
+          url: BOSS_CHAT_TAB_PATTERN
+        }]);
+      } catch (_) {
+        return null;
+      }
+      if (!Array.isArray(tabs)) return null;
+      for (var index = 0; index < tabs.length; index += 1) {
+        var tab = tabs[index];
+        if (tab &&
+          tab.active === true &&
+          Number.isFinite(tab.id) &&
+          tab.status === 'complete' &&
+          isBossChatTabUrl(tab.url)) {
+          return tab.id;
+        }
+      }
+      return null;
+    }
+
+    async function requireActiveChatTab(tabId, assertLease) {
+      assertLeaseCurrent(assertLease);
+      var tab = await callChrome(chromeApi, chromeApi.tabs, 'get', [tabId]);
+      if (!tab ||
+        tab.id !== tabId ||
+        tab.active !== true ||
+        tab.status !== 'complete' ||
+        !isBossChatTabUrl(tab.url)) {
+        var error = new Error('ACTIVE_CHAT_REQUIRED');
+        error.code = 'ACTIVE_CHAT_REQUIRED';
+        throw error;
+      }
+      return tab;
     }
 
     async function withConversationTab(conversation, operation, assertLease) {
@@ -543,7 +588,8 @@
           conversationRef: {
             conversationId: conversation.conversationId,
             url: conversation.url,
-            aliases: Array.isArray(conversation.aliases) ? conversation.aliases.slice(0, 8) : []
+            aliases: Array.isArray(conversation.aliases) ? conversation.aliases.slice(0, 8) : [],
+            peerUid: conversation.peerUid || ''
           },
           lastFingerprint: typeof conversation.lastIncomingFingerprint === 'string'
             ? conversation.lastIncomingFingerprint
@@ -595,7 +641,15 @@
     }
 
     async function send(conversation, draft, intent, assertLease) {
-      var result = await withConversationTab(conversation, async function (tabId, requireOwned) {
+      var tabId = await findActiveChatTab(assertLease);
+      if (tabId === null) return mappedReaderFailure(null, 'SEND_RESULT_UNKNOWN');
+      try {
+        await ensureContentReady(tabId, assertLease, false);
+      } catch (error) {
+        if (error && error.code === 'API_PROOF_STALE') throw error;
+        return mappedReaderFailure(null, 'SEND_RESULT_UNKNOWN');
+      }
+      var result = await (async function () {
         var snapshot = await store.getSnapshot();
         var current = snapshot.managedConversations &&
           snapshot.managedConversations[conversation.conversationId];
@@ -607,10 +661,10 @@
           return mappedReaderFailure(null, 'SEND_RESULT_UNKNOWN');
         }
         try {
-          await requireOwned(tabId);
+          await requireActiveChatTab(tabId, assertLease);
         } catch (error) {
           if (error && error.code === 'API_PROOF_STALE') throw error;
-          return mappedReaderFailure(null, 'TARGET_UNCERTAIN');
+          return mappedReaderFailure(null, 'SEND_RESULT_UNKNOWN');
         }
         var response;
         try {
@@ -620,10 +674,12 @@
             conversationRef: {
               conversationId: current.conversationId,
               url: current.url,
-              aliases: Array.isArray(current.aliases) ? current.aliases.slice(0, 8) : []
+              aliases: Array.isArray(current.aliases) ? current.aliases.slice(0, 8) : [],
+              peerUid: current.peerUid || ''
             },
             draft: draft,
-            intentId: persistedIntent.intentId
+            intentId: persistedIntent.intentId,
+            allowVisible: true
           }, assertLease);
         } catch (error) {
           if (error && error.code === 'API_PROOF_STALE') throw error;
@@ -650,7 +706,7 @@
           sentFingerprint: response.sentFingerprint,
           observedAt: response.observedAt
         };
-      }, assertLease);
+      })();
       if (result && result.errorCode === 'CONVERSATION_UNAVAILABLE') {
         return mappedReaderFailure(null, 'SEND_RESULT_UNKNOWN');
       }
@@ -1136,6 +1192,23 @@
       }
     }
 
+    async function acknowledgeUnknownSend(message) {
+      if (typeof message.approvalId !== 'string' ||
+        typeof store.acknowledgeUnknownSend !== 'function') {
+        return safeError('TRUSTEESHIP_ACK_UNKNOWN_FAILED');
+      }
+      try {
+        var acknowledged = await store.acknowledgeUnknownSend(message.approvalId);
+        return {
+          ok: true,
+          approvalId: acknowledged.approvalId,
+          conversationId: acknowledged.conversationId
+        };
+      } catch (_) {
+        return safeError('TRUSTEESHIP_ACK_UNKNOWN_FAILED');
+      }
+    }
+
     async function ensureActiveChatContent(tabId) {
       var ping = null;
       try {
@@ -1216,6 +1289,7 @@
           position: typeof capture.position === 'string' ? capture.position : '',
           hrName: typeof capture.hrName === 'string' ? capture.hrName : '',
           aliases: Array.isArray(conversationRef.aliases) ? conversationRef.aliases : [],
+          peerUid: conversationRef.peerUid || '',
           peerSource: 'encryptUid',
           initialIncomingFingerprint: typeof capture.baselineIncomingFingerprint === 'string'
             ? capture.baselineIncomingFingerprint
@@ -1368,6 +1442,9 @@
       if (input.type === 'TRUSTEESHIP_TEST_FEISHU') return testFeishu();
       if (input.type === 'TRUSTEESHIP_SET_CONVERSATION') return setConversation(input);
       if (input.type === 'TRUSTEESHIP_REMOVE_CONVERSATION') return removeConversation(input);
+      if (input.type === 'TRUSTEESHIP_ACK_UNKNOWN_SEND') {
+        return acknowledgeUnknownSend(input);
+      }
       if (input.type === 'TRUSTEESHIP_REGISTER_ACTIVE') return registerActiveConversation(input);
       if (input.type === 'TRUSTEESHIP_LIST_APPROVALS') return listApprovals();
       if (input.type === 'TRUSTEESHIP_STAGE_LIVE_DRILL') {

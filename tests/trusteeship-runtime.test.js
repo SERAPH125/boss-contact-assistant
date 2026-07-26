@@ -204,6 +204,7 @@ test('high-privilege message schemas reject extra keys, oversized identifiers, a
     { type: 'TRUSTEESHIP_TEST_FEISHU' },
     { type: 'TRUSTEESHIP_SET_CONVERSATION', conversationId: 'conv-1', enabled: true },
     { type: 'TRUSTEESHIP_REMOVE_CONVERSATION', conversationId: 'conv-1' },
+    { type: 'TRUSTEESHIP_ACK_UNKNOWN_SEND', approvalId: 'approval-1' },
     { type: 'TRUSTEESHIP_LIST_APPROVALS' },
     {
       type: 'TRUSTEESHIP_RESOLVE_APPROVAL',
@@ -246,6 +247,9 @@ test('high-privilege message schemas reject extra keys, oversized identifiers, a
     { type: 'TRUSTEESHIP_REMOVE_CONVERSATION' },
     { type: 'TRUSTEESHIP_REMOVE_CONVERSATION', conversationId: 'x'.repeat(129) },
     { type: 'TRUSTEESHIP_REMOVE_CONVERSATION', conversationId: 'conv-1', extra: true },
+    { type: 'TRUSTEESHIP_ACK_UNKNOWN_SEND' },
+    { type: 'TRUSTEESHIP_ACK_UNKNOWN_SEND', approvalId: 'x'.repeat(129) },
+    { type: 'TRUSTEESHIP_ACK_UNKNOWN_SEND', approvalId: 'approval-1', extra: true },
     { type: 'TRUSTEESHIP_STAGE_LIVE_DRILL', conversationId: 'conv-1', message: '' },
     { type: 'TRUSTEESHIP_STAGE_LIVE_DRILL', conversationId: 'conv-1', message: '   ' },
     { type: 'TRUSTEESHIP_STAGE_LIVE_DRILL', conversationId: 'x'.repeat(129), message: '您好' },
@@ -1138,7 +1142,9 @@ test('page adapter reuses an open Boss chat tab for passive reads and never navi
         calls.create.push(options);
         return { id: 9, status: 'complete', ...options };
       },
-      async get(id) { return { id, active: false, status: 'complete', url: URL }; },
+      async get(id) {
+        return { id, active: id === 1, status: 'complete', url: URL };
+      },
       async remove(id) { calls.remove.push(id); },
       async sendMessage(id, message) {
         calls.messages.push([id, message]);
@@ -1186,7 +1192,9 @@ test('page adapter falls back to an owned temporary tab when the reused tab cann
         calls.create.push(options);
         return { id: 7, status: 'complete', ...options };
       },
-      async get(id) { return { id, active: false, status: 'complete', url: URL }; },
+      async get(id) {
+        return { id, active: id === 1, status: 'complete', url: URL };
+      },
       async remove(id) { calls.remove.push(id); },
       async sendMessage(tabId, message) {
         if (message.type === 'PING') {
@@ -1220,7 +1228,7 @@ test('page adapter falls back to an owned temporary tab when the reused tab cann
   assert.deepEqual(calls.remove, [7]);
 });
 
-test('page adapter keeps sends on an owned temporary tab and closes it every time', async () => {
+test('page adapter sends through the active Boss chat tab without creating a hidden temporary tab', async () => {
   const calls = { query: 0, update: [], create: [], remove: [], messages: [], inject: [] };
   let nextTabId = 3;
   let failManagedSend = false;
@@ -1242,7 +1250,7 @@ test('page adapter keeps sends on an owned temporary tab and closes it every tim
         calls.create.push(options);
         return { id: nextTabId++, status: 'complete', ...options };
       },
-      async get(id) { return { id, active: false, status: 'complete', url: URL }; },
+      async get(id) { return { id, active: true, status: 'complete', url: URL }; },
       async remove(id) { calls.remove.push(id); },
       async sendMessage(id, message) {
         calls.messages.push([id, message]);
@@ -1276,16 +1284,19 @@ test('page adapter keeps sends on an owned temporary tab and closes it every tim
 
   const sent = await adapter.send(conversation(), '好的', { intentId: 'intent-1' });
   assert.equal(sent.success, true);
-  assert.equal(calls.query, 0);
+  assert.equal(calls.query, 1);
   assert.deepEqual(calls.update, []);
-  assert.deepEqual(calls.create, [{ url: URL, active: false }]);
-  assert.deepEqual(calls.remove, [3]);
+  assert.deepEqual(calls.create, []);
+  assert.deepEqual(calls.remove, []);
+  const managed = calls.messages.find(([, message]) => message.type === 'SEND_MANAGED_REPLY');
+  assert.equal(managed[0], 1);
+  assert.equal(managed[1].allowVisible, true);
 
   failManagedSend = true;
   const failed = await adapter.send(conversation(), '好的', { intentId: 'intent-1' });
   assert.equal(failed.success, false);
-  assert.deepEqual(calls.create.at(-1), { url: URL, active: false });
-  assert.deepEqual(calls.remove, [3, 4]);
+  assert.deepEqual(calls.create, []);
+  assert.deepEqual(calls.remove, []);
 });
 
 test('page adapter preserves a safe message-order failure from the content reader', async () => {
@@ -1367,8 +1378,8 @@ test('page adapter preserves baseline and content-script diagnostics instead of 
   });
 });
 
-test('page adapter refuses a temporary tab taken over after create, load, or before managed send', async () => {
-  for (const takeoverStage of ['create', 'load', 'send']) {
+test('page adapter refuses a temporary read tab taken over after create or load', async () => {
+  for (const takeoverStage of ['create', 'load']) {
     const calls = { messages: [], remove: [], inject: [] };
     let active = takeoverStage === 'create';
     const chromeApi = {
@@ -1394,7 +1405,6 @@ test('page adapter refuses a temporary tab taken over after create, load, or bef
     };
     const store = {
       async getSnapshot() {
-        if (takeoverStage === 'send') active = true;
         return {
           managedConversations: {
             'conv-1': conversation({
@@ -1412,15 +1422,11 @@ test('page adapter refuses a temporary tab taken over after create, load, or bef
         if (takeoverStage === 'load') active = true;
       }
     });
-    const result = takeoverStage === 'send'
-      ? await adapter.send(conversation(), '好的', { intentId: 'intent-1' })
-      : await adapter.read(conversation());
+    const result = await adapter.read(conversation());
 
     assert.equal(result.success, false, takeoverStage);
     assert.equal(
-      calls.messages.includes(
-        takeoverStage === 'send' ? 'SEND_MANAGED_REPLY' : 'READ_ACTIVE_CONVERSATION'
-      ),
+      calls.messages.includes('READ_ACTIVE_CONVERSATION'),
       false,
       takeoverStage
     );
@@ -1428,13 +1434,46 @@ test('page adapter refuses a temporary tab taken over after create, load, or bef
   }
 });
 
+test('page sender stops before dispatch when the active Boss tab is no longer active', async () => {
+  const sent = [];
+  const chromeApi = {
+    runtime: { lastError: null },
+    tabs: {
+      async query() { return [{ id: 9, active: true, status: 'complete', url: URL }]; },
+      async get(id) { return { id, active: false, status: 'complete', url: URL }; },
+      async sendMessage(id, message) {
+        sent.push(message.type);
+        return { ok: true, page: 'chat' };
+      }
+    },
+    scripting: { async executeScript() {} }
+  };
+  const store = {
+    async getSnapshot() {
+      return {
+        managedConversations: {
+          'conv-1': conversation({
+            state: 'SENDING',
+            sendIntent: { intentId: 'intent-1', status: 'SENDING', draft: '好的' }
+          })
+        }
+      };
+    }
+  };
+  const adapter = Runtime.createPageAdapter({ chromeApi, store });
+  const result = await adapter.send(conversation(), '好的', { intentId: 'intent-1' });
+  assert.deepEqual(result, { success: false, errorCode: 'SEND_RESULT_UNKNOWN' });
+  assert.equal(sent.includes('SEND_MANAGED_REPLY'), false);
+});
+
 test('page sender rechecks the persisted unconsumed intent before managed protocol send', async () => {
   const sent = [];
   const chromeApi = {
     runtime: { lastError: null },
     tabs: {
+      async query() { return [{ id: 9, active: true, status: 'complete', url: URL }]; },
       async create(options) { return { id: 9, status: 'complete', ...options }; },
-      async get(id) { return { id, active: false, status: 'complete', url: URL }; },
+      async get(id) { return { id, active: true, status: 'complete', url: URL }; },
       async sendMessage(id, message) {
         sent.push(message);
         if (message.type === 'PING') return { ok: true, page: 'chat' };
@@ -1476,8 +1515,9 @@ test('sender maps login and block preflight failures to a global pause without e
   const chromeApi = {
     runtime: { lastError: null },
     tabs: {
+      async query() { return [{ id: 9, active: true, status: 'complete', url: URL }]; },
       async create(options) { return { id: 9, status: 'complete', ...options }; },
-      async get(id) { return { id, active: false, status: 'complete', url: URL }; },
+      async get(id) { return { id, active: true, status: 'complete', url: URL }; },
       async sendMessage(id, message) {
         if (message.type === 'PING') return { ok: true, page: 'chat' };
         return {

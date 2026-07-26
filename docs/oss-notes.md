@@ -111,9 +111,9 @@ Service Worker ──LOG / PHASE / PROGRESS / SCREENED / DONE──→ Sidepanel
 
 第二次实号登记暴露 `MESSAGE_ORDER_UNCERTAIN`：当前会话包含 BOSS 自带的“你与该职位竞争者 PK 情况…查看详细分析”卡片，它没有 `item-friend` / `item-myself` 方向。最初的窄修复只忽略这一固定文案；第三次实号登记仍被另一种无方向系统节点阻断，证明逐卡片 DOM 白名单不是稳定架构。
 
-browser-harness 的 2026-05-01 实号记录说明，历史接口的普通消息为 `type=3`、系统消息为 `type=4`，`received` 明确方向，`mid` 提供稳定游标；系统消息还包括已读、附件/简历通知和竞争分析卡。当前实现因此把登记基线、周期读取和发送后证据统一改为当前页面内带 Cookie 的同源 `/wapi/zpchat/geek/historyMsg`：按 `type` 排除系统消息及岗位/通知卡，按 `received` 决定方向，按 `mid` 建立游标。DOM 仍只负责确认唯一活动会话、身份及发送控件；接口异常、未知顶层类型、缺失方向或非法/重复游标继续失败关闭。第三次实号重试已证明请求与响应边界可达，但现网还存在开源样本未覆盖的消息类型；为定位它，失败提示仅新增有界 `type / body.type / received` 标量形状，明确禁止回传消息正文。对应诊断回归先 RED，再以 32/32 GREEN 验证。侧边栏标题同步保持真实数量 `已登记岗位（N）`，因此 `（0）` 与空态共同明确表示尚未持久化登记。
+当时依据 browser-harness 的 2026-05-01 实号记录，历史接口普通消息被描述为 `type=3`、系统消息为 `type=4`，且 `received` 被解释为方向；该阶段因此把登记基线、周期读取和发送后证据统一改为同源 `/wapi/zpchat/geek/historyMsg`，并暂按 `received` 判向、按 `mid` 建游标。2026-07-26 的双向实号样本已经推翻“`received` 可独立判向”这一假设，后续修复见本文 v0.3.6「方向误判与真实发送」；这里仅保留为历史决策记录。
 
-脱敏诊断随后取得真实形状 `type=1, body.type=1, received=true`：这与公开样本的 `type=3` 普通消息包络不同，但 `body.type=1`、布尔方向和稳定 `mid` 共同证明它是当前版本的普通文本来信。兼容范围只增加 `type=1 + body.type=1 + boolean received`；`type=1` 的其他 body、缺失方向和其他未知顶层类型仍失败关闭。生产 handler 回归先以 32/33 RED 复现，再以 33/33 GREEN 验证。
+脱敏诊断随后取得真实形状 `type=1, body.type=1, received=true`：它证明顶层包络已与公开样本不同，但当时仍错误地把布尔 `received` 当作方向。该阶段回归只验证了包络兼容，未取得同一 peer 的双向消息对照，因此不能视为方向语义的最终验收。
 
 首次成功登记的实号卡片又暴露 DOM 身份污染：`.friend-content` 是姓名、公司、职位、时间和预览的复合节点，宽泛的 `[class*="name"]` 会取得拼接文本。browser-harness 同样把 `.friend-content` 描述为复合会话项。修复后，已经通过 DOM ID 唯一对齐的好友列表结构化 `name / brandName / jobName` 成为登记元数据首选，scoped DOM 仅对缺失字段兜底；重新登记同一 peer 会由 store 原地更新元数据，不新增重复记录。生产 handler 回归先 RED 复现拼接，再以 34/34 GREEN 验证。
 
@@ -209,6 +209,27 @@ browser-harness 的 2026-05-01 实号记录说明，历史接口的普通消息�
 飞书 payload 现在可包含经过 code-point 限长和敏感模式清洗的“模拟 HR 正文 / HR 正文”与拟回复；API Key、Webhook token、签名密钥、provider error 和未声明对象字段仍禁止外发。飞书仍不能批准；用户在插件待确认页执行 `SEND_EDITED` 后，生产 engine 才重新读取并验证目标会话，再调用真实 sender。
 
 真实外发演练可以逐段证明 AI/策略、持久待办、飞书和人工确认发送，但不能替代真实 Boss 新来信检测。新增三周期 fixture 证明同一入站指纹的 `newMessages` 为 `0 → 1 → 0`，只生成一个 `LIVE_MONITOR` 待办、一次通知且确认前发送为 0；实号监控最终仍必须由登记 baseline 之后真正到达的一条 HR 消息验证。推荐固定演练样本为“还在看机会吗？”“薪资是多少？”“不合适”“经验可能不太匹配”。
+
+## v0.3.6 方向误判、可见页真实发送与未知待办清理
+
+本轮继续对照 [browser-use/browser-harness](https://github.com/browser-use/browser-harness) 的“真实浏览器动作后观察证据”、[boss-agent-cli](https://github.com/can4hou6joeng4/boss-agent-cli) 的平台边界与人工写入门禁，以及 [GeekGeekRun](https://github.com/geekgeekrun/geekgeekrun) 的 Boss 消息适配记录。开源样本可以提供候选字段和动作顺序，但不能替代当前账号、当前接口版本的双向实号对照；本地知识库 `技术复用/浏览器扩展-AI会话托管可靠性复盘.md` 的既有结论“未知发送是终态、不得自动重放，成功必须有新 outgoing 正证据”继续作为安全边界。
+
+真实演练首次从扩展自建的 inactive 临时页执行后进入 `SEND_RESULT_UNKNOWN`，Boss 页面没有新的 outgoing。经用户对精确 HR 和精确草稿授权，只在可见活动 Boss 页重试一次，15:44 出现 `[送达] 是的，仍在看机会。`。随后对该会话和一条已知拒绝会话读取原始历史：本人发出的三条消息、HR 发出的“不合适”以及刚发送成功的草稿全部为 `received=true`；可靠区别是 `from.uid/to.uid` 与好友列表对端数字 `uid` 的关系。由此确认两个独立根因：
+
+1. `received` 在当前接口不是方向字段，旧 parser 会把本人 outgoing 误判为 incoming，也会错过发送后的 outgoing 正证据；
+2. inactive 临时标签虽适合无副作用读取，却没有产生可靠的真实输入/发送动作；写路径必须绑定用户当前 active 的 Boss chat 标签并在每个动作前重验。
+
+修复在登记 ref 中同时持久化 canonical `encryptUid` 和数字 `peerUid`；历史方向严格按 `from.uid === peerUid` 为 incoming、`to.uid === peerUid` 为 outgoing，两边都不成立或同时成立就失败关闭。旧记录可用 canonical peer 在好友列表唯一补齐 `peerUid`。只读仍可复用可见页或回退 inactive 临时页；sender 则只接受当前焦点窗口的 active Boss chat 页，找不到或中途失活均返回未知，不创建隐藏写入页。该设计没有复制开源源码，也没有引入私有发信协议。
+
+`SEND_RESULT_UNKNOWN` 仍是不可重放的发送意图终态，但不应永久堵住侧栏。新增独立的 `TRUSTEESHIP_ACK_UNKNOWN_SEND` 人工核对协议：只在 approval、owner 会话和 UNKNOWN intent 三者精确链接时，删除插件本地待确认、解除该会话暂停；UNKNOWN intent 保留终态，不会重新可消费。侧栏按钮明确写为“已核对，清除此项”，确认文案说明不会发送、不会删除 Boss 消息。普通待办的 `NO_REPLY` 文案同步改为“不回复并移除”，避免用户把它误解为删除站内消息。
+
+## v0.3.6 真实 BOSS 编辑器作用域修复
+
+本轮继续参考 [browser-use/browser-use](https://github.com/browser-use/browser-use) 对浏览器动作“先定位可见可交互控件、动作后重新观察”的边界，以及 [boss-agent-cli](https://github.com/can4hou6joeng4/boss-agent-cli) 对写操作默认阻断和诊断分层的设计。参考项目只用于确定动作与证据边界，没有复制其代码、没有调用 BOSS 私有发信协议。
+
+ego-lite 对徐海霞会话的精确单次发送排查得到三组现场证据：活动标签、canonical peer/alias、目标身份和历史读取全部成功；页面观察器没有记录到 input、Enter 或消息 DOM mutation；真实结构为 `.chat-record → .message-content → .chat-conversation`，而 `#chat-input` 与 `button.btn-send` 位于 `.chat-conversation` 的另一个分支。旧实现直接使用 `container.parentElement` 作为输入控件查询范围，因而在任何外部动作前就返回选择器失败，上层再保守收束为 `SEND_RESULT_UNKNOWN`。
+
+修复保留消息读取用的直接父级 `pane`，另从消息容器向上有界查找同时包含输入框与发送按钮的最近共同 `controlPane`。控件查找只在该共同祖先内进行，要求输入框和按钮各自唯一；发送前重验还要求原 `pane`、`controlPane`、输入框和按钮对象全部未变化。新增 fake DOM 回归先以真实的兄弟分支结构复现 `SELECTOR_UNAVAILABLE`，再转为成功发送证据；另加双输入/双按钮歧义用例，确认动作数为 0 且以 `TARGET_UNCERTAIN` 失败关闭。该修复不会全页面查找第一组控件，也不会重放已经进入 UNKNOWN 的意图。模块回归为 49/49，全量自动化为 411/411；JavaScript 语法、Manifest 和 diff 检查均通过。扩展重载后的实号只读探针确认：depth 0 的 `.message-content` 为 0 个输入/0 个按钮，depth 1 的 `.chat-conversation` 恰好为 1 个输入/1 个按钮，修复会选择后者且未触发任何发送。
 
 ## v0.3.5 Task 9 恢复、幂等与隐私回归参考
 

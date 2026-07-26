@@ -183,7 +183,10 @@ function createHarness(options = {}) {
     }));
   }
 
-  const pane = documentRoot.append(new FakeElement());
+  const conversationPane = documentRoot.append(new FakeElement());
+  const pane = options.controlsOutsideMessagePane
+    ? conversationPane.append(new FakeElement({ className: 'message-content' }))
+    : conversationPane;
   pane.append(new FakeElement({
     text: options.headerText === undefined ? '示例公司 示例岗位' : options.headerText,
     selectors: [S.header, '.chat-info']
@@ -195,13 +198,13 @@ function createHarness(options = {}) {
       : (options.ownership === 'none' ? {} : { conversationId: 'conv1' }),
     selectors: [S.messageList]
   }));
-  const input = pane.append(new FakeElement({
+  const input = conversationPane.append(new FakeElement({
     id: 'chat-input',
     className: 'chat-input',
     contenteditable: true,
     selectors: [S.input]
   }));
-  const button = pane.append(new FakeElement({
+  const button = conversationPane.append(new FakeElement({
     tagName: 'button',
     className: 'btn-send',
     selectors: [S.button]
@@ -222,6 +225,7 @@ function createHarness(options = {}) {
     activeItem,
     activeLink,
     pane,
+    conversationPane,
     container,
     input,
     button,
@@ -236,6 +240,8 @@ function createHarness(options = {}) {
   state.addMessage = function addMessage(config = {}, target = container) {
     const index = state.nextMessage++;
     const direction = config.direction || 'incoming';
+    const historyDirection = config.historyDirection ||
+      (direction === 'unknown' ? 'incoming' : direction);
     const directionSelectors = direction === 'incoming'
       ? [S.incoming]
       : (direction === 'outgoing' ? [S.outgoing] : []);
@@ -263,13 +269,23 @@ function createHarness(options = {}) {
           : (direction === 'unknown' ? 99 : 3),
         received: Object.hasOwn(config, 'historyReceived')
           ? config.historyReceived
-          : direction === 'incoming',
+          : true,
         body: {
           type: Object.hasOwn(config, 'historyBodyType') ? config.historyBodyType : 1,
           text: config.text === undefined ? '消息 ' + index : config.text
         },
-        from: { uid: 100, name: '示例HR' },
-        to: { uid: 200 }
+        from: {
+          uid: Object.hasOwn(config, 'historyFromUid')
+            ? config.historyFromUid
+            : (historyDirection === 'incoming' ? 100 : 200),
+          name: historyDirection === 'incoming' ? '示例HR' : '我'
+        },
+        to: {
+          uid: Object.hasOwn(config, 'historyToUid')
+            ? config.historyToUid
+            : (historyDirection === 'incoming' ? 200 : 100),
+          name: historyDirection === 'incoming' ? '我' : '示例HR'
+        }
       };
       if (Object.hasOwn(config, 'historyTime')) historyEntry.time = config.historyTime;
       state.historyMessages.push(historyEntry);
@@ -454,11 +470,22 @@ function createHarness(options = {}) {
       if (options.friendListUnavailable) {
         return { ok: false, status: 500, async json() { return { code: 1 }; } };
       }
-      const friends = options.friends || [{
+      const friends = (options.friends || [{
         encryptUid: options.peerId || 'conv1',
+        uid: 100,
         name: '示例HR',
         brandName: '示例公司'
-      }];
+      }]).map((friend) => {
+        const copy = { ...friend };
+        if (!(Number.isSafeInteger(copy.uid) && copy.uid > 0) &&
+            !(typeof copy.uid === 'string' && /^[1-9][0-9]{0,19}$/.test(copy.uid))) {
+          if (copy.uid !== undefined && copy.conversationId === undefined) {
+            copy.conversationId = copy.uid;
+          }
+          copy.uid = 100;
+        }
+        return copy;
+      });
       return {
         ok: true,
         status: 200,
@@ -498,10 +525,34 @@ function createHarness(options = {}) {
   state.expected = { company: '示例公司', name: '示例岗位' };
   state.ref = {
     conversationId: 'conv1',
-    url: 'https://www.zhipin.com/web/geek/chat?conversationId=conv1'
+    url: 'https://www.zhipin.com/web/geek/chat?conversationId=conv1',
+    peerUid: '100'
   };
   return state;
 }
+
+test('history direction follows peer from/to uid when received is true for both sides', async () => {
+  const h = createHarness({
+    messages: [
+      { id: 'outgoing-same-received', direction: 'outgoing', text: '我方回复' },
+      { id: 'incoming-same-received', direction: 'incoming', text: 'HR 回复' }
+    ]
+  });
+
+  const read = await h.dispatch({
+    type: 'READ_ACTIVE_CONVERSATION',
+    expected: h.expected,
+    conversationRef: h.ref,
+    lastFingerprint: ''
+  });
+
+  assert.equal(read.success, true);
+  assert.deepEqual(
+    Array.from(read.messages, (message) => [message.text, message.direction]),
+    [['HR 回复', 'incoming']]
+  );
+  assert.equal(read.baselineIncomingFingerprint, 'id:incoming-same-received');
+});
 
 test('GET owns the only visible message container and ignores a hidden decoy', async () => {
   const h = createHarness();
@@ -515,7 +566,7 @@ test('GET owns the only visible message container and ignores a hidden decoy', a
     expected: h.expected
   });
 
-  assert.equal(result.success, true);
+  assert.equal(result.success, true, JSON.stringify(result));
   assert.equal(result.baselineIncomingFingerprint, 'id:initial-incoming');
 });
 
@@ -665,13 +716,14 @@ test('CAPTURE registers the owned active conversation without expected identity'
     friends: [{ encryptUid: 'peer~~uid1', uid: 'conv1', name: '示例HR' }]
   });
   const result = await h.dispatch({ type: 'CAPTURE_ACTIVE_CONVERSATION' });
-  assert.equal(result.success, true);
+  assert.equal(result.success, true, JSON.stringify(result));
   assert.equal(result.conversationRef.conversationId, 'peer~~uid1');
   assert.equal(
     result.conversationRef.url,
     'https://www.zhipin.com/web/geek/chat?uid=peer~~uid1'
   );
-  assert.deepEqual(Array.from(result.conversationRef.aliases || []), ['conv1']);
+  assert.deepEqual(Array.from(result.conversationRef.aliases || []), ['conv1', '100']);
+  assert.equal(result.conversationRef.peerUid, '100');
   assert.equal(result.peerSource, 'encryptUid');
   assert.equal(result.baselineIncomingFingerprint, 'id:initial-incoming');
   assert.ok(result.company || result.position || result.hrName);
@@ -807,6 +859,7 @@ test('CAPTURE supports modern chat-record DOM without geek/chat anchors', async 
             zpData: {
               result: [{
                 encryptUid: peerId,
+                uid: 100,
                 name: '江女士',
                 brandName: '杭州云禾致远商贸',
                 jobName: '跨境电商运营'
@@ -1256,7 +1309,7 @@ test('READ keeps an unknown history body type as a non-text message instead of f
   assert.equal(result.baselineIncomingFingerprint, 'id:337069469603361');
 });
 
-test('READ skips a history entry without an explicit direction and still reads the rest', async () => {
+test('READ fails closed when from/to cannot establish the message direction', async () => {
   const h = createHarness({
     messages: [{ id: '337069469603370', direction: 'incoming', text: '第一条来信' }]
   });
@@ -1265,6 +1318,8 @@ test('READ skips a history entry without an explicit direction and still reads t
     direction: 'unknown',
     historyType: 5,
     historyReceived: null,
+    historyFromUid: 300,
+    historyToUid: 400,
     text: '没有方向的系统提示'
   });
   h.addMessage({
@@ -1282,8 +1337,8 @@ test('READ skips a history entry without an explicit direction and still reads t
     lastFingerprint: 'id:337069469603370'
   });
 
-  assert.equal(result.success, true);
-  assert.deepEqual(Array.from(result.messages, (item) => item.text), ['第二条来信']);
+  assert.equal(result.success, false);
+  assert.equal(result.errorCode, 'MESSAGE_ORDER_UNCERTAIN');
 });
 
 test('READ keeps an empty text body as a non-text message instead of dropping the batch', async () => {
@@ -1641,11 +1696,71 @@ test('SEND requires a new scoped outgoing bubble matching the draft', async () =
     draft: '确认收到'
   });
 
-  assert.equal(result.success, true);
+  assert.equal(result.success, true, JSON.stringify(result));
   assert.equal(result.sentFingerprint, 'id:sent-evidence');
   assert.equal(result.targetConversationId, 'conv1');
   assert.equal(Number.isFinite(result.observedAt) && result.observedAt > 0, true);
   assert.equal(h.externalActions, 1);
+});
+
+test('SEND finds controls in the nearest shared conversation ancestor', async () => {
+  const h = createHarness({
+    controlsOutsideMessagePane: true,
+    messages: [{ id: 'old-outgoing', direction: 'outgoing', text: '旧消息' }]
+  });
+  h.input._onDispatch = (event) => {
+    if (event.type !== 'keydown' || event.key !== 'Enter') return;
+    h.externalActions++;
+    h.addMessage({
+      id: 'sent-from-shared-ancestor',
+      direction: 'outgoing',
+      text: '好的，谢谢'
+    });
+    h.input.textContent = '';
+  };
+
+  const result = await h.dispatch({
+    type: 'SEND_MANAGED_REPLY',
+    expected: h.expected,
+    conversationRef: h.ref,
+    draft: '好的，谢谢'
+  });
+
+  assert.equal(result.success, true, JSON.stringify(result));
+  assert.equal(result.sentFingerprint, 'id:sent-from-shared-ancestor');
+  assert.equal(h.externalActions, 1);
+});
+
+test('SEND rejects ambiguous controls in the shared conversation ancestor', async () => {
+  const h = createHarness({
+    controlsOutsideMessagePane: true,
+    messages: [{ id: 'old-outgoing', direction: 'outgoing', text: '旧消息' }]
+  });
+  const extraInput = h.conversationPane.append(new FakeElement({
+    id: 'chat-input-extra',
+    className: 'chat-input',
+    contenteditable: true,
+    selectors: [S.input]
+  }));
+  const extraButton = h.conversationPane.append(new FakeElement({
+    tagName: 'button',
+    className: 'btn-send',
+    selectors: [S.button]
+  }));
+  h.input._onDispatch = () => { h.externalActions++; };
+  h.button._onClick = () => { h.externalActions++; };
+  extraInput._onDispatch = () => { h.externalActions++; };
+  extraButton._onClick = () => { h.externalActions++; };
+
+  const result = await h.dispatch({
+    type: 'SEND_MANAGED_REPLY',
+    expected: h.expected,
+    conversationRef: h.ref,
+    draft: '好的，谢谢'
+  });
+
+  assert.equal(result.errorCode, 'TARGET_UNCERTAIN');
+  assert.equal(h.externalActions, 0);
 });
 
 test('SEND verifies evidence through history API despite directionless DOM system messages', async () => {

@@ -245,7 +245,7 @@ test('full sidepanel preserves a real unknown resolve draft and refreshes only a
   approvals[0].status = 'PENDING';
   await approvalsTab.trigger('click');
   card = h.ids.approvalList.children[0];
-  await findDescendants(card, 'button').find((button) => button.textContent === '不回复').trigger('click');
+  await findDescendants(card, 'button').find((button) => button.textContent === '不回复并移除').trigger('click');
   assert.equal(h.ids.approvalList.children.length, 0);
   assert.equal(h.ids.approvalEmpty.hidden, false);
 });
@@ -283,7 +283,10 @@ test('full sidepanel immediately locks an unknown response while its durable ref
   const durableCard = h.ids.approvalList.children[0];
   assert.equal(findDescendants(durableCard, 'textarea')[0].readOnly, true);
   assert.match(durableCard.children.find((child) => child.tagName === 'LABEL').textContent, /本次尝试草稿（只读）/);
-  assert.deepEqual(findDescendants(durableCard, 'button').map((button) => button.textContent), ['打开 Boss 会话']);
+  assert.deepEqual(
+    findDescendants(durableCard, 'button').map((button) => button.textContent),
+    ['打开 Boss 会话', '已核对，清除此项']
+  );
 });
 
 test('full sidepanel uses the global enabled gate and rolls back a confirmed conversation close', async () => {

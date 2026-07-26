@@ -21,6 +21,7 @@ let deliveryConfirmationSubmitting = false;
       FEISHU_CONFIG_INVALID: '请检查飞书通知配置',
       RISK_NOT_ACCEPTED: '请先确认平台风险提示',
       SEND_RESULT_UNKNOWN: '发送结果未知，请人工核对 Boss 会话后再处理',
+      TRUSTEESHIP_ACK_UNKNOWN_FAILED: '该记录暂时无法清除，请刷新后重试',
       CONVERSATION_NOT_REGISTERED: '该会话不可托管',
       SERVICE_WORKER_INTERRUPTED: '后台服务已中断，请重新打开扩展'
     };
@@ -165,6 +166,7 @@ function stableTrusteeshipError(code) {
     FEISHU_CONFIG_INVALID: '请检查飞书通知配置',
     RISK_NOT_ACCEPTED: '请先确认平台风险提示',
     SEND_RESULT_UNKNOWN: '发送结果未知，请人工核对 Boss 会话',
+    TRUSTEESHIP_ACK_UNKNOWN_FAILED: '该记录暂时无法清除，请刷新后重试',
     CONVERSATION_NOT_REGISTERED: '该会话不可托管',
     SERVICE_WORKER_INTERRUPTED: '后台服务已中断，请重新打开扩展',
     ACTIVE_CHAT_REQUIRED: '请先打开并聚焦 Boss 聊天页中的目标会话',
@@ -832,7 +834,7 @@ function renderApprovals(approval) {
   const send = document.createElement('button');
   send.type = 'button'; send.className = 'btn-go'; send.textContent = '修改并确认发送';
   const noReply = document.createElement('button');
-  noReply.type = 'button'; noReply.className = 'btn-ghost'; noReply.textContent = '不回复';
+  noReply.type = 'button'; noReply.className = 'btn-ghost'; noReply.textContent = '不回复并移除';
   const disable = document.createElement('button');
   disable.type = 'button'; disable.className = 'btn-ghost approval-disable'; disable.textContent = '关闭此会话托管';
   const controller = TrusteeshipSidepanel.createController({
@@ -848,7 +850,34 @@ function renderApprovals(approval) {
       if (window.confirm('关闭托管会删除该会话保存的最近聊天上下文。是否继续？')) controller.resolveApproval({ id: approval.approvalId, draft: draft.value.trim() }, 'DISABLE_CONVERSATION');
     });
     actions.append(open, send, noReply, disable);
-  } else actions.append(open);
+  } else {
+    const acknowledge = document.createElement('button');
+    acknowledge.type = 'button';
+    acknowledge.className = 'btn-ghost';
+    acknowledge.textContent = '已核对，清除此项';
+    acknowledge.addEventListener('click', async () => {
+      if (!window.confirm('请确认你已经在 Boss 会话中核对实际发送结果。此操作只清除插件本地待确认记录，不会发送或删除 Boss 消息。')) return;
+      setApprovalCardBusy(approval.approvalId, true);
+      try {
+        const result = await sendRuntimeMessage({
+          type: 'TRUSTEESHIP_ACK_UNKNOWN_SEND',
+          approvalId: approval.approvalId
+        });
+        if (!result || result.ok !== true) {
+          setApprovalCardBusy(approval.approvalId, false);
+          $('approvalStatus').textContent = '清除失败：' +
+            stableTrusteeshipError(result && (result.code || result.errorCode));
+          return;
+        }
+        await refreshApprovals();
+      } catch (_) {
+        setApprovalCardBusy(approval.approvalId, false);
+        $('approvalStatus').textContent = '清除失败：' +
+          stableTrusteeshipError('SERVICE_WORKER_INTERRUPTED');
+      }
+    });
+    actions.append(open, acknowledge);
+  }
   card.append(title, meta, reason, context, fields, draftLabel, draft, actions);
   list.appendChild(card);
 }

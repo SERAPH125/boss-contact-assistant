@@ -35,7 +35,7 @@ test('provides an approval workbench without regressing the delivery dialog', ()
   assert.match(html, /data-tab="approvals"/);
   assert.match(html, /id="approvalStatus"[^>]*aria-live="polite"/);
   assert.match(html, /id="deliveryModal"/);
-  for (const label of ['修改并确认发送', '不回复', '关闭此会话托管']) {
+  for (const label of ['修改并确认发送', '不回复并移除', '关闭此会话托管', '已核对，清除此项']) {
     assert.match(script, new RegExp(label));
   }
 });
@@ -45,7 +45,8 @@ test('uses trusteeship messages and DOM-safe approval rendering', () => {
     'TRUSTEESHIP_GET_STATE', 'TRUSTEESHIP_SAVE_SETTINGS', 'TRUSTEESHIP_TEST_FEISHU',
     'TRUSTEESHIP_RUN_NOW', 'TRUSTEESHIP_LIST_APPROVALS',
     'TRUSTEESHIP_RESOLVE_APPROVAL', 'TRUSTEESHIP_OPEN_CONVERSATION',
-    'TRUSTEESHIP_SET_CONVERSATION', 'TRUSTEESHIP_REMOVE_CONVERSATION', 'TRUSTEESHIP_REGISTER_ACTIVE'
+    'TRUSTEESHIP_SET_CONVERSATION', 'TRUSTEESHIP_REMOVE_CONVERSATION',
+    'TRUSTEESHIP_ACK_UNKNOWN_SEND', 'TRUSTEESHIP_REGISTER_ACTIVE'
   ]) assert.match(script, new RegExp(type));
   assert.match(script, /从当前 Boss 聊天页登记/);
   assert.match(html, /从当前 Boss 聊天页登记/);
