@@ -181,6 +181,9 @@ async function loadFullSidepanel(options) {
         }
         else if (message.type === 'TRUSTEESHIP_RESOLVE_APPROVAL') callback(options.resolve ? options.resolve(message) : { ok: true });
         else if (message.type === 'TRUSTEESHIP_RUN_NOW') callback(options.runNow ? options.runNow(message) : { ok: true });
+        else if (message.type === 'TRUSTEESHIP_SIMULATE_MESSAGE') {
+          callback(options.simulate ? options.simulate(message) : { ok: false, code: 'TRUSTEESHIP_SIMULATION_FAILED' });
+        }
         else if (message.type === 'TRUSTEESHIP_SET_CONVERSATION') callback({ ok: false, code: 'CONVERSATION_NOT_REGISTERED' });
         else if (message.type === 'GET_STATE') callback({ phase: 'idle' });
         else callback({ ok: true });
@@ -575,6 +578,87 @@ test('full sidepanel tells the user to enable and save trusteeship when a manual
     h.ids.trusteeshipConfigMsg.textContent,
     '无法开始检查：请先开启 AI 对话托管并保存设置'
   );
+});
+
+test('full sidepanel submits one bounded dry-run and renders the non-sending decision', async () => {
+  const result = {
+    conversationId: 'conv-1',
+    message: '还在看机会吗？',
+    classification: {
+      category: 'still_looking',
+      confidence: 0.91,
+      reasonCode: 'SAFE',
+      evidenceIds: ['faq-line-1'],
+      fieldsNeeded: []
+    },
+    decision: { action: 'AUTO_REPLY', reasonCode: 'AUTO_REPLY_ALLOWED' },
+    draft: '是的，我还在看合适机会。',
+    draftEvidenceIds: ['faq-line-1'],
+    wouldSend: true,
+    simulated: true
+  };
+  const h = await loadFullSidepanel({
+    state: {
+      settings: { enabled: true, paused: false },
+      managedConversations: {
+        'conv-1': {
+          conversationId: 'conv-1',
+          company: '甲公司',
+          position: '前端工程师',
+          hrName: '李经理',
+          state: 'WAITING_HR',
+          enabled: true
+        }
+      },
+      pendingApprovalCount: 0
+    },
+    approvals: [],
+    simulate: () => ({ ok: true, result })
+  });
+  h.ids.trusteeshipSimulationConversation.value = 'conv-1';
+  h.ids.trusteeshipSimulationMessage.value = '  还在看机会吗？  ';
+
+  await h.ids.btnRunTrusteeshipSimulation.trigger('click');
+
+  assert.deepEqual({
+    ...h.sent.find((item) => item.type === 'TRUSTEESHIP_SIMULATE_MESSAGE')
+  }, {
+    type: 'TRUSTEESHIP_SIMULATE_MESSAGE',
+    conversationId: 'conv-1',
+    message: '还在看机会吗？'
+  });
+  const rendered = h.ids.trusteeshipSimulationResult.children
+    .map((child) => child.textContent)
+    .join('|');
+  assert.match(rendered, /AUTO_REPLY/);
+  assert.match(rendered, /是的，我还在看合适机会/);
+  assert.match(rendered, /仅模拟，未发送/);
+  assert.equal(h.ids.btnRunTrusteeshipSimulation.disabled, false);
+});
+
+test('full sidepanel validates dry-run inputs and masks simulation failures', async () => {
+  const h = await loadFullSidepanel({
+    state: {
+      settings: { enabled: true, paused: false },
+      managedConversations: {},
+      pendingApprovalCount: 0
+    },
+    approvals: [],
+    simulate: () => ({ ok: false, code: 'provider-secret-simulation-canary' })
+  });
+
+  await h.ids.btnRunTrusteeshipSimulation.trigger('click');
+  assert.match(h.ids.trusteeshipSimulationStatus.textContent, /请选择已登记会话/);
+  assert.equal(h.sent.some((item) => item.type === 'TRUSTEESHIP_SIMULATE_MESSAGE'), false);
+
+  h.ids.trusteeshipSimulationConversation.value = 'conv-1';
+  await h.ids.btnRunTrusteeshipSimulation.trigger('click');
+  assert.match(h.ids.trusteeshipSimulationStatus.textContent, /请输入模拟 HR 消息/);
+
+  h.ids.trusteeshipSimulationMessage.value = '您好';
+  await h.ids.btnRunTrusteeshipSimulation.trigger('click');
+  assert.equal(h.ids.trusteeshipSimulationStatus.textContent.includes('provider-secret'), false);
+  assert.equal(h.ids.btnRunTrusteeshipSimulation.disabled, false);
 });
 
 test('full sidepanel status and managed DOM mask unknown provider and credential-shaped pause canaries', async () => {

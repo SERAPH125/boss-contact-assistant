@@ -114,6 +114,20 @@
           <button type="button" class="btn-ghost" id="btnTestFeishu">发送飞书测试通知</button>
           <button type="button" class="btn-primary" id="btnSaveTrusteeship">保存托管设置</button>
           <button type="button" class="btn-go" id="btnRunTrusteeshipNow">立即检查已登记岗位</button>
+          <details class="trusteeship-simulation" id="trusteeshipSimulation">
+            <summary>模拟 HR 新消息（不发送）</summary>
+            <p class="hint">使用真实 AI，但不会读取或写入 BOSS，不会修改托管状态或发送飞书。</p>
+            <label for="trusteeshipSimulationConversation">模拟会话</label>
+            <select id="trusteeshipSimulationConversation" aria-describedby="trusteeshipSimulationSafety">
+              <option value="">暂无已登记岗位</option>
+            </select>
+            <label for="trusteeshipSimulationMessage">模拟 HR 消息</label>
+            <textarea id="trusteeshipSimulationMessage" rows="3" maxlength="600" placeholder="如：还在看机会吗？"></textarea>
+            <p class="hint" id="trusteeshipSimulationSafety">仅模拟，未发送</p>
+            <button type="button" class="btn-ghost" id="btnRunTrusteeshipSimulation">运行安全模拟</button>
+            <p class="hint" id="trusteeshipSimulationStatus" aria-live="polite"></p>
+            <div class="trusteeship-simulation-result" id="trusteeshipSimulationResult" aria-live="polite"></div>
+          </details>
           <p class="hint" id="trusteeshipConfigMsg" aria-live="polite"></p>
           <h3 id="managedConversationsHeading">已登记岗位（0）</h3>
           <p class="hint">联系成功会自动登记；也可打开 Boss 聊天页中的目标会话后，从当前页登记并托管。</p>

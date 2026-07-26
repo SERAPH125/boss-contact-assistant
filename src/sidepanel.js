@@ -177,7 +177,14 @@ function stableTrusteeshipError(code) {
     TARGET_UNCERTAIN: '目标会话无法确认',
     SELECTOR_UNAVAILABLE: '页面结构暂不可用',
     LOGIN_REQUIRED: '需要重新登录 Boss',
-    BOSS_BLOCKED: 'Boss 页面已阻止操作'
+    BOSS_BLOCKED: 'Boss 页面已阻止操作',
+    API_PROOF_STALE: 'API 测试证明已失效，请重新测试 API',
+    AI_CLASSIFY_FAILED: 'AI 分类失败，请检查 API 后重试',
+    AI_CLASSIFICATION_INVALID: 'AI 分类结果无法安全接受',
+    AI_DRAFT_FAILED: 'AI 草稿生成失败，请检查 API 后重试',
+    AI_DRAFT_INVALID: 'AI 草稿结果无法安全接受',
+    UNSUPPORTED_PLATFORM: '仅支持模拟已登记的 Boss 会话',
+    TRUSTEESHIP_SIMULATION_FAILED: '安全模拟失败，请稍后重试'
   };
   return messages[code] || '操作未完成，请稍后重试';
 }
@@ -450,7 +457,83 @@ function setManagedConversationEnabled(conversationId, enabled) {
   if (checkbox) checkbox.checked = enabled === true;
 }
 
+function renderTrusteeshipSimulationConversations(conversations) {
+  const select = $('trusteeshipSimulationConversation');
+  if (!select) return;
+  const previous = select.value;
+  select.replaceChildren();
+  if (!conversations.length) {
+    const empty = document.createElement('option');
+    empty.value = '';
+    empty.textContent = '暂无已登记岗位';
+    select.appendChild(empty);
+    select.value = '';
+    return;
+  }
+  conversations.forEach((conversation) => {
+    const option = document.createElement('option');
+    option.value = String(conversation.conversationId || '').slice(0, 128);
+    option.textContent = (
+      (conversation.company || '未知公司') +
+      ' · ' +
+      (conversation.position || '未知岗位') +
+      ' · ' +
+      (conversation.hrName || '未知 HR')
+    ).slice(0, 300);
+    select.appendChild(option);
+  });
+  const preserved = conversations.some(
+    (conversation) => conversation && conversation.conversationId === previous
+  );
+  select.value = preserved ? previous : String(conversations[0].conversationId || '');
+}
+
+function simulationText(value, limit) {
+  return typeof value === 'string'
+    ? Array.from(value).slice(0, limit).join('')
+    : '';
+}
+
+function renderTrusteeshipSimulationResult(result) {
+  const root = $('trusteeshipSimulationResult');
+  if (!root) return;
+  root.replaceChildren();
+  const source = result && typeof result === 'object' ? result : {};
+  const classification = source.classification && typeof source.classification === 'object'
+    ? source.classification
+    : {};
+  const decision = source.decision && typeof source.decision === 'object'
+    ? source.decision
+    : {};
+  const rows = [
+    ['AI 分类', simulationText(classification.category, 80) || '无可信分类'],
+    ['置信度', Number.isFinite(classification.confidence)
+      ? String(Math.round(classification.confidence * 100)) + '%'
+      : '—'],
+    ['AI 原因', simulationText(classification.reasonCode, 120) || '—'],
+    ['引用依据', Array.isArray(classification.evidenceIds) && classification.evidenceIds.length
+      ? classification.evidenceIds.map((id) => simulationText(id, 160)).join('、')
+      : '无'],
+    ['策略动作', decision.action === 'AUTO_REPLY' || decision.action === 'REQUIRE_CONFIRMATION'
+      ? decision.action
+      : 'REQUIRE_CONFIRMATION'],
+    ['策略原因', simulationText(decision.reasonCode, 120) || '—'],
+    ['拟回复', simulationText(source.draft, 300) || '无'],
+    ['生产行为', source.wouldSend === true ? '会尝试自动发送' : '不会自动发送']
+  ];
+  rows.forEach(([label, value]) => {
+    const line = document.createElement('p');
+    line.textContent = label + '：' + value;
+    root.appendChild(line);
+  });
+  const marker = document.createElement('p');
+  marker.className = 'simulation-marker';
+  marker.textContent = '仅模拟，未发送';
+  root.appendChild(marker);
+}
+
 function renderManagedConversations(conversations) {
+  renderTrusteeshipSimulationConversations(conversations);
   const container = $('managedConversations');
   if (!container) return;
   const heading = $('managedConversationsHeading');
@@ -1019,6 +1102,60 @@ $('btnRunTrusteeshipNow').addEventListener('click', async () => {
     button.disabled = false;
   }
 });
+
+if ($('btnRunTrusteeshipSimulation')) {
+  $('btnRunTrusteeshipSimulation').addEventListener('click', async () => {
+    const button = $('btnRunTrusteeshipSimulation');
+    const conversationId = String(
+      ($('trusteeshipSimulationConversation') || {}).value || ''
+    ).trim();
+    const message = String(
+      ($('trusteeshipSimulationMessage') || {}).value || ''
+    ).trim();
+    const status = $('trusteeshipSimulationStatus');
+    if (!conversationId) {
+      if (status) status.textContent = '请选择已登记会话。';
+      return;
+    }
+    if (!message) {
+      if (status) status.textContent = '请输入模拟 HR 消息。';
+      return;
+    }
+    if (Array.from(message).length > 600) {
+      if (status) status.textContent = '模拟消息不能超过 600 个字符。';
+      return;
+    }
+    button.disabled = true;
+    if (status) status.textContent = '正在使用真实 AI 进行安全模拟…';
+    if ($('trusteeshipSimulationResult')) {
+      $('trusteeshipSimulationResult').replaceChildren();
+    }
+    try {
+      const response = await sendRuntimeMessage({
+        type: 'TRUSTEESHIP_SIMULATE_MESSAGE',
+        conversationId,
+        message
+      });
+      if (!response || response.ok !== true) {
+        if (status) {
+          status.textContent = '模拟失败：' + stableTrusteeshipError(
+            response && (response.code || response.errorCode)
+          );
+        }
+        return;
+      }
+      renderTrusteeshipSimulationResult(response.result);
+      if (status) status.textContent = '模拟完成：仅模拟，未发送。';
+    } catch (_) {
+      if (status) {
+        status.textContent = '模拟失败：' +
+          stableTrusteeshipError('SERVICE_WORKER_INTERRUPTED');
+      }
+    } finally {
+      button.disabled = false;
+    }
+  });
+}
 
 if ($('btnRegisterActiveConversation')) {
   $('btnRegisterActiveConversation').addEventListener('click', async () => {

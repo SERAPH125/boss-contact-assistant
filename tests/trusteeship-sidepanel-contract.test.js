@@ -118,3 +118,34 @@ test('exposes HR FAQ controls on the AI trusteeship pane', () => {
   const presetBlock = script.slice(presetStart, presetEnd);
   assert.doesNotMatch(presetBlock, /月薪|期望薪资|面试时间|到岗|微信|电话/);
 });
+
+test('provides an accessible trusteeship dry-run that is visibly non-sending', () => {
+  for (const id of [
+    'trusteeshipSimulation',
+    'trusteeshipSimulationConversation',
+    'trusteeshipSimulationMessage',
+    'btnRunTrusteeshipSimulation',
+    'trusteeshipSimulationStatus',
+    'trusteeshipSimulationResult'
+  ]) {
+    assert.match(html, new RegExp('id="' + id + '"'));
+  }
+  assert.match(html, /for="trusteeshipSimulationConversation"/);
+  assert.match(html, /for="trusteeshipSimulationMessage"/);
+  assert.match(html, /id="trusteeshipSimulationMessage"[^>]*maxlength="600"/);
+  assert.match(html, /id="trusteeshipSimulationStatus"[^>]*aria-live="polite"/);
+  assert.match(html, /id="trusteeshipSimulationResult"[^>]*aria-live="polite"/);
+  assert.match(html, /使用真实 AI，但不会读取或写入 BOSS，不会修改托管状态或发送飞书。/);
+  assert.match(html, /仅模拟，未发送/);
+  assert.match(script, /TRUSTEESHIP_SIMULATE_MESSAGE/);
+  assert.match(css, /\.trusteeship-simulation/);
+  assert.match(css, /\.trusteeship-simulation-result/);
+
+  const rendererStart = script.indexOf('function renderTrusteeshipSimulationResult(');
+  const rendererEnd = script.indexOf('\nfunction ', rendererStart + 1);
+  assert.ok(rendererStart >= 0 && rendererEnd > rendererStart);
+  const renderer = script.slice(rendererStart, rendererEnd);
+  assert.doesNotMatch(renderer, /\.innerHTML\s*=/);
+  assert.match(renderer, /\.textContent\s*=/);
+  assert.match(renderer, /document\.createElement\(/);
+});
