@@ -34,10 +34,21 @@
     'SELECTOR_UNAVAILABLE',
     'SEND_RESULT_UNKNOWN',
     'MESSAGE_ORDER_UNCERTAIN',
+    'BASELINE_NOT_FOUND',
+    'BASELINE_REQUIRED',
+    'CONTENT_SCRIPT_UNAVAILABLE',
     'CONVERSATION_UNAVAILABLE',
     'RECOVERY_STATE_UNCERTAIN',
     'UNKNOWN_PROCESSING_FAILURE'
   ]);
+  var RETRYABLE_CONVERSATION_PAUSE_CODES = new Set([
+    'CONVERSATION_UNAVAILABLE',
+    'SELECTOR_UNAVAILABLE',
+    'CONTENT_SCRIPT_UNAVAILABLE'
+  ]);
+  // 一次只读失败没有任何外部写入，因此按开源轮询任务的通行做法先退避重试；
+  // 只有连续失败到阈值才升级为需要人工核对的暂停。
+  var READ_FAILURE_PAUSE_THRESHOLD = 3;
   var PUBLIC_PAUSE_CODES = new Set([
     'LOGIN_REQUIRED',
     'BOSS_BLOCKED',
@@ -48,6 +59,9 @@
     'SELECTOR_UNAVAILABLE',
     'SEND_RESULT_UNKNOWN',
     'MESSAGE_ORDER_UNCERTAIN',
+    'BASELINE_NOT_FOUND',
+    'BASELINE_REQUIRED',
+    'CONTENT_SCRIPT_UNAVAILABLE',
     'CONVERSATION_UNAVAILABLE',
     'RECOVERY_STATE_UNCERTAIN',
     'UNKNOWN_PROCESSING_FAILURE'
@@ -245,6 +259,10 @@
       enabled: source.enabled === true,
       state: state,
       lastCheckedAt: finiteInteger(source.lastCheckedAt, 0, 0, Number.MAX_SAFE_INTEGER),
+      readFailureCount: finiteInteger(source.readFailureCount, 0, 0, READ_FAILURE_PAUSE_THRESHOLD),
+      lastReadErrorCode: CONVERSATION_PAUSE_CODES.has(source.lastReadErrorCode)
+        ? source.lastReadErrorCode
+        : '',
       lastIncomingFingerprint: safeString(source.lastIncomingFingerprint, 1000),
       processedFingerprints: safeStringList(source.processedFingerprints, RECENT_MESSAGE_LIMIT),
       recentMessages: safeStringList(source.recentMessages, RECENT_MESSAGE_LIMIT),
@@ -519,6 +537,11 @@
       delete conversation.activeFingerprint;
       delete conversation.classificationBaseline;
       delete conversation.classificationOriginState;
+    }
+
+    function clearReadFailure(conversation) {
+      conversation.readFailureCount = 0;
+      conversation.lastReadErrorCode = '';
     }
 
     function hasUniquePendingLink(snapshot, conversation, approvalId) {
@@ -803,10 +826,16 @@
         var snapshot = loaded.snapshot;
         var conversation = requireConversation(snapshot, conversationId);
         if (enabled === true) {
-          if (!conversation.enabled) {
+          var retryablePause = conversation.enabled === true &&
+            conversation.state === 'PAUSED' &&
+            RETRYABLE_CONVERSATION_PAUSE_CODES.has(conversation.pauseCode) &&
+            !conversation.pendingApprovalId &&
+            (!conversation.sendIntent || conversation.sendIntent.status !== 'SENDING');
+          if (!conversation.enabled || retryablePause) {
             conversation.enabled = true;
             conversation.state = 'WAITING_HR';
             clearClassificationRecovery(conversation);
+            clearReadFailure(conversation);
             conversation.pauseCode = '';
             conversation.pauseReason = '';
           }
@@ -816,6 +845,7 @@
           conversation.state = 'DISABLED';
           conversation.recentMessages = [];
           clearClassificationRecovery(conversation);
+          clearReadFailure(conversation);
           conversation.pauseCode = '';
           conversation.pauseReason = '';
         }
@@ -1115,6 +1145,7 @@
         }
         conversation.lastIncomingFingerprint = source.baseline;
         clearClassificationRecovery(conversation);
+        clearReadFailure(conversation);
         conversation.lastCheckedAt = loaded.now;
         conversation.updatedAt = loaded.now;
         await persist(snapshot);
@@ -1138,6 +1169,44 @@
         conversation.updatedAt = loaded.now;
         await persist(snapshot);
         return clone(conversation);
+      });
+    }
+
+    // 只读失败没有外部写入，先记账退避；连续失败到阈值或错误本身不可自愈时才暂停。
+    function recordReadFailure(conversationId, code) {
+      return serialized(async function () {
+        if (!CONVERSATION_PAUSE_CODES.has(code)) throw storeError('INVALID_PAUSE_CODE');
+        var loaded = await load();
+        var snapshot = loaded.snapshot;
+        var conversation = requireConversation(snapshot, conversationId);
+        if (conversation.sendIntent && conversation.sendIntent.status === 'SENDING') {
+          throw storeError('INVALID_STATE_TRANSITION');
+        }
+        var deferrable = RETRYABLE_CONVERSATION_PAUSE_CODES.has(code) &&
+          conversation.enabled === true &&
+          (conversation.state === 'WAITING_HR' || conversation.state === 'WAITING_CONFIRMATION');
+        conversation.lastReadErrorCode = code;
+        conversation.readFailureCount = Math.min(
+          READ_FAILURE_PAUSE_THRESHOLD,
+          conversation.readFailureCount + 1
+        );
+        var paused = !deferrable ||
+          conversation.readFailureCount >= READ_FAILURE_PAUSE_THRESHOLD;
+        if (paused) {
+          conversation.state = 'PAUSED';
+          conversation.pauseCode = code;
+          conversation.pauseReason = '';
+          clearClassificationRecovery(conversation);
+        }
+        conversation.updatedAt = loaded.now;
+        await persist(snapshot);
+        return {
+          conversationId: conversation.conversationId,
+          code: code,
+          paused: paused,
+          readFailureCount: conversation.readFailureCount,
+          retryLimit: READ_FAILURE_PAUSE_THRESHOLD
+        };
       });
     }
 
@@ -1252,6 +1321,7 @@
         conversation.pauseCode = '';
         conversation.pauseReason = '';
         clearClassificationRecovery(conversation);
+        clearReadFailure(conversation);
         conversation.updatedAt = loaded.now;
         await persist(snapshot);
         return clone(conversation);
@@ -1290,6 +1360,7 @@
       markSendUnknown: markSendUnknown,
       markConversationChecked: markConversationChecked,
       pauseConversation: pauseConversation,
+      recordReadFailure: recordReadFailure,
       resolveApprovalWithoutSend: resolveApprovalWithoutSend,
       recordNotificationAttempt: recordNotificationAttempt,
       resetConversation: resetConversation,

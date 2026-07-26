@@ -773,7 +773,7 @@ test('scheduled cycle and SAVE_API_CONFIG obey both controller queue orders', as
 });
 
 test('alarm uses the internal scheduled entry and paused save clears the alarm', async () => {
-  const h = harness();
+  const h = harness({ initialTrusteeshipEnabled: true });
   await h.settle();
   h.calls.controllerHandle = 0;
   h.calls.scheduled = 0;
@@ -794,7 +794,7 @@ test('alarm uses the internal scheduled entry and paused save clears the alarm',
     type: 'TRUSTEESHIP_SAVE_SETTINGS',
     settings: { enabled: false }
   }, h.trustedSender);
-  assert.deepEqual(h.calls.alarmsClear, ['boss-ai-chat-monitor', 'boss-ai-chat-monitor']);
+  assert.deepEqual(h.calls.alarmsClear, ['boss-ai-chat-monitor']);
 });
 
 test('TEST_API succeeds only for an explicit nonempty ok protocol response', async () => {

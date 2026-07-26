@@ -20,9 +20,21 @@
     'BOSS_BLOCKED',
     'TARGET_UNCERTAIN',
     'SELECTOR_UNAVAILABLE',
+    'MESSAGE_ORDER_UNCERTAIN',
+    'BASELINE_NOT_FOUND',
+    'BASELINE_REQUIRED',
+    'CONTENT_SCRIPT_UNAVAILABLE',
     'PEER_ID_UNRESOLVED',
     'PEER_LIST_UNAVAILABLE'
   ];
+  var BOSS_CHAT_TAB_PATTERN = 'https://*.zhipin.com/web/geek/chat*';
+  // 与 ConversationStore.READ_FAILURE_PAUSE_THRESHOLD 对应，仅用于向侧栏投影重试进度。
+  var READ_FAILURE_RETRY_LIMIT = 3;
+  // 复用用户标签失败若属于环境问题，仍回退到本轮独占的临时标签再试一次。
+  var TAB_FALLBACK_CODES = new Set([
+    'CONTENT_SCRIPT_UNAVAILABLE',
+    'CONVERSATION_UNAVAILABLE'
+  ]);
   var RESOLVE_CODES = [
     'SEND_RESULT_UNKNOWN', 'CONVERSATION_NOT_REGISTERED', 'TARGET_UNCERTAIN',
     'CONVERSATION_UNAVAILABLE', 'LOGIN_REQUIRED', 'BOSS_BLOCKED',
@@ -38,6 +50,9 @@
     'SELECTOR_UNAVAILABLE',
     'SEND_RESULT_UNKNOWN',
     'MESSAGE_ORDER_UNCERTAIN',
+    'BASELINE_NOT_FOUND',
+    'BASELINE_REQUIRED',
+    'CONTENT_SCRIPT_UNAVAILABLE',
     'CONVERSATION_UNAVAILABLE',
     'RECOVERY_STATE_UNCERTAIN',
     'UNKNOWN_PROCESSING_FAILURE'
@@ -408,25 +423,57 @@
       return tab;
     }
 
-    async function ensureContentReady(tabId, assertLease) {
-      await requireOwnedInactiveTab(tabId, assertLease);
+    async function ensureContentReady(tabId, assertLease, requireInactive) {
+      async function requireOwnership() {
+        if (requireInactive === false) return;
+        await requireOwnedInactiveTab(tabId, assertLease);
+      }
+      await requireOwnership();
       var ping = null;
       try {
         ping = await sendMessage(tabId, { type: 'PING' }, assertLease);
       } catch (_) {}
       if (!ping || ping.ok !== true || ping.page !== 'chat') {
-        await requireOwnedInactiveTab(tabId, assertLease);
+        await requireOwnership();
         assertLeaseCurrent(assertLease);
         await callChrome(chromeApi, chromeApi.scripting, 'executeScript', [{
           target: { tabId: tabId },
           files: CONTENT_FILES.slice()
         }]);
-        await requireOwnedInactiveTab(tabId, assertLease);
+        await requireOwnership();
         ping = await sendMessage(tabId, { type: 'PING' }, assertLease);
       }
       if (!ping || ping.ok !== true || ping.page !== 'chat') {
-        throw new Error('CONTENT_SCRIPT_UNAVAILABLE');
+        var error = new Error('CONTENT_SCRIPT_UNAVAILABLE');
+        error.code = 'CONTENT_SCRIPT_UNAVAILABLE';
+        throw error;
       }
+    }
+
+    // 只读检查在页面里只发一次同源历史消息请求，不点击列表、不切换会话、不改动 DOM。
+    // 因此可以直接复用用户已经打开的 Boss 聊天页，省掉每个会话一次的 SPA 冷启动；
+    // 发送路径不走这里，仍然只使用本轮独占的 inactive 临时标签。
+    async function findReusableChatTab(assertLease) {
+      assertLeaseCurrent(assertLease);
+      var tabs;
+      try {
+        tabs = await callChrome(chromeApi, chromeApi.tabs, 'query', [{
+          url: BOSS_CHAT_TAB_PATTERN
+        }]);
+      } catch (_) {
+        return null;
+      }
+      if (!Array.isArray(tabs)) return null;
+      for (var index = 0; index < tabs.length; index += 1) {
+        var tab = tabs[index];
+        if (tab &&
+          Number.isFinite(tab.id) &&
+          tab.status === 'complete' &&
+          isBossChatTabUrl(tab.url)) {
+          return tab.id;
+        }
+      }
+      return null;
     }
 
     async function withConversationTab(conversation, operation, assertLease) {
@@ -455,6 +502,8 @@
           null,
           error && error.code === 'TAB_OWNERSHIP_LOST'
             ? 'TARGET_UNCERTAIN'
+            : error && READER_CODES.indexOf(error.code) !== -1
+              ? error.code
             : 'CONVERSATION_UNAVAILABLE'
         );
       } finally {
@@ -466,38 +515,64 @@
       }
     }
 
+    async function requestRead(tabId, conversation, assertLease, requireOwned) {
+      var response;
+      try {
+        if (requireOwned) await requireOwned(tabId);
+        response = await sendMessage(tabId, {
+          type: 'READ_ACTIVE_CONVERSATION',
+          expected: expectedIdentity(conversation),
+          conversationRef: {
+            conversationId: conversation.conversationId,
+            url: conversation.url,
+            aliases: Array.isArray(conversation.aliases) ? conversation.aliases.slice(0, 8) : []
+          },
+          lastFingerprint: typeof conversation.lastIncomingFingerprint === 'string'
+            ? conversation.lastIncomingFingerprint
+            : ''
+        }, assertLease);
+      } catch (error) {
+        if (error && error.code === 'API_PROOF_STALE') throw error;
+        return mappedReaderFailure(null, 'CONTENT_SCRIPT_UNAVAILABLE');
+      }
+      if (!response || response.success !== true) {
+        return mappedReaderFailure(response, 'CONVERSATION_UNAVAILABLE');
+      }
+      return {
+        success: true,
+        conversationRef: clone(response.conversationRef),
+        messages: Array.isArray(response.messages) ? clone(response.messages) : [],
+        baseline: typeof response.baselineIncomingFingerprint === 'string'
+          ? response.baselineIncomingFingerprint
+          : null
+      };
+    }
+
+    async function readInReusedTab(tabId, conversation, assertLease) {
+      try {
+        await ensureContentReady(tabId, assertLease, false);
+      } catch (error) {
+        if (error && error.code === 'API_PROOF_STALE') throw error;
+        return mappedReaderFailure(null, 'CONTENT_SCRIPT_UNAVAILABLE');
+      }
+      return requestRead(tabId, conversation, assertLease, null);
+    }
+
     async function read(conversation, assertLease) {
-      return withConversationTab(conversation, async function (tabId, requireOwned) {
-        var response;
-        try {
-          await requireOwned(tabId);
-          response = await sendMessage(tabId, {
-            type: 'READ_ACTIVE_CONVERSATION',
-            expected: expectedIdentity(conversation),
-            conversationRef: {
-              conversationId: conversation.conversationId,
-              url: conversation.url,
-              aliases: Array.isArray(conversation.aliases) ? conversation.aliases.slice(0, 8) : []
-            },
-            lastFingerprint: typeof conversation.lastIncomingFingerprint === 'string'
-              ? conversation.lastIncomingFingerprint
-              : ''
-          }, assertLease);
-        } catch (error) {
-          if (error && error.code === 'API_PROOF_STALE') throw error;
-          return mappedReaderFailure(null, 'CONVERSATION_UNAVAILABLE');
+      if (!safeConversationUrl(conversation && conversation.url, conversation && conversation.conversationId)) {
+        return mappedReaderFailure(null, 'TARGET_UNCERTAIN');
+      }
+      var reusableTabId = await findReusableChatTab(assertLease);
+      if (reusableTabId !== null) {
+        var reused = await readInReusedTab(reusableTabId, conversation, assertLease);
+        // 复用失败只可能是环境问题（标签被关闭、脚本未就绪）；语义结果一律直接返回，
+        // 不用临时标签重放一次已经明确的失败。
+        if (reused.success === true || !TAB_FALLBACK_CODES.has(reused.errorCode)) {
+          return reused;
         }
-        if (!response || response.success !== true) {
-          return mappedReaderFailure(response, 'CONVERSATION_UNAVAILABLE');
-        }
-        return {
-          success: true,
-          conversationRef: clone(response.conversationRef),
-          messages: Array.isArray(response.messages) ? clone(response.messages) : [],
-          baseline: typeof response.baselineIncomingFingerprint === 'string'
-            ? response.baselineIncomingFingerprint
-            : null
-        };
+      }
+      return withConversationTab(conversation, function (tabId, requireOwned) {
+        return requestRead(tabId, conversation, assertLease, requireOwned);
       }, assertLease);
     }
 
@@ -674,6 +749,9 @@
         return typeof item === 'string' && /^[A-Za-z0-9_~-]{1,128}$/.test(item);
       }).slice(0, 8)
       : [];
+    var readFailureCount = Number.isSafeInteger(source.readFailureCount) && source.readFailureCount > 0
+      ? Math.min(source.readFailureCount, READ_FAILURE_RETRY_LIMIT)
+      : 0;
     return {
       conversationId: typeof source.conversationId === 'string' ? source.conversationId : '',
       jobId: typeof source.jobId === 'string' ? source.jobId : '',
@@ -690,6 +768,10 @@
       pauseCode: safePauseCode(source.pauseCode),
       lastCheckedAt: Number.isSafeInteger(source.lastCheckedAt) && source.lastCheckedAt >= 0
         ? source.lastCheckedAt : 0,
+      readFailureCount: readFailureCount,
+      readRetryLimit: READ_FAILURE_RETRY_LIMIT,
+      // 没有累计失败时不投影错误码，避免侧栏显示一个已经不适用的原因。
+      lastReadErrorCode: readFailureCount > 0 ? safePauseCode(source.lastReadErrorCode) : '',
       updatedAt: Number.isSafeInteger(source.updatedAt) && source.updatedAt >= 0
         ? source.updatedAt : 0
     };
@@ -864,6 +946,14 @@
       var current = await readCurrentPrerequisites();
       if (current.missing.length === 0) return null;
       return prerequisiteFailureUnsafe(current.missing, false);
+    }
+
+    async function checkRunningStateUnsafe() {
+      var snapshot = await store.getSnapshot();
+      var settings = snapshot.conversationTrusteeship || {};
+      if (settings.enabled === true && settings.paused !== true) return null;
+      await reconcileAlarmUnsafe();
+      return safeError('TRUSTEESHIP_NOT_RUNNING');
     }
 
     async function saveSettings(message) {
@@ -1140,11 +1230,84 @@
         conversation.conversationId
       );
       if (!url) return safeError('CONVERSATION_NOT_REGISTERED');
-      var tab = await callChrome(chromeApi, chromeApi.tabs, 'create', [{
-        url: url,
-        active: true
-      }]);
-      return { ok: true, tabId: tab && tab.id };
+      var tabs = [];
+      try {
+        tabs = await callChrome(chromeApi, chromeApi.tabs, 'query', [{
+          active: true,
+          lastFocusedWindow: true
+        }]);
+      } catch (_) {}
+      var candidates = Array.isArray(tabs)
+        ? tabs.filter(function (item) {
+          return item && Number.isFinite(item.id) && isBossChatTabUrl(item.url);
+        })
+        : [];
+      if (!candidates.length) {
+        try {
+          tabs = await callChrome(chromeApi, chromeApi.tabs, 'query', [{
+            url: BOSS_CHAT_TAB_PATTERN
+          }]);
+        } catch (_) {
+          tabs = [];
+        }
+        candidates = Array.isArray(tabs)
+          ? tabs.filter(function (item) {
+            return item && Number.isFinite(item.id) && isBossChatTabUrl(item.url);
+          })
+          : [];
+      }
+      var tab = candidates.find(function (item) { return item.active === true; }) ||
+        candidates[0] ||
+        null;
+      try {
+        if (!tab) {
+          tab = await callChrome(chromeApi, chromeApi.tabs, 'create', [{
+            url: url,
+            active: true
+          }]);
+          if (!tab || !Number.isFinite(tab.id)) {
+            return safeError('CONVERSATION_UNAVAILABLE');
+          }
+          await defaultWaitForTabComplete(chromeApi, tab.id, 30000);
+        } else {
+          await callChrome(chromeApi, chromeApi.tabs, 'update', [
+            tab.id,
+            { active: true }
+          ]);
+        }
+      } catch (_) {
+        return safeError('CONVERSATION_UNAVAILABLE');
+      }
+      try {
+        await ensureActiveChatContent(tab.id);
+      } catch (_) {
+        return safeError('CONTENT_SCRIPT_UNAVAILABLE');
+      }
+      var response;
+      try {
+        response = await callChrome(chromeApi, chromeApi.tabs, 'sendMessage', [tab.id, {
+          type: 'OPEN_MANAGED_CONVERSATION',
+          expected: expectedIdentity(conversation),
+          conversationRef: {
+            conversationId: conversation.conversationId,
+            url: url,
+            aliases: Array.isArray(conversation.aliases)
+              ? conversation.aliases.slice(0, 8)
+              : []
+          }
+        }]);
+      } catch (_) {
+        return safeError('CONTENT_SCRIPT_UNAVAILABLE');
+      }
+      if (!response || response.success !== true ||
+          !response.conversationRef ||
+          response.conversationRef.conversationId !== conversation.conversationId) {
+        var responseCode = response && READER_CODES.indexOf(response.errorCode) !== -1
+          ? response.errorCode
+          : 'TARGET_UNCERTAIN';
+        return safeError(responseCode);
+      }
+      return { ok: true, tabId: tab.id };
     }
 
     async function testFeishu() {
@@ -1213,6 +1376,8 @@
       }
       if (input.type === 'TRUSTEESHIP_OPEN_CONVERSATION') return openConversation(input);
       if (input.type === 'TRUSTEESHIP_RUN_NOW') {
+        var runStateFailure = await checkRunningStateUnsafe();
+        if (runStateFailure) return runStateFailure;
         var runPrerequisiteFailure = await checkCurrentPrerequisitesUnsafe();
         if (runPrerequisiteFailure) return runPrerequisiteFailure;
         try {
@@ -1230,6 +1395,8 @@
       },
       runScheduledCycle: function () {
         return serialized(async function () {
+          var runningFailure = await checkRunningStateUnsafe();
+          if (runningFailure) return runningFailure;
           var prerequisiteFailure = await checkCurrentPrerequisitesUnsafe();
           if (prerequisiteFailure) return prerequisiteFailure;
           try {

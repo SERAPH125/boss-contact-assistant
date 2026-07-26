@@ -160,6 +160,7 @@ function stableTrusteeshipError(code) {
   const messages = {
     MISSING_PREREQUISITE: '请补全开启托管所需配置',
     TRUSTEESHIP_PREREQUISITE_FAILED: '请补全开启托管所需配置',
+    TRUSTEESHIP_NOT_RUNNING: '请先开启 AI 对话托管并保存设置',
     API_CONFIG_NOT_VERIFIED: '请先测试 API 配置',
     FEISHU_CONFIG_INVALID: '请检查飞书通知配置',
     RISK_NOT_ACCEPTED: '请先确认平台风险提示',
@@ -452,6 +453,8 @@ function setManagedConversationEnabled(conversationId, enabled) {
 function renderManagedConversations(conversations) {
   const container = $('managedConversations');
   if (!container) return;
+  const heading = $('managedConversationsHeading');
+  if (heading) heading.textContent = '已登记岗位（' + conversations.length + '）';
   container.replaceChildren();
   if (!conversations.length) {
     const empty = document.createElement('p');
@@ -467,7 +470,7 @@ function renderManagedConversations(conversations) {
     title.textContent = (conversation.company || '未知公司') + ' · ' + (conversation.position || '未知岗位');
     const details = document.createElement('p');
     details.className = 'managed-meta';
-    details.textContent = 'HR：' + (conversation.hrName || '未知') + '｜状态：' + managedStateText(conversation.state) + (conversation.pauseCode ? '｜' + pauseText(conversation.pauseCode) : '') + '｜' + lastCheckedText(conversation.lastCheckedAt);
+    details.textContent = 'HR：' + (conversation.hrName || '未知') + '｜状态：' + managedStateText(conversation.state) + (conversation.pauseCode ? '｜' + pauseText(conversation.pauseCode) : '') + readRetryText(conversation) + '｜' + lastCheckedText(conversation.lastCheckedAt);
     const label = document.createElement('label');
     label.className = 'check-row';
     const input = document.createElement('input');
@@ -494,6 +497,38 @@ function renderManagedConversations(conversations) {
     });
     const actions = document.createElement('div');
     actions.className = 'managed-actions';
+    if (conversation.state === 'PAUSED' &&
+        ['CONVERSATION_UNAVAILABLE', 'SELECTOR_UNAVAILABLE', 'CONTENT_SCRIPT_UNAVAILABLE'].includes(conversation.pauseCode)) {
+      const retry = document.createElement('button');
+      retry.type = 'button';
+      retry.className = 'btn-ghost';
+      retry.textContent = '重试托管';
+      retry.addEventListener('click', async () => {
+        retry.disabled = true;
+        try {
+          const result = await sendRuntimeMessage({
+            type: 'TRUSTEESHIP_SET_CONVERSATION',
+            conversationId: conversation.conversationId,
+            enabled: true
+          });
+          if (!result || result.ok !== true) {
+            setTrusteeshipMessage(
+              '恢复失败：' + stableTrusteeshipError(result && (result.code || result.errorCode))
+            );
+            retry.disabled = false;
+            return;
+          }
+          setTrusteeshipMessage('已恢复该岗位托管，可再次立即检查。');
+          await refreshTrusteeshipState();
+        } catch (_) {
+          setTrusteeshipMessage(
+            '恢复失败：' + stableTrusteeshipError('SERVICE_WORKER_INTERRUPTED')
+          );
+          retry.disabled = false;
+        }
+      });
+      actions.append(retry);
+    }
     const open = document.createElement('button');
     open.type = 'button';
     open.className = 'btn-ghost';
@@ -566,13 +601,41 @@ function managedStateText(state) {
 }
 
 function pauseText(code) {
-  const map = { SEND_RESULT_UNKNOWN: '发送结果未知，请人工核对', RECOVERY_STATE_UNCERTAIN: '恢复状态无法确认，请人工核对后重新开启此岗位托管', UNKNOWN_PROCESSING_FAILURE: '处理状态异常，请人工核对后重试', LOGIN_REQUIRED: '需要重新登录 Boss', BOSS_BLOCKED: 'Boss 页面已阻止操作', TARGET_UNCERTAIN: '目标会话无法确认', SELECTOR_UNAVAILABLE: '页面结构暂不可用', CONVERSATION_UNAVAILABLE: '会话暂不可用' };
+  const map = { SEND_RESULT_UNKNOWN: '发送结果未知，请人工核对', RECOVERY_STATE_UNCERTAIN: '恢复状态无法确认，请人工核对后重新开启此岗位托管', UNKNOWN_PROCESSING_FAILURE: '处理状态异常，请人工核对后重试', LOGIN_REQUIRED: '需要重新登录 Boss', BOSS_BLOCKED: 'Boss 页面已阻止操作', TARGET_UNCERTAIN: '目标会话无法确认', SELECTOR_UNAVAILABLE: '页面结构暂不可用', MESSAGE_ORDER_UNCERTAIN: 'Boss 消息结构发生变化，已停止自动回复，请人工核对', BASELINE_NOT_FOUND: '历史消息基线已失效，请打开目标会话并重新登记', BASELINE_REQUIRED: '登记消息基线缺失，请打开目标会话并重新登记', CONTENT_SCRIPT_UNAVAILABLE: '后台页面脚本未就绪，请重试托管', CONVERSATION_UNAVAILABLE: '会话暂不可用' };
   return map[code] || '已暂停，需要人工核对';
+}
+
+function readRetryText(conversation) {
+  const count = Number.isSafeInteger(conversation.readFailureCount)
+    ? conversation.readFailureCount
+    : 0;
+  if (count <= 0 || conversation.state === 'PAUSED') return '';
+  const limit = Number.isSafeInteger(conversation.readRetryLimit) && conversation.readRetryLimit > 0
+    ? conversation.readRetryLimit
+    : 3;
+  return '｜上次检查失败（' + pauseText(conversation.lastReadErrorCode) +
+    '），第 ' + count + '/' + limit + ' 次，下轮自动重试';
 }
 
 function lastCheckedText(value) {
   if (!Number.isSafeInteger(value) || value <= 0) return '最近检查：暂无记录';
   return '最近检查：' + new Date(value).toLocaleString('zh-CN', { hour12: false });
+}
+
+function trusteeshipRunMessage(response) {
+  const summary = response && response.summary && typeof response.summary === 'object'
+    ? response.summary
+    : null;
+  if (!summary) return '本轮检查已完成。';
+  const count = (value) => Number.isSafeInteger(value) && value >= 0 ? value : 0;
+  const checked = count(summary.checked);
+  if (Array.isArray(summary.errors) && summary.errors.length > 0) {
+    return '检查未全部完成：成功检查 ' + checked + ' 个；请查看下方岗位的失败原因，可自动重试的会在下一轮继续。';
+  }
+  return '本轮检查已完成：检查 ' + checked +
+    ' 个，新消息 ' + count(summary.newMessages) +
+    ' 条，待确认 ' + count(summary.pending) +
+    ' 条，自动回复 ' + count(summary.autoSent) + ' 条。';
 }
 
 function approvalStageText(stage) {
@@ -946,7 +1009,9 @@ $('btnRunTrusteeshipNow').addEventListener('click', async () => {
   setTrusteeshipMessage('正在检查已登记岗位…');
   try {
     const response = await sendRuntimeMessage({ type: 'TRUSTEESHIP_RUN_NOW' });
-    setTrusteeshipMessage(response && response.ok === true ? '本轮检查已完成。' : '无法开始检查：' + stableTrusteeshipError(response && response.code));
+    setTrusteeshipMessage(response && response.ok === true
+      ? trusteeshipRunMessage(response)
+      : '无法开始检查：' + stableTrusteeshipError(response && response.code));
     if (response && response.ok === true) await refreshTrusteeshipState();
   } catch (_) {
     setTrusteeshipMessage('无法开始检查：' + stableTrusteeshipError('SERVICE_WORKER_INTERRUPTED'));

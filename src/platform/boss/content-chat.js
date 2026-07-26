@@ -365,8 +365,8 @@
     );
   }
 
-  // 现网活动会话常无 DOM dataset；仅唯一、同源、精确路径的 historyMsg
-  // 请求可作为软标识，避免 SPA 资源历史把旧会话误绑为当前会话。
+  // 现网活动会话常无 DOM dataset；用户切换会话后，最新一条同源、精确路径的
+  // historyMsg 请求对应当前会话。旧请求会一直保留在 Performance 记录中。
   function extractBossIdFromHistoryRequests() {
     try {
       if (typeof performance === 'undefined' ||
@@ -374,9 +374,8 @@
         return '';
       }
       const pageOrigin = new URL(location.href || '').origin;
-      const ids = [];
       const entries = performance.getEntriesByType('resource');
-      for (let i = 0; i < entries.length; i++) {
+      for (let i = entries.length - 1; i >= 0; i--) {
         const name = entries[i] && entries[i].name ? String(entries[i].name) : '';
         let resource;
         try {
@@ -393,10 +392,9 @@
         if (values.length !== 1 || !/^[A-Za-z0-9_~-]{1,128}$/.test(values[0])) {
           return '';
         }
-        ids.push(values[0]);
+        return values[0];
       }
-      const unique = Array.from(new Set(ids));
-      return unique.length === 1 ? unique[0] : '';
+      return '';
     } catch (_) {}
     return '';
   }
@@ -456,7 +454,10 @@
     const pageOnlyRef = BossConversationReader.extractConversationRef({
       pageUrl: location.href || ''
     });
-    const softId = (pageOnlyRef && pageOnlyRef.conversationId) || historyBossId || '';
+    const pageConversationId = pageOnlyRef && pageOnlyRef.conversationId
+      ? pageOnlyRef.conversationId
+      : '';
+    const softId = pageConversationId || historyBossId || '';
     const ownedByRelation = hasOwnedRelation(
       link, activeItem, container, activeIds, containerIds
     );
@@ -491,9 +492,17 @@
     if (containerIds.some((item) => item.value !== ref.conversationId)) {
       return targetFailure('消息容器标识与活动会话不一致');
     }
+    const conversationCandidateIds = typeof BossPeerIdentity !== 'undefined'
+      ? BossPeerIdentity.uniqueIds(
+        [ref.conversationId, historyBossId, pageConversationId]
+          .concat(activeIds.map((item) => item.value))
+          .concat(containerIds.map((item) => item.value))
+      )
+      : [ref.conversationId];
     return {
       success: true,
       conversationRef: ref,
+      conversationCandidateIds: conversationCandidateIds,
       scope: {
         link: link,
         activeItem: activeItem,
@@ -557,10 +566,15 @@
         conversationId: wanted.conversationId,
         aliases: wanted.aliases || []
       };
-      const activeId = active.conversationRef.conversationId;
-      const matched = typeof BossPeerIdentity !== 'undefined'
-        ? BossPeerIdentity.matchesManagedIdentity(activeId, managed)
-        : activeId === wanted.conversationId;
+      const candidateIds = Array.isArray(active.conversationCandidateIds) &&
+        active.conversationCandidateIds.length
+        ? active.conversationCandidateIds
+        : [active.conversationRef.conversationId];
+      const matched = candidateIds.some((activeId) =>
+        typeof BossPeerIdentity !== 'undefined'
+          ? BossPeerIdentity.matchesManagedIdentity(activeId, managed)
+          : activeId === wanted.conversationId
+      );
       if (!matched) {
         return targetFailure('当前活动会话与登记会话标识不一致，已停止托管操作');
       }
@@ -625,15 +639,37 @@
         error: '无法读取 Boss 好友列表以确认稳定会话标识'
       };
     }
-    const resolved = BossPeerIdentity.resolvePeerIdentity({
-      domIds: [active.conversationRef.conversationId],
-      friends: list.friends,
-      origin: location.origin || 'https://www.zhipin.com'
+    const candidateIds = BossPeerIdentity.uniqueIds(
+      [active.conversationRef.conversationId]
+        .concat(active.conversationCandidateIds || [])
+    );
+    const resolvedCandidates = [];
+    candidateIds.forEach((candidateId) => {
+      const candidate = BossPeerIdentity.resolvePeerIdentity({
+        domIds: [candidateId],
+        friends: list.friends,
+        origin: location.origin || 'https://www.zhipin.com'
+      });
+      if (!candidate.ok) return;
+      if (resolvedCandidates.some((item) => item.peerId === candidate.peerId)) return;
+      resolvedCandidates.push(candidate);
     });
-    if (!resolved.ok) {
+    let resolved = resolvedCandidates[0] || null;
+    if (resolvedCandidates.length > 1) {
+      const activeText = scopedConversationText(active.scope);
+      const matching = resolvedCandidates.filter((candidate) =>
+        MessageSend.matchesExpectedConversation(activeText, {
+          hrName: candidate.matchedName || '',
+          company: candidate.matchedCompany || '',
+          name: candidate.matchedPosition || ''
+        })
+      );
+      resolved = matching.length === 1 ? matching[0] : null;
+    }
+    if (!resolved) {
       return {
         success: false,
-        errorCode: resolved.errorCode || 'PEER_ID_UNRESOLVED',
+        errorCode: 'PEER_ID_UNRESOLVED',
         targetUncertain: true,
         error: '无法将当前会话对齐到稳定的 encryptUid'
       };
@@ -646,110 +682,144 @@
         aliases: resolved.aliases
       },
       peerSource: resolved.peerSource,
-      domId: active.conversationRef.conversationId,
+      domId: resolved.peerId,
       matchedName: resolved.matchedName || '',
       matchedCompany: resolved.matchedCompany || '',
       matchedPosition: resolved.matchedPosition || ''
     };
   }
 
-  function readStableTime(element) {
-    if (!element) return null;
-    const raw = element.getAttribute('data-time') || element.getAttribute('datetime') || '';
-    if (/^\d{10,16}$/.test(raw)) return Number(raw);
-    if (/^\d{4}-\d{2}-\d{2}T/.test(raw)) {
-      const parsed = Date.parse(raw);
-      if (Number.isFinite(parsed)) return parsed;
+  // 岗位卡与系统通知不属于对话正文，排除后不参与基线与游标。
+  const HISTORY_SYSTEM_BODY_TYPES = new Set([8, 16]);
+
+  function safeHistoryMessageId(value) {
+    if (typeof value === 'number' && Number.isSafeInteger(value) && value >= 0) {
+      return String(value);
+    }
+    if (typeof value === 'string' && BossConversationReader.ID_RE.test(value)) {
+      return value;
+    }
+    return '';
+  }
+
+  // 历史接口的 mid/time 在协议里都是 int64；protobufjs 系实现会把它们序列化成字符串。
+  function safeHistoryTime(value) {
+    if (typeof value === 'number' && Number.isSafeInteger(value) && value >= 0) {
+      return value;
+    }
+    if (typeof value === 'string' && /^[0-9]{1,15}$/.test(value)) {
+      const parsed = Number(value);
+      if (Number.isSafeInteger(parsed) && parsed >= 0) return parsed;
     }
     return null;
   }
 
-  function readStrictMessages(scope) {
-    const fields = ['messageList', 'messageItem', 'messageIncoming', 'messageOutgoing', 'messageText', 'messageTime'];
-    for (const field of fields) {
-      if (typeof SELECTORS.chat[field] !== 'string' || !SELECTORS.chat[field]) {
-        return selectorFailure('消息读取选择器不可用：' + field);
-      }
+  function safeHistoryDiagnosticValue(value) {
+    if (typeof value === 'number' && Number.isSafeInteger(value)) return String(value);
+    if (typeof value === 'boolean') return String(value);
+    if (typeof value === 'string' && /^[A-Za-z0-9_-]{1,16}$/.test(value)) {
+      return 'string:' + value;
     }
+    if (value === null) return 'null';
+    return typeof value;
+  }
 
-    let nodes;
+  // 游标字段只回传形状，不回传标识本身。
+  function cursorFieldShape(value) {
+    if (value === null) return 'null';
+    if (typeof value === 'number') {
+      return Number.isSafeInteger(value) ? 'safe-int' : 'unsafe-number';
+    }
+    if (typeof value === 'string') {
+      return /^[0-9]{1,15}$/.test(value) ? 'digits' : 'string';
+    }
+    return typeof value;
+  }
+
+  function historyMessageShape(message) {
+    if (!message || typeof message !== 'object') return 'message=' + typeof message;
+    const body = message.body && typeof message.body === 'object'
+      ? message.body
+      : {};
+    return 'type=' + safeHistoryDiagnosticValue(message.type) +
+      ', body.type=' + safeHistoryDiagnosticValue(body.type) +
+      ', received=' + safeHistoryDiagnosticValue(message.received) +
+      ', mid=' + cursorFieldShape(message.mid) +
+      ', time=' + cursorFieldShape(message.time);
+  }
+
+  async function readHistoryMessages(conversationId) {
+    if (typeof conversationId !== 'string' ||
+        !BossConversationReader.ID_RE.test(conversationId)) {
+      return targetFailure('当前活动会话缺少可靠的历史消息标识');
+    }
+    let response;
+    let data;
     try {
-      nodes = Array.from(scope.container.querySelectorAll(SELECTORS.chat.messageItem));
-    } catch (e) {
-      return selectorFailure('消息列表选择器不可用');
+      const params = new URLSearchParams({
+        bossId: conversationId,
+        maxMsgId: '0',
+        c: '20',
+        page: '1',
+        src: '0'
+      });
+      response = await fetch('/wapi/zpchat/geek/historyMsg?' + params.toString(), {
+        cache: 'no-store',
+        credentials: 'include',
+        headers: { Accept: 'application/json' }
+      });
+      if (!response.ok) {
+        return messageOrderFailure('Boss 历史消息接口不可用，已停止读取');
+      }
+      data = await response.json();
+    } catch (_) {
+      return messageOrderFailure('Boss 历史消息接口不可用，已停止读取');
     }
-    if (!nodes.length) return selectorFailure('未找到目标会话消息列表');
+    if (!data || data.code !== 0 || !data.zpData ||
+        !Array.isArray(data.zpData.messages)) {
+      return messageOrderFailure('Boss 历史消息响应无法确认，已停止读取');
+    }
 
-    let hasUnclassifiedNode = false;
-    const rawItems = nodes.slice(-200).map((node) => {
-      let incoming = false;
-      let outgoing = false;
-      try {
-        incoming = node.matches(SELECTORS.chat.messageIncoming);
-        outgoing = node.matches(SELECTORS.chat.messageOutgoing);
-      } catch (e) {
-        hasUnclassifiedNode = true;
+    // 顶层 type 的口径在各公开实现之间并不一致（一处记为 3=普通/4=系统，另一处记为
+    // 1=文本…5=系统），因此它只作为诊断标量，不再当作判据。方向由布尔 received 决定，
+    // 游标由 mid/time 决定，正文种类由 body.type 决定；无法归类的正文降级为非文本，
+    // 由上层策略强制人工确认，而不是让整批读取失败关闭。
+    let hasUntrackableMessage = false;
+    let untrackableShape = '';
+    const rawItems = data.zpData.messages.slice(0, 200).reverse().map((message) => {
+      if (!message || typeof message !== 'object') return null;
+      if (message.type === 4) return null;
+      if (typeof message.received !== 'boolean') return null;
+      const body = message.body && typeof message.body === 'object'
+        ? message.body
+        : {};
+      const bodyType = Number(body.type);
+      if (!Number.isFinite(bodyType) || HISTORY_SYSTEM_BODY_TYPES.has(bodyType)) return null;
+      const id = safeHistoryMessageId(message.mid);
+      const at = safeHistoryTime(message.time);
+      if (!id && at === null) {
+        hasUntrackableMessage = true;
+        if (!untrackableShape) untrackableShape = historyMessageShape(message);
         return null;
       }
-      if (incoming === outgoing) {
-        hasUnclassifiedNode = true;
-        return null;
-      }
-
-      let textElement = null;
-      let timeElement = null;
-      try {
-        textElement = node.querySelector(SELECTORS.chat.messageText);
-        timeElement = node.querySelector(SELECTORS.chat.messageTime);
-      } catch (e) {
-        hasUnclassifiedNode = true;
-        return null;
-      }
-      const explicitKind = node.dataset && node.dataset.kind;
-      const kind = explicitKind || (textElement ? 'text' : '');
-      let messageId = '';
-      try {
-        if (node.dataset) {
-          messageId = node.dataset.messageId || node.dataset.mid ||
-            node.dataset.msgId || node.dataset.id || '';
-        }
-        if (!messageId && node.getAttribute) {
-          messageId = node.getAttribute('data-mid') ||
-            node.getAttribute('data-msg-id') ||
-            node.getAttribute('data-message-id') || '';
-        }
-      } catch (_) {
-        messageId = '';
-      }
+      const text = bodyType === 1 && typeof body.text === 'string' ? body.text : '';
+      const isText = bodyType === 1 && text.trim() !== '';
       return {
-        id: typeof messageId === 'string' ? messageId : '',
-        direction: incoming ? 'incoming' : 'outgoing',
-        kind: kind,
-        text: textElement ? (textElement.textContent || '') : '',
-        at: readStableTime(timeElement)
+        id: id,
+        direction: message.received ? 'incoming' : 'outgoing',
+        kind: isText ? 'text' : 'attachment',
+        text: isText ? text : '',
+        at: at
       };
     }).filter(Boolean);
-
-    if (hasUnclassifiedNode) {
-      return messageOrderFailure('存在方向或结构无法确认的历史消息节点，已停止读取');
+    if (hasUntrackableMessage) {
+      return messageOrderFailure(
+        'Boss 历史消息缺少可靠游标（' + untrackableShape + '），已停止读取'
+      );
     }
     const messages = BossConversationReader.normalizeMessages(rawItems);
-    const rawIncomingCount = rawItems.filter((item) =>
-      item.direction === 'incoming'
-    ).length;
-    const reliableIncomingCount = messages.filter((item) =>
-      item.direction === 'incoming'
-    ).length;
-    if (reliableIncomingCount !== rawIncomingCount) {
-      return messageOrderFailure('存在无法建立可靠游标的历史来信，已停止读取');
-    }
-    if (!messages.length) {
-      // 现网常见：消息只有中文相对时间、无 mid/data-time，无法建可靠 cursor；
-      // 只有不存在 incoming 候选时才允许空基线，避免后续把历史来信当成新消息。
-      if (rawItems.length > 0) {
-        return { success: true, messages: [] };
-      }
-      return selectorFailure('消息结构无法可靠识别，已停止读取');
+    if (messages.length !== rawItems.length) {
+      return messageOrderFailure('Boss 历史消息游标无法确认，已停止读取');
     }
     return { success: true, messages: messages };
   }
@@ -764,7 +834,7 @@
   async function captureManagementMetadata(expected) {
     const active = validateManagedTarget(expected);
     if (!active.success) return null;
-    const read = readStrictMessages(active.scope);
+    const read = await readHistoryMessages(active.conversationRef.conversationId);
     if (!read.success) return null;
     const owned = resolveOwnedConversation();
     if (!owned.success) return null;
@@ -883,12 +953,12 @@
     return Object.assign({ success: true, imageOk: imgOk }, metadata || {});
   }
 
-  function getActiveConversationRef(msg) {
+  async function getActiveConversationRef(msg) {
     const preflight = managedPreflight();
     if (preflight) return preflight;
     const active = validateManagedTarget(msg.expected);
     if (!active.success) return active;
-    const read = readStrictMessages(active.scope);
+    const read = await readHistoryMessages(active.conversationRef.conversationId);
     if (!read.success) return read;
     return {
       success: true,
@@ -972,22 +1042,22 @@
     if (preflight) return preflight;
     const active = resolveOwnedConversation();
     if (!active.success) return active;
-    const read = readStrictMessages(active.scope);
-    if (!read.success) return read;
     const identity = extractActiveIdentity(active.scope);
     if (!identity.company && !identity.position && !identity.hrName) {
       return targetFailure('当前会话缺少可识别的岗位/公司/HR 信息，无法登记托管');
     }
     const peer = await resolvePeerFromActive(active);
     if (!peer.success) return peer;
+    const read = await readHistoryMessages(peer.conversationRef.conversationId);
+    if (!read.success) return read;
     return {
       success: true,
       conversationRef: peer.conversationRef,
       peerSource: peer.peerSource || 'encryptUid',
       baselineIncomingFingerprint: lastIncomingFingerprint(read.messages),
-      company: identity.company || peer.matchedCompany || '',
-      position: identity.position || peer.matchedPosition || '',
-      hrName: identity.hrName || peer.matchedName || ''
+      company: peer.matchedCompany || identity.company || '',
+      position: peer.matchedPosition || identity.position || '',
+      hrName: peer.matchedName || identity.hrName || ''
     };
   }
 
@@ -1026,8 +1096,110 @@
     };
   }
 
-  function readActiveConversation(msg) {
-    const preflight = managedBackgroundPreflight();
+  function managedIdentityNeedles(expected) {
+    const source = expected && typeof expected === 'object' ? expected : {};
+    const placeholders = new Set(['未知', '未知公司', '未知岗位']);
+    return [source.company, source.hrName, source.name, source.position]
+      .map((value) => typeof value === 'string'
+        ? value.replace(/\s+/g, '').trim()
+        : '')
+      .filter((value, index, values) =>
+        value &&
+        !placeholders.has(value) &&
+        values.indexOf(value) === index
+      );
+  }
+
+  function uniqueManagedConversationCandidate(expected) {
+    const selector = SELECTORS.chat.userList;
+    const needles = managedIdentityNeedles(expected);
+    if (!selector || !needles.length) return null;
+    let items;
+    try {
+      items = preferInnermostNodes(
+        Array.from(document.querySelectorAll(selector)).filter(isVisible)
+      );
+    } catch (_) {
+      return null;
+    }
+    const requiredMatches = Math.min(2, needles.length);
+    const scored = items.map((item) => {
+      const text = String(item.innerText || item.textContent || '')
+        .replace(/\s+/g, '');
+      return {
+        item: item,
+        score: needles.filter((needle) => text.indexOf(needle) >= 0).length
+      };
+    }).filter((candidate) => candidate.score >= requiredMatches)
+      .sort((left, right) => right.score - left.score);
+    if (!scored.length ||
+        (scored.length > 1 && scored[0].score === scored[1].score)) {
+      return null;
+    }
+    return scored[0].item;
+  }
+
+  // Boss 实号页面不会可靠地通过 ?uid= 直接激活会话；需要在会话列表中点击，
+  // 然后再用 canonical peerId/alias 和 scoped identity 证明打开的是登记目标。
+  async function activateManagedConversation(expected, conversationRef, options) {
+    let active = validateManagedTarget(expected, conversationRef);
+    if (active.success) return active;
+    const maxAttempts = options &&
+      Number.isSafeInteger(options.maxAttempts) &&
+      options.maxAttempts >= 1 &&
+      options.maxAttempts <= 60
+      ? options.maxAttempts
+      : 24;
+
+    await waitVisible([SELECTORS.chat.userList], 8000);
+    const candidate = uniqueManagedConversationCandidate(expected);
+    if (!candidate) return active;
+    if (!await safeClick(candidate)) {
+      return targetFailure('无法激活唯一匹配的登记会话');
+    }
+
+    for (let attempt = 0; attempt < maxAttempts; attempt += 1) {
+      const preflight = options && options.allowVisible === true
+        ? managedPreflight()
+        : managedBackgroundPreflight();
+      if (preflight) return preflight;
+      active = validateManagedTarget(expected, conversationRef);
+      if (active.success) return active;
+      await sleep(350);
+    }
+    return active;
+  }
+
+  async function openManagedConversation(msg) {
+    const preflight = managedPreflight();
+    if (preflight) return preflight;
+    const active = await activateManagedConversation(
+      msg.expected,
+      msg.conversationRef,
+      { allowVisible: true, maxAttempts: 60 }
+    );
+    if (!active.success) return active;
+    return {
+      success: true,
+      conversationRef: active.conversationRef
+    };
+  }
+
+  function verifyStoredConversationRef(conversationRef) {
+    const wanted = sanitizedExpectedRef(conversationRef);
+    if (!wanted) {
+      return targetFailure('登记会话缺少可靠的稳定标识');
+    }
+    return {
+      success: true,
+      conversationRef: wanted
+    };
+  }
+
+  async function readActiveConversation(msg) {
+    // 只读检查不点击列表、不切换会话、不写入任何页面状态，因此不要求独占后台标签；
+    // `document.visibilityState` 是否可见与读取结果无关。独占与接管检测只属于发送路径。
+    const preflight = managedPreflight();
     if (preflight) return preflight;
     if (!Object.prototype.hasOwnProperty.call(msg, 'lastFingerprint') ||
         typeof msg.lastFingerprint !== 'string') {
@@ -1038,9 +1210,12 @@
         error: '增量读取必须提供明确的消息基线'
       };
     }
-    const active = validateManagedTarget(msg.expected, msg.conversationRef);
-    if (!active.success) return active;
-    const read = readStrictMessages(active.scope);
+    // canonical peerId 已在用户登记时通过好友列表建立并由 store 严格保存。
+    // 周期只读直接使用该稳定引用；重复依赖易漂移的好友列表会让历史接口
+    // 仍可用的已登记会话被整批误暂停。页面/身份激活仍只属于发送路径。
+    const peer = verifyStoredConversationRef(msg.conversationRef);
+    if (!peer.success) return peer;
+    const read = await readHistoryMessages(peer.conversationRef.conversationId);
     if (!read.success) return read;
 
     const baseline = msg.lastFingerprint;
@@ -1057,7 +1232,7 @@
     const selected = BossConversationReader.selectNewIncoming(read.messages, baseline);
     return {
       success: true,
-      conversationRef: active.conversationRef,
+      conversationRef: peer.conversationRef,
       messages: selected,
       baselineIncomingFingerprint: selected.length
         ? selected[selected.length - 1].fingerprint
@@ -1132,14 +1307,14 @@
   async function sendManagedReply(msg) {
     const preflight = managedBackgroundPreflight();
     if (preflight) return preflight;
-    const active = validateManagedTarget(msg.expected, msg.conversationRef);
+    const active = await activateManagedConversation(msg.expected, msg.conversationRef);
     if (!active.success) return active;
 
     const draft = typeof msg.draft === 'string' ? msg.draft.trim() : '';
     if (!draft || Array.from(draft).length > 300) {
       return { success: false, errorCode: 'DRAFT_INVALID', error: '托管回复草稿无效' };
     }
-    const beforeRead = readStrictMessages(active.scope);
+    const beforeRead = await readHistoryMessages(active.conversationRef.conversationId);
     if (!beforeRead.success) return beforeRead;
     const beforeOutgoing = new Set(
       beforeRead.messages
@@ -1230,7 +1405,7 @@
     if (!postTarget.success || !sameOwnedScope(active.scope, postTarget.scope)) {
       return unknownSendFailure();
     }
-    const read = readStrictMessages(postTarget.scope);
+    const read = await readHistoryMessages(postTarget.conversationRef.conversationId);
     if (!read.success) return unknownSendFailure();
     const evidence = read.messages.filter((message) =>
       message.direction === 'outgoing' &&
@@ -1270,8 +1445,13 @@
       return true;
     }
     if (msg.type === 'GET_ACTIVE_CONVERSATION_REF') {
-      sendResponse(getActiveConversationRef(msg));
-      return;
+      getActiveConversationRef(msg).then((r) => sendResponse(r)).catch(() => sendResponse({
+        success: false,
+        errorCode: 'MESSAGE_ORDER_UNCERTAIN',
+        messageOrderUncertain: true,
+        error: 'Boss 历史消息读取失败'
+      }));
+      return true;
     }
     if (msg.type === 'CAPTURE_ACTIVE_CONVERSATION') {
       captureActiveConversation().then((r) => sendResponse(r)).catch(() => sendResponse({
@@ -1291,8 +1471,22 @@
       return true;
     }
     if (msg.type === 'READ_ACTIVE_CONVERSATION') {
-      sendResponse(readActiveConversation(msg));
-      return;
+      readActiveConversation(msg).then((r) => sendResponse(r)).catch(() => sendResponse({
+        success: false,
+        errorCode: 'MESSAGE_ORDER_UNCERTAIN',
+        messageOrderUncertain: true,
+        error: 'Boss 历史消息读取失败'
+      }));
+      return true;
+    }
+    if (msg.type === 'OPEN_MANAGED_CONVERSATION') {
+      openManagedConversation(msg).then((r) => sendResponse(r)).catch(() => sendResponse({
+        success: false,
+        errorCode: 'TARGET_UNCERTAIN',
+        targetUncertain: true,
+        error: '无法确认已打开登记会话'
+      }));
+      return true;
     }
     if (msg.type === 'SEND_MANAGED_REPLY') {
       sendManagedReply(msg).then(r => sendResponse(r)).catch(() => sendResponse({

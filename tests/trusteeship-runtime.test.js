@@ -321,6 +321,45 @@ test('safe conversation DTO provides bounded last checked time for the sidepanel
   assert.equal(state.managedConversations['conv-1'].updatedAt, 5678);
 });
 
+test('safe conversation DTO projects read backoff progress so the sidepanel can explain a retry', async () => {
+  const h = controllerHarness({
+    snapshot: {
+      conversationTrusteeship: { enabled: true, paused: false, intervalMinutes: 10 },
+      feishuNotification: {},
+      managedConversations: {
+        'conv-1': conversation({
+          readFailureCount: 2,
+          lastReadErrorCode: 'CONTENT_SCRIPT_UNAVAILABLE'
+        }),
+        'conv-2': conversation({
+          conversationId: 'conv-2',
+          readFailureCount: 0,
+          lastReadErrorCode: 'not-a-real-code'
+        })
+      },
+      pendingApprovals: {}
+    }
+  });
+
+  const state = await h.controller.handleMessage({ type: 'TRUSTEESHIP_GET_STATE' });
+
+  assert.deepEqual(
+    {
+      readFailureCount: state.managedConversations['conv-1'].readFailureCount,
+      readRetryLimit: state.managedConversations['conv-1'].readRetryLimit,
+      lastReadErrorCode: state.managedConversations['conv-1'].lastReadErrorCode
+    },
+    { readFailureCount: 2, readRetryLimit: 3, lastReadErrorCode: 'CONTENT_SCRIPT_UNAVAILABLE' }
+  );
+  assert.deepEqual(
+    {
+      readFailureCount: state.managedConversations['conv-2'].readFailureCount,
+      lastReadErrorCode: state.managedConversations['conv-2'].lastReadErrorCode
+    },
+    { readFailureCount: 0, lastReadErrorCode: '' }
+  );
+});
+
 test('raw persisted pause codes and reasons become stable fallbacks at store and public DTO boundaries', async () => {
   const canary = 'provider-raw-error-CANARY-public-dto';
   const reasonCanary = 'provider-raw-pause-reason-CANARY-public-dto';
@@ -679,18 +718,54 @@ test('run, schedule, and manual resolve reject a stale API proof before entering
     action: 'NO_REPLY'
   });
 
-  for (const result of [run, scheduled, resolved]) {
-    assert.deepEqual(result, {
-      ok: false,
-      code: 'TRUSTEESHIP_PREREQUISITE_FAILED',
-      missing: ['api']
-    });
-  }
+  assert.deepEqual(run, {
+    ok: false,
+    code: 'TRUSTEESHIP_PREREQUISITE_FAILED',
+    missing: ['api']
+  });
+  assert.deepEqual(scheduled, {
+    ok: false,
+    code: 'TRUSTEESHIP_NOT_RUNNING'
+  });
+  assert.deepEqual(resolved, {
+    ok: false,
+    code: 'TRUSTEESHIP_PREREQUISITE_FAILED',
+    missing: ['api']
+  });
   assert.equal(h.calls.run, 0);
   assert.deepEqual(h.calls.resolve, []);
   assert.equal(h.snapshot.conversationTrusteeship.paused, true);
   assert.equal(h.snapshot.conversationTrusteeship.pauseCode, 'PREREQUISITE_CHANGED');
   assert.deepEqual(h.calls.create, []);
+});
+
+test('manual and scheduled checks reject a disabled or paused global trusteeship instead of reporting an empty successful cycle', async () => {
+  for (const settings of [
+    { enabled: false, paused: false, intervalMinutes: 10 },
+    { enabled: true, paused: true, pauseCode: 'PREREQUISITE_CHANGED', intervalMinutes: 10 }
+  ]) {
+    const h = controllerHarness({
+      snapshot: {
+        conversationTrusteeship: settings,
+        feishuNotification: {},
+        managedConversations: { 'conv-1': conversation() },
+        pendingApprovals: {}
+      }
+    });
+
+    const manual = await h.controller.handleMessage({ type: 'TRUSTEESHIP_RUN_NOW' });
+    const scheduled = await h.controller.runScheduledCycle();
+
+    assert.deepEqual(manual, {
+      ok: false,
+      code: 'TRUSTEESHIP_NOT_RUNNING'
+    });
+    assert.deepEqual(scheduled, {
+      ok: false,
+      code: 'TRUSTEESHIP_NOT_RUNNING'
+    });
+    assert.equal(h.calls.run, 0);
+  }
 });
 
 test('API proof invalidation is serialized, pauses globally, and clears alarms despite persistence failure', async () => {
@@ -815,8 +890,7 @@ test('scheduled cycles and API saves are linearized in both queue orders', async
     assert.equal((await save).ok, true);
     assert.deepEqual(await cycle, {
       ok: false,
-      code: 'TRUSTEESHIP_PREREQUISITE_FAILED',
-      missing: ['api']
+      code: 'TRUSTEESHIP_NOT_RUNNING'
     });
     assert.equal(h.calls.run, 0);
   }
@@ -949,10 +1023,112 @@ test('Feishu test is explicit, uses persisted config, and persists only safe tes
   assert.equal(JSON.stringify(result).includes('abc123'), false);
 });
 
-test('page adapter never queries or navigates existing tabs and closes every owned temporary tab', async () => {
+test('page adapter reuses an open Boss chat tab for passive reads and never navigates it', async () => {
+  const calls = { query: 0, update: [], create: [], remove: [], messages: [], inject: [] };
+  const chromeApi = {
+    runtime: { lastError: null },
+    tabs: {
+      async query() {
+        calls.query += 1;
+        return [
+          { id: 1, active: true, url: URL, status: 'complete' },
+          { id: 2, active: false, url: 'https://www.zhipin.com/web/geek/job', status: 'complete' }
+        ];
+      },
+      async update(id, patch) {
+        calls.update.push([id, patch]);
+        return { id, active: false, status: 'complete', ...patch };
+      },
+      async create(options) {
+        calls.create.push(options);
+        return { id: 9, status: 'complete', ...options };
+      },
+      async get(id) { return { id, active: false, status: 'complete', url: URL }; },
+      async remove(id) { calls.remove.push(id); },
+      async sendMessage(id, message) {
+        calls.messages.push([id, message]);
+        if (message.type === 'PING') return { ok: true, page: 'chat' };
+        return {
+          success: true,
+          conversationRef: { conversationId: 'conv-1', url: URL },
+          messages: [],
+          baselineIncomingFingerprint: ''
+        };
+      }
+    },
+    scripting: {
+      async executeScript(input) { calls.inject.push(input); }
+    }
+  };
+  const adapter = Runtime.createPageAdapter({
+    chromeApi,
+    store: { async getSnapshot() { return { managedConversations: {} }; } },
+    waitForTabComplete: async () => {}
+  });
+
+  const read = await adapter.read(conversation());
+
+  assert.equal(read.success, true);
+  assert.equal(calls.query, 1);
+  assert.deepEqual(calls.create, []);
+  assert.deepEqual(calls.remove, []);
+  assert.deepEqual(calls.update, []);
+  assert.deepEqual(
+    calls.messages.map(([tabId, message]) => [tabId, message.type]),
+    [[1, 'PING'], [1, 'READ_ACTIVE_CONVERSATION']]
+  );
+});
+
+test('page adapter falls back to an owned temporary tab when the reused tab cannot answer', async () => {
+  const calls = { create: [], remove: [], readTabs: [] };
+  const chromeApi = {
+    runtime: { lastError: null },
+    tabs: {
+      async query() {
+        return [{ id: 1, active: true, url: URL, status: 'complete' }];
+      },
+      async create(options) {
+        calls.create.push(options);
+        return { id: 7, status: 'complete', ...options };
+      },
+      async get(id) { return { id, active: false, status: 'complete', url: URL }; },
+      async remove(id) { calls.remove.push(id); },
+      async sendMessage(tabId, message) {
+        if (message.type === 'PING') {
+          if (tabId === 1) throw new Error('channel closed');
+          return { ok: true, page: 'chat' };
+        }
+        calls.readTabs.push(tabId);
+        return {
+          success: true,
+          conversationRef: { conversationId: 'conv-1', url: URL },
+          messages: [],
+          baselineIncomingFingerprint: ''
+        };
+      }
+    },
+    scripting: {
+      async executeScript() { throw new Error('cannot inject into user tab'); }
+    }
+  };
+  const adapter = Runtime.createPageAdapter({
+    chromeApi,
+    store: { async getSnapshot() { return { managedConversations: {} }; } },
+    waitForTabComplete: async () => {}
+  });
+
+  const read = await adapter.read(conversation());
+
+  assert.equal(read.success, true);
+  assert.deepEqual(calls.readTabs, [7]);
+  assert.deepEqual(calls.create, [{ url: URL, active: false }]);
+  assert.deepEqual(calls.remove, [7]);
+});
+
+test('page adapter keeps sends on an owned temporary tab and closes it every time', async () => {
   const calls = { query: 0, update: [], create: [], remove: [], messages: [], inject: [] };
   let nextTabId = 3;
-  let failManagedRead = false;
+  let failManagedSend = false;
   const chromeApi = {
     runtime: { lastError: null },
     tabs: {
@@ -976,12 +1152,12 @@ test('page adapter never queries or navigates existing tabs and closes every own
       async sendMessage(id, message) {
         calls.messages.push([id, message]);
         if (message.type === 'PING') return { ok: true, page: 'chat' };
-        if (failManagedRead) throw new Error('channel closed');
+        if (failManagedSend) throw new Error('channel closed');
         return {
           success: true,
-          conversationRef: { conversationId: 'conv-1', url: URL },
-          messages: [],
-          baselineIncomingFingerprint: ''
+          targetConversationId: 'conv-1',
+          sentFingerprint: 'id:sent-1',
+          observedAt: 1770000000000
         };
       }
     },
@@ -1003,18 +1179,97 @@ test('page adapter never queries or navigates existing tabs and closes every own
   };
   const adapter = Runtime.createPageAdapter({ chromeApi, store, waitForTabComplete: async () => {} });
 
-  const read = await adapter.read(conversation());
-  assert.equal(read.success, true);
+  const sent = await adapter.send(conversation(), '好的', { intentId: 'intent-1' });
+  assert.equal(sent.success, true);
   assert.equal(calls.query, 0);
   assert.deepEqual(calls.update, []);
   assert.deepEqual(calls.create, [{ url: URL, active: false }]);
   assert.deepEqual(calls.remove, [3]);
 
-  failManagedRead = true;
-  const failed = await adapter.read(conversation());
+  failManagedSend = true;
+  const failed = await adapter.send(conversation(), '好的', { intentId: 'intent-1' });
   assert.equal(failed.success, false);
   assert.deepEqual(calls.create.at(-1), { url: URL, active: false });
   assert.deepEqual(calls.remove, [3, 4]);
+});
+
+test('page adapter preserves a safe message-order failure from the content reader', async () => {
+  const chromeApi = {
+    runtime: { lastError: null },
+    tabs: {
+      async create(options) { return { id: 41, status: 'complete', ...options }; },
+      async get(id) { return { id, active: false, status: 'complete', url: URL }; },
+      async remove() {},
+      async sendMessage(id, message) {
+        if (message.type === 'PING') return { ok: true, page: 'chat' };
+        return { success: false, errorCode: 'MESSAGE_ORDER_UNCERTAIN' };
+      }
+    },
+    scripting: {
+      async executeScript() {}
+    }
+  };
+  const adapter = Runtime.createPageAdapter({
+    chromeApi,
+    store: { async getSnapshot() { return { managedConversations: {} }; } },
+    waitForTabComplete: async () => {}
+  });
+
+  const result = await adapter.read(conversation());
+
+  assert.deepEqual(result, {
+    success: false,
+    errorCode: 'MESSAGE_ORDER_UNCERTAIN'
+  });
+});
+
+test('page adapter preserves baseline and content-script diagnostics instead of hiding them', async () => {
+  for (const errorCode of ['BASELINE_NOT_FOUND', 'BASELINE_REQUIRED']) {
+    const chromeApi = {
+      runtime: { lastError: null },
+      tabs: {
+        async create(options) { return { id: 42, status: 'complete', ...options }; },
+        async get(id) { return { id, active: false, status: 'complete', url: URL }; },
+        async remove() {},
+        async sendMessage(id, message) {
+          if (message.type === 'PING') return { ok: true, page: 'chat' };
+          return { success: false, errorCode };
+        }
+      },
+      scripting: { async executeScript() {} }
+    };
+    const adapter = Runtime.createPageAdapter({
+      chromeApi,
+      store: { async getSnapshot() { return { managedConversations: {} }; } },
+      waitForTabComplete: async () => {}
+    });
+
+    assert.deepEqual(await adapter.read(conversation()), {
+      success: false,
+      errorCode
+    });
+  }
+
+  const unavailableChrome = {
+    runtime: { lastError: null },
+    tabs: {
+      async create(options) { return { id: 43, status: 'complete', ...options }; },
+      async get(id) { return { id, active: false, status: 'complete', url: URL }; },
+      async remove() {},
+      async sendMessage() { return null; }
+    },
+    scripting: { async executeScript() {} }
+  };
+  const unavailableAdapter = Runtime.createPageAdapter({
+    chromeApi: unavailableChrome,
+    store: { async getSnapshot() { return { managedConversations: {} }; } },
+    waitForTabComplete: async () => {}
+  });
+
+  assert.deepEqual(await unavailableAdapter.read(conversation()), {
+    success: false,
+    errorCode: 'CONTENT_SCRIPT_UNAVAILABLE'
+  });
 });
 
 test('page adapter refuses a temporary tab taken over after create, load, or before managed send', async () => {
@@ -1515,6 +1770,152 @@ test('REGISTER_ACTIVE captures the focused Boss chat tab and optionally enables 
   assert.equal(failed.code, 'ACTIVE_CHAT_REQUIRED');
   assert.equal(missing.ok, true);
   assert.equal(missing.alreadyRegistered, true);
+});
+
+test('OPEN_CONVERSATION reuses a Boss chat tab and succeeds only after the stored target is activated', async () => {
+  const calls = {
+    created: [],
+    queried: [],
+    updated: [],
+    messages: []
+  };
+  const chromeApi = {
+    alarms: {
+      async clear() { return true; },
+      async create() {}
+    },
+    tabs: {
+      async query(query) {
+        calls.queried.push(query);
+        if (query.active === true && query.lastFocusedWindow === true) {
+          return [{
+            id: 42,
+            windowId: 7,
+            active: true,
+            url: 'https://www.zhipin.com/web/geek/chat'
+          }];
+        }
+        return [{
+          id: 99,
+          windowId: 11,
+          active: true,
+          url: 'https://www.zhipin.com/web/geek/chat'
+        }];
+      },
+      async update(tabId, patch) {
+        calls.updated.push([tabId, patch]);
+        return { id: tabId, windowId: 7, active: true };
+      },
+      async create(options) {
+        calls.created.push(options);
+        return { id: 77, windowId: 7, ...options };
+      },
+      async sendMessage(tabId, message) {
+        calls.messages.push([tabId, structuredClone(message)]);
+        if (message.type === 'PING') return { ok: true, page: 'chat' };
+        if (message.type === 'OPEN_MANAGED_CONVERSATION') {
+          return {
+            success: true,
+            conversationRef: {
+              conversationId: 'conv-1',
+              url: URL,
+              aliases: ['conv-legacy']
+            }
+          };
+        }
+        return { success: false };
+      }
+    },
+    scripting: {
+      async executeScript() {
+        throw new Error('content script should already be available');
+      }
+    }
+  };
+  const snapshot = {
+    conversationTrusteeship: {
+      enabled: true,
+      paused: false,
+      intervalMinutes: 10
+    },
+    feishuNotification: {},
+    managedConversations: {
+      'conv-1': conversation({ aliases: ['conv-legacy'] })
+    },
+    pendingApprovals: {}
+  };
+  const h = controllerHarness({ chromeApi, snapshot });
+
+  const result = await h.controller.handleMessage({
+    type: 'TRUSTEESHIP_OPEN_CONVERSATION',
+    conversationId: 'conv-1'
+  });
+
+  assert.deepEqual(result, { ok: true, tabId: 42 });
+  assert.equal(calls.created.length, 0);
+  assert.deepEqual(calls.queried, [{
+    active: true,
+    lastFocusedWindow: true
+  }]);
+  assert.deepEqual(calls.updated, [[42, { active: true }]]);
+  assert.deepEqual(calls.messages.map((entry) => entry[1].type), [
+    'PING',
+    'OPEN_MANAGED_CONVERSATION'
+  ]);
+  assert.deepEqual(calls.messages[1], [42, {
+    type: 'OPEN_MANAGED_CONVERSATION',
+    expected: {
+      id: 'job-1',
+      name: '前端工程师',
+      company: '甲公司',
+      hrName: '李经理'
+    },
+    conversationRef: {
+      conversationId: 'conv-1',
+      url: URL,
+      aliases: ['conv-legacy']
+    }
+  }]);
+});
+
+test('OPEN_CONVERSATION reports target uncertainty instead of accepting an unconfirmed page', async () => {
+  const chromeApi = {
+    alarms: {
+      async clear() { return true; },
+      async create() {}
+    },
+    tabs: {
+      async query() {
+        return [{
+          id: 42,
+          active: true,
+          url: 'https://www.zhipin.com/web/geek/chat'
+        }];
+      },
+      async update(tabId) { return { id: tabId, active: true }; },
+      async create(options) { return { id: 77, ...options }; },
+      async sendMessage(tabId, message) {
+        if (message.type === 'PING') return { ok: true, page: 'chat' };
+        return {
+          success: false,
+          errorCode: 'TARGET_UNCERTAIN',
+          targetUncertain: true
+        };
+      }
+    },
+    scripting: {
+      async executeScript() { return []; }
+    }
+  };
+  const h = controllerHarness({ chromeApi });
+
+  const result = await h.controller.handleMessage({
+    type: 'TRUSTEESHIP_OPEN_CONVERSATION',
+    conversationId: 'conv-1'
+  });
+
+  assert.equal(result.ok, false);
+  assert.equal(result.code, 'TARGET_UNCERTAIN');
 });
 
 test('REMOVE_CONVERSATION deletes a registered conversation from the store', async () => {

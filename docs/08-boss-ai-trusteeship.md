@@ -12,7 +12,7 @@
 
 - 全局 `AI 对话托管` 默认关闭。
 - 每个岗位会话的 `托管此岗位` 默认关闭，必须由用户单独开启。
-- Phase 1 运行时已经实现，但只有两个开关均显式开启、所有前置证明有效且没有暂停原因时才会监控或发送；真实 Boss 与飞书外部链路仍未验收。
+- Phase 1 运行时已经实现，但只有两个开关均显式开启、所有前置证明有效且没有暂停原因时才会监控或发送。真实 Boss 的 alarm、两个已登记会话只读历史读取和显式打开会话已验收；真实新来信后的 LLM 分类/草稿、Boss 发送和飞书外部链路仍未验收。
 
 ## 公共契约
 
@@ -166,32 +166,33 @@ Task 7 组合层必须保持一个后台 Worker、一个共享 storage 对象和
 
 ## Boss 可靠会话标识与增量读取
 
-托管主键对齐开源实践：以好友列表 API 的 **`encryptUid` 作为 canonical peerId**（存储字段名仍为 `conversationId`），打开 URL 统一为 `?uid=<peerId>`；DOM 上的 `conversationId`/`uid` 仅作 `aliases`。读消息与发回复仍走 DOM owned-scope，**不引入 MQTT / 内部发信协议**。好友列表不可用或无法唯一对齐时，登记失败关闭（`PEER_LIST_UNAVAILABLE` / `PEER_ID_UNRESOLVED`），不得用未验证 DOM ID 冒充稳定主键。
+托管主键对齐开源实践：以好友列表 API 的 **`encryptUid` 作为 canonical peerId**（存储字段名仍为 `conversationId`），打开 URL 统一为 `?uid=<peerId>`；DOM 上的 `conversationId`/`uid` 仅作 `aliases`。活动会话、身份和发送控件仍要求 DOM owned-scope；登记基线、周期增量与发送后证据改读当前页面同源 `/wapi/zpchat/geek/historyMsg`，**不引入 MQTT / 内部发信协议，也不调用内部发信 API**。好友列表或历史接口不可用、响应结构不明确、无法唯一对齐时均失败关闭，不得用未验证 DOM ID 或页面文案冒充稳定主键。
 
 **首条招呼不由托管/联系 AI 生成**：联系流程只发送用户配置的招呼语模板（可含 `{jobName}` / `{company}`）。建联后的多轮草稿由 ReplyAI 生成，目标是简短争取继续沟通或面试机会；匹配不足时也表达想试一试，不得编造简历事实；薪资/面试/到岗等硬风险仍进待确认。
 
 `src/platform/boss/peer-identity.js` 负责纯函数解析：`resolvePeerIdentity({ domIds, friends, origin })` → `{ peerId, url, aliases, peerSource: 'encryptUid' }`。`src/platform/boss/conversation-reader.js` 仍是零 DOM、零网络模块，只从页面 URL / 活动链接 / dataset 抽取原始 `conversationId` 或 `uid`；公司、岗位、HR、预览文本不能生成会话 ID。
 
-- 页面和活动链接必须是 HTTPS 的 `*.zhipin.com`，原始路径必须精确为 `/web/geek/chat`；根域名、尾随/额外路径、点段、反斜杠、其他主机和不安全 ID 均拒绝。ID 接受 `[A-Za-z0-9_~-]{1,128}`（兼容开源实测含 `~` 的 encryptUid）。多个来源出现不同 ID 时返回 `null`。空 `activeHref` 视为未提供（现网 `.friend-content` 常无 geek/chat 锚点）。消息容器兼容 `.chat-message-list` 与 `.chat-record`；在单活动会话 + 单容器且无共享 dataset/ARIA 时，页面 URL 的 `uid` 是优先软归属标识。仅当 Resource Timing 中所有同源、HTTPS、精确 `/wapi/zpchat/geek/historyMsg` 请求都收敛到同一个安全 `bossId` 时，才允许用该 ID 兜底；外域伪装路径、重复参数和多个不同历史 ID 均拒绝。
+- 页面和活动链接必须是 HTTPS 的 `*.zhipin.com`，原始路径必须精确为 `/web/geek/chat`；根域名、尾随/额外路径、点段、反斜杠、其他主机和不安全 ID 均拒绝。ID 接受 `[A-Za-z0-9_~-]{1,128}`（兼容开源实测含 `~` 的 encryptUid）。多个显式来源出现不同 ID 时返回 `null`。空 `activeHref` 视为未提供（现网 `.friend-content` 常无 geek/chat 锚点）。消息容器兼容 `.chat-message-list` 与 `.chat-record`；在单活动会话 + 单容器且无共享 dataset/ARIA 时，页面 URL 的 `uid` 是优先软归属标识。URL 无 ID 时，从 Resource Timing 末尾反向查找最新一条同源、HTTPS、精确 `/wapi/zpchat/geek/historyMsg` 请求，并仅接受唯一且格式安全的 `bossId` 参数；此前打开过的会话请求允许保留，外域伪装路径被忽略，最新匹配请求的重复/畸形参数失败关闭。
 - DOM reader 输出 `{ conversationId, url }`；登记/托管前由 peer resolver 归一为 `{ conversationId: peerId, url: ?uid=peerId, aliases }`。
-- 纯函数 `normalizeMessages` 只处理数组或对象形式的 array-like 输入，最多检查最近 200 个原始项；方向必须明确为 `incoming` 或 `outgoing`，类型只允许 `text`、`image`、`attachment`、`voice`。文本最多 600 个 Unicode code points；非文本消息保留类型但清空文本，不保留附件、图片、语音或头像 URL。撤回、时间分隔、未知方向/类型在纯归一化边界被忽略；DOM strict reader 对已由 `messageItem` 选中的节点要求方向和结构全部可确认，任一未分类节点都返回 `MESSAGE_ORDER_UNCERTAIN`。
-- 指纹优先使用明确且安全的消息 ID；否则必须有有限、非负且不超过 `Number.MAX_SAFE_INTEGER` 的整数稳定时间，再以方向、类型、文本和时间做确定性非明文哈希。无 ID 且时间缺失/不安全的消息直接丢弃；同一批中任何重复或碰撞指纹的全部候选均丢弃，禁止反向猜测。输出 `at` 只能是该安全整数或 `null`。页面存在可靠 outgoing 节点但确无 incoming 候选和未分类节点时可以登记空 incoming baseline；只要任一 incoming 候选无法生成唯一可靠指纹，或任一消息节点方向/结构无法确认，就返回 `MESSAGE_ORDER_UNCERTAIN`，禁止用空 baseline 代替未知历史游标。
+- 同源历史接口固定请求当前 `bossId`、`maxMsgId=0`、`c=20`、`page=1`、`src=0` 并携带当前登录 Cookie。响应必须是 `code=0` 且包含数组 `zpData.messages`；按接口的最新优先顺序反转为时间正序。顶层 `type` 的口径在各公开实现之间并不一致（一处记为 `3`=普通 / `4`=系统，另一处记为 `1`=文本…`5`=系统），因此它**不再作为判据**，只保留 `type=4` 这一处公开一致的系统消息排除，其余情况一律进入正常解析。方向由布尔 `received` 决定；缺少布尔方向的条目按“无法归属”跳过，不影响同批其他消息。正文种类由 `body.type` 决定：`1` 且文本非空为 `text`，岗位卡 `8` 与系统通知 `16` 跳过，其余（含未知 body 类型、`body.type=1` 但空文本）降级为无正文 `attachment`，由上层策略强制人工确认，而不是让整批读取失败关闭。游标优先取 `mid`，缺失时回退到 `time`；`mid` 与 `time` 都按 int64 处理，同时接受安全整数和纯数字字符串。只有当某条消息既无可用 `mid` 又无可用 `time`（因而无法生成稳定指纹）、或归一化后数量不一致（重复/碰撞游标）、或响应本身异常时，才返回 `MESSAGE_ORDER_UNCERTAIN`。该错误只附带有界的 `type / body.type / received / mid / time` 标量形状，其中 `mid` 与 `time` 只回传形状（`safe-int` / `digits` / `null` 等）而非取值，不包含正文、人员或岗位信息。
+- 纯函数 `normalizeMessages` 只处理数组或对象形式的 array-like 输入，最多检查最近 200 个原始项；方向必须明确为 `incoming` 或 `outgoing`，类型只允许 `text`、`image`、`attachment`、`voice`。文本最多 600 个 Unicode code points；非文本消息保留类型但清空文本，不保留附件、图片、语音或头像 URL。
+- 指纹优先使用历史接口明确且安全的 `mid`；否则必须有有限、非负且不超过 `Number.MAX_SAFE_INTEGER` 的整数稳定时间，再以方向、类型、文本和时间做确定性非明文哈希。同一批中任何重复或碰撞指纹的全部候选均丢弃，内容脚本会因数量不一致而失败关闭，禁止反向猜测。没有普通 incoming 时可以登记空 incoming baseline；只要普通消息无法建立唯一可靠游标，就返回 `MESSAGE_ORDER_UNCERTAIN`。
 - `selectNewIncoming` 只返回基线之后的 incoming，保持页面顺序且每轮最多 20 条；找不到非空基线时返回空数组，不重放整段历史。纯 API 省略第二参数时仍只返回最后 20 条供显式初始化；传入明确空串表示“此前没有 incoming”，从第一条开始按 20 条分页。
 
 Boss chat content script 失败关闭的消息契约：
 
 | 消息 | 前置校验与结果 |
 | --- | --- |
-| `GET_ACTIVE_CONVERSATION_REF` | 要求恰好一个可见活动会话节点（旧版 active link，或无锚点的 `.friend-content` / active item）和一个可见消息容器（`.chat-message-list` 或 `.chat-record`）。优先通过相同 `conversationId`/`uid` dataset、`aria-controls` 或 `aria-labelledby` 证明归属；缺少这些关系时只接受页面 `uid`，或唯一且严格校验的同源 `historyMsg?bossId=` 软标识；身份文本只读取唯一 active item 和 owned pane 内 header |
-| `CAPTURE_ACTIVE_CONVERSATION` / `PROBE_PEER_IDENTITY` | 在 owned 活动会话上读取 DOM ID，再请求 `getGeekFriendList.json` 唯一对齐 `encryptUid`；成功返回 canonical `?uid=` ref 与 aliases；失败不写 store |
-| `READ_ACTIVE_CONVERSATION` | 在上述校验外要求登记 peerId 或 aliases 命中当前 DOM ID，并要求调用对象自有的字符串 `lastFingerprint`；返回给 engine 的 ref 使用 canonical peerId/URL。没有 incoming 时 GET 返回空串（绝不返回 `null`），可原样传给 READ；遗漏/非字符串返回 `BASELINE_REQUIRED`，非空基线必须命中 incoming，否则返回 `BASELINE_NOT_FOUND` |
-| `SEND_MANAGED_REPLY` | Enter 和 fallback button 每次动作前同步重验 ref、身份和同一个 owned scope，证据后再次重验；fallback 还要求输入框与按钮都是最初对象且输入内容精确等于冻结草稿，任一变化都不点击；发送前记录 scoped outgoing 指纹，发送后只接受同目标 owned container 中新增且文案等于草稿的唯一 outgoing 气泡 |
+| `GET_ACTIVE_CONVERSATION_REF` | 要求恰好一个可见活动会话节点（旧版 active link，或无锚点的 `.friend-content` / active item）和一个可见消息容器（`.chat-message-list` 或 `.chat-record`）。优先通过相同 `conversationId`/`uid` dataset、`aria-controls` 或 `aria-labelledby` 证明归属；缺少这些关系时只接受页面 `uid`，或最新且严格校验的同源 `historyMsg?bossId=` 软标识；身份文本只读取唯一 active item 和 owned pane 内 header |
+| `CAPTURE_ACTIVE_CONVERSATION` / `PROBE_PEER_IDENTITY` | 在 owned 活动会话上同时收集活动 DOM ID、页面 `uid` 和最新同源精确 `historyMsg bossId`，再请求 `getGeekFriendList.json`。候选 ID 冲突时，必须由活动会话 scoped identity 在结构化好友 `name / brandName / jobName` 中唯一命中；零命中或多命中均失败关闭，从而兼容 BOSS SPA 切换会话后地址栏仍保留旧 `uid`。公司、岗位和 HR 优先使用最终唯一好友记录的结构化字段，字段缺失时才回退 scoped DOM。CAPTURE 先完成 peer 绑定，再按该 canonical peer 读取历史并建立 incoming 基线。成功返回 canonical `?uid=` ref 与 aliases；任一失败不写 store |
+| `READ_ACTIVE_CONVERSATION` | 不激活或依赖当前活动 DOM。要求调用对象自有的字符串 `lastFingerprint`，重新净化登记时已经通过好友列表唯一建立且由 store 严格保存的 canonical peerId/aliases，然后直接按 canonical peerId 从同源历史接口读取；周期检查不重复请求好友列表。返回给 engine 的 ref 始终使用 canonical peerId/URL。没有 incoming 时 GET 返回空串（绝不返回 `null`），可原样传给 READ；遗漏/非字符串返回 `BASELINE_REQUIRED`，非空基线必须命中 incoming，否则返回 `BASELINE_NOT_FOUND` |
+| `SEND_MANAGED_REPLY` | Enter 和 fallback button 每次动作前同步重验 ref、身份和同一个 owned scope，证据后再次重验；fallback 还要求输入框与按钮都是最初对象且输入内容精确等于冻结草稿，任一变化都不点击。发送前记录历史接口 outgoing 指纹，发送后只接受同目标历史接口中新增且文案等于草稿的唯一 outgoing |
 
-READ 每页最多返回最早的 20 条新增 incoming，并只把 cursor 推进到本页最后返回项；下一轮可继续读取余量，不跳到页面末尾。outgoing 指纹不能充当 incoming cursor。SEND 成功必须同时返回非空 `sentFingerprint`、精确 `targetConversationId` 和有限正数 `observedAt`。动作前目标已变化返回 `TARGET_UNCERTAIN` 且不触发动作；Enter 已触发后如 fallback 发现控件或草稿变化，以及其后发生目标变化、scoped read 失败或没有新匹配气泡，一律返回 `SEND_RESULT_UNKNOWN` 且不重试。
+READ 在最近 20 条历史接口消息窗口内最多返回 20 条新增 incoming，并把 cursor 推进到最后返回项；若检查间隔内消息量已使非空 baseline 离开窗口，则返回 `BASELINE_NOT_FOUND` 并暂停，不猜测或跳过。outgoing 指纹不能充当 incoming cursor。SEND 成功必须同时返回非空 `sentFingerprint`、精确 `targetConversationId` 和有限正数 `observedAt`。动作前目标已变化返回 `TARGET_UNCERTAIN` 且不触发动作；Enter 已触发后如 fallback 发现控件或草稿变化，以及其后发生目标变化、历史接口读取失败或没有新匹配消息，一律返回 `SEND_RESULT_UNKNOWN` 且不重试。
 
-固定选择器缺失时返回 `SELECTOR_UNAVAILABLE`；已选消息节点的方向、结构、incoming 指纹或顺序不能全部可靠确认时返回 `MESSAGE_ORDER_UNCERTAIN`；ref、归属或身份不一致及多可见活动节点/容器时返回 `TARGET_UNCERTAIN`。managed 登录失效与页面阻止分别稳定返回 `LOGIN_REQUIRED` 和 `BOSS_BLOCKED`，所有 managed 失败都包含 `success: false` 与 `errorCode`。不得改用全页面任意 `.item`、任意文本节点或第一条会话兜底。既有 `SEND` / `SEND_ACTIVE` 行为保持：一次联系已有肯定发送结果后，只有 ref、身份和当前消息基线都可靠时才附加 `conversationRef` 与 `baselineIncomingFingerprint`；附加元数据失败不会追溯改变本次联系成功结果，只会使该会话不可登记托管。
+固定选择器缺失时返回 `SELECTOR_UNAVAILABLE`；历史接口、消息类型、方向、`mid` 或顺序不能全部可靠确认时返回 `MESSAGE_ORDER_UNCERTAIN`；ref、归属或身份不一致及多可见活动节点/容器时返回 `TARGET_UNCERTAIN`。managed 登录失效与页面阻止分别稳定返回 `LOGIN_REQUIRED` 和 `BOSS_BLOCKED`，所有 managed 失败都包含 `success: false` 与 `errorCode`。不得改用全页面任意 `.item`、任意文本节点或第一条会话兜底。既有 `SEND` / `SEND_ACTIVE` 行为保持：一次联系已有肯定发送结果后，只有 ref、身份和当前消息基线都可靠时才附加 `conversationRef` 与 `baselineIncomingFingerprint`；附加元数据失败不会追溯改变本次联系成功结果，只会使该会话不可登记托管。
 
-`tests/fixtures/boss-chat/*.json` 全部是脱敏的合成中间数据；`tests/boss-content-chat.test.js` 使用最小 VM/fake DOM 加载真实生产脚本并调用实际注册的 runtime handler，覆盖 hidden decoy、多可见容器、显式/软归属、跨域与多 ID history 资源、不可追踪 incoming、未分类消息节点、baseline 分页、发送前/后切换目标及新 outgoing 证据。它们仍不代表当前 Boss DOM 已验收。当前仓库没有可核对 `conversationId` / `uid` 实际来源及消息 DOM 的脱敏页面快照，本任务也未获授权访问真实 Boss；因此固定选择器和稳定 ID/ownership 来源必须在后续测试账号中做只读验证。未验证前，任何不匹配都按不可托管处理，不扩大选择器。
+`tests/fixtures/boss-chat/*.json` 全部是脱敏的合成中间数据；`tests/boss-content-chat.test.js` 使用最小 VM/fake DOM 加载真实生产脚本并调用实际注册的 runtime handler，覆盖 hidden decoy、多可见容器、显式/软归属、跨域与多 ID history 资源、最新请求参数畸形、历史接口方向与系统消息过滤、不可追踪 incoming、未知历史类型、baseline 分页、发送前/后切换目标及新 outgoing 证据。2026-07-25 的实号只读登记先后暴露：Resource Timing 会保留多个旧 `bossId`，以及 DOM `.message-item` 混入多类无方向系统节点。当前实现已从“逐个 DOM 系统卡白名单”升级为使用历史接口 `type/received/mid`；登记、周期读取和发送证据的生产 handler 回归均通过。2026-07-26 已在 ego-lite 中完成两个真实登记会话的受保护历史读取和显式打开正反切换；真实发送仍未执行，因此只能确认监控读取与打开链路，不能宣称真实自动回复已经通过。
 
 ## 飞书通知、签名与凭证边界
 
@@ -225,8 +226,8 @@ Chrome alarm 固定为 `boss-ai-chat-monitor`。Worker 初始化、`runtime.onIn
 | `TRUSTEESHIP_REGISTER_ACTIVE` | 用户显式操作：读取当前聚焦窗口中活动的 Boss 聊天页，捕获可靠会话标识与基线后登记；`enable: true` 时立即开启该岗位托管；不降低策略门，不打开新标签 |
 | `TRUSTEESHIP_LIST_APPROVALS` | 只返回最多 100 个本地 `PENDING` 待办；每个最多 20 条、每条 600 字符的上下文以及 300 code points 草稿，不含任何凭证 |
 | `TRUSTEESHIP_RESOLVE_APPROVAL` | 原样委托同一个 engine 的串行 `resolveApproval()` |
-| `TRUSTEESHIP_OPEN_CONVERSATION` | 只在用户显式操作时，从已登记记录取出并再次校验精确安全 URL，再以 `active: true` 新开标签 |
-| `TRUSTEESHIP_RUN_NOW` | 仅手动触发同一 engine 周期，不改变配置或降低任何策略门 |
+| `TRUSTEESHIP_OPEN_CONVERSATION` | 只在用户显式操作时，从已登记记录取出稳定引用；优先复用当前焦点窗口的 Boss 聊天页并激活唯一匹配列表项，没有聊天页时才以安全 URL 新建标签；content handler 必须再次用 canonical peerId/alias 与 scoped identity 证明目标，未证明时返回稳定错误而不报告成功 |
+| `TRUSTEESHIP_RUN_NOW` | 仅手动触发同一 engine 周期，不改变配置或降低任何策略门；全局关闭或暂停时返回 `TRUSTEESHIP_NOT_RUNNING` 且 engine 调用为 0，不得把空跑包装成成功检查 |
 | `SAVE_API_CONFIG` | sidepanel 保存 API 设置的唯一支持入口；只接受固定 provider 与有界 `apiKey/baseUrl/resumeText`，调用注入的 `PlatformConfig.saveApi` 并与设置、周期、resolve、API 测试共用 controller FIFO |
 
 尝试把全局托管从关闭改为开启时，后台会以当前本地时钟检查全部前置条件：API Key 存在且 `TEST_API` 在 24 小时内成功、`resumeText` 非空、飞书已开启且配置有效并在 24 小时内测试成功、用户已经接受风险提示。任一条件缺失都不会开启或创建 alarm，而是返回：
@@ -250,7 +251,17 @@ API 证明采用共享后台所有权与三层连续失效边界，而不是只�
 
 `TRUSTEESHIP_RUN_NOW`、alarm 的内部 scheduled 入口与 `TRUSTEESHIP_RESOLVE_APPROVAL` 在进入 engine 前还会重新检查全部前置条件。AUTO/MANUAL intent 持久化前也使用相同证明门禁，因此 AI 已完成后再轮换不会留下可恢复发送意图。恢复必须先对当前 API 版本重新执行显式 `TEST_API`，再保存启用设置；成功启用会清除旧暂停码。
 
-Boss 页面适配器绝不查询、复用或导航任何既有标签。每次 reader 和 sender 都创建本轮独占的 `active: false` 临时标签，打开持久化的精确会话 URL，并在创建后、加载后、注入前后以及实际读写前通过 `tabs.get` 复核仍为 inactive；任一步发现用户接管都会立即拒绝。内容脚本会在 `READ_ACTIVE_CONVERSATION` / `SEND_MANAGED_REPLY` 入口以及每一次真实 Enter/click 动作前拒绝 `document.visibilityState === "visible"`，封住草稿填充和发送证据等待期间的接管窗口；若 Enter 已经实际尝试，之后发现接管只会收束为 `SEND_RESULT_UNKNOWN`，不会误称为“未发送”。后台等待 complete、PING 或按固定顺序注入 selectors / humanize / message-send / reader / content-chat 后才执行托管协议。临时标签 ID 在创建时记录，并只在本轮 `finally` 中关闭。tabs、scripting 与 alarms 共用 Chrome 调用包装器；每个 API 只调用一次并提供 callback，若同一次调用返回 Promise 也会观察该 Promise，callback/Promise 的先到结果由统一 settle guard 只提交一次，`runtime.lastError` 只在 callback 内读取；实现不再依赖真实 Chrome 绑定恒为 `0` 的 `Function.length`。sender 在内容消息出站前重读 store，要求同会话存在相同 `intentId`、`status: "SENDING"` 和冻结草稿，否则返回 `SEND_RESULT_UNKNOWN`，绝不发送。登录失效和页面阻止写入全局暂停；目标、选择器和未知发送只返回稳定码，原始页面错误不进入 runtime 响应。
+API 前置检查与受保护 reader/classifier/notifier 必须消费同一个完整配置快照。`PlatformConfig.loadFlatFor()` 除 provider、Key、base URL 和 `apiConfigVersion` 外，还必须保留 `apiLastTestVersion`、`apiLastTestOk`、`apiLastTestAt`；否则 UI 直接读 storage 会判定证明有效，而受保护适配器会把投影后缺字段的配置判定为 `API_PROOF_STALE`。读取期间真正发生的 `API_PROOF_STALE` 统一映射为全局 `PREREQUISITE_CHANGED`，清除 alarm 并等待重新证明，禁止写成单会话 `CONVERSATION_UNAVAILABLE` 或增加 `readFailureCount`。
+
+Boss 页面适配器按读写分级使用标签。只读 reader 在页面里只发一次同源历史消息请求，不点击列表、不切换会话、不改动 DOM，因此允许先用 `tabs.query({ url: 'https://*.zhipin.com/web/geek/chat*' })` 复用用户已经打开的 Boss 聊天页，省掉每个会话一次的 SPA 冷启动；复用标签只做注入和 `sendMessage`，绝不 `tabs.update` 导航、不置为 active、不在结束时关闭它。没有可复用标签，或复用只因环境问题（`CONTENT_SCRIPT_UNAVAILABLE` / `CONVERSATION_UNAVAILABLE`）失败时，才回退到本轮独占的 `active: false` 临时标签重试一次；`TARGET_UNCERTAIN`、`MESSAGE_ORDER_UNCERTAIN`、`LOGIN_REQUIRED`、`BOSS_BLOCKED` 等语义结果直接返回，不在临时标签里重放。只读 reader 不把 `?uid=` 当成页面已激活目标，也不点击会话列表：canonical peerId/aliases 只在用户登记时通过好友列表唯一建立，周期检查重新执行稳定引用的格式、域名和 ID 集合净化后，直接请求该 peer 的同源历史接口，不再把好友列表可用性作为每轮依赖。因此后台监控与用户当前活动会话解耦，好友列表短暂失败、虚拟列表、WebSocket 首屏和临时标签未激活会话不会再把所有登记岗位同时暂停。
+
+sender 属于不同的高权限路径。它仍按 [browser-harness BOSS chat skill](https://github.com/browser-use/browser-harness/blob/main/agent-workspace/domain-skills/BOSS-zhipin/chat.md) 的实号路径，从 `.friend-content` 列表中按公司、岗位和 HR 文本评分，只接受至少两项命中（仅有一个有效字段时要求唯一命中）且最高分唯一的候选，然后点击它。点击后最多有界等待 24 次；只有最新活动 scope 同时通过 canonical peerId/alias 与 expected identity 校验，才允许进入发送。零候选、并列候选或二次证明失败都按原稳定错误失败关闭，禁止选择第一条兜底。
+
+临时标签在创建后、加载后、注入前后以及实际读写前通过 `tabs.get` 复核仍为 inactive；任一步发现用户接管都会立即拒绝。这条 inactive 断言只约束本轮自建的临时标签，复用用户标签的只读路径按定义跳过它。内容脚本相应把可见性否决收窄到写路径：`SEND_MANAGED_REPLY` 入口、目标激活等待以及每一次真实 Enter/click 动作前仍拒绝 `document.visibilityState === "visible"`，封住草稿填充和发送证据等待期间的接管窗口；`READ_ACTIVE_CONVERSATION` 因为不产生任何页面副作用，在可见标签上也允许执行。若 Enter 已经实际尝试，之后发现接管只会收束为 `SEND_RESULT_UNKNOWN`，不会误称为“未发送”。后台等待 complete、PING 或按固定顺序注入 selectors / humanize / message-send / reader / content-chat 后才执行托管协议。临时标签 ID 在创建时记录，并只在本轮 `finally` 中关闭。tabs、scripting 与 alarms 共用 Chrome 调用包装器；每个 API 只调用一次并提供 callback，若同一次调用返回 Promise 也会观察该 Promise，callback/Promise 的先到结果由统一 settle guard 只提交一次，`runtime.lastError` 只在 callback 内读取；实现不再依赖真实 Chrome 绑定恒为 `0` 的 `Function.length`。sender 在内容消息出站前重读 store，要求同会话存在相同 `intentId`、`status: "SENDING"` 和冻结草稿，否则返回 `SEND_RESULT_UNKNOWN`，绝不发送。登录失效和页面阻止写入全局暂停；目标、选择器和未知发送只返回稳定码，原始页面错误不进入 runtime 响应。
+
+只读失败不再一次就暂停。`CONVERSATION_UNAVAILABLE`、`SELECTOR_UNAVAILABLE` 和 `CONTENT_SCRIPT_UNAVAILABLE` 属于可重试的环境错误，`store.recordReadFailure` 把连续失败次数记在会话上，未达 `READ_FAILURE_PAUSE_THRESHOLD = 3` 时会话保持 `WAITING_HR`，下一轮 alarm 自动重试；只有第 3 次仍失败才写入 `PAUSED` 与对应暂停码。任何一次成功检查（`markConversationChecked`）或用户手动重新开启（`setManaged(true)`）都会清零该计数与 `lastReadErrorCode`。`TARGET_UNCERTAIN`、`MESSAGE_ORDER_UNCERTAIN` 等非重试码仍然一次即暂停，全局码（`LOGIN_REQUIRED` / `BOSS_BLOCKED`）仍走全局暂停，都不进入退避。旧版本遗留的 `PAUSED` 记录若暂停码可重试且 `readFailureCount` 为 0，会在下一轮开始时自动恢复一次，避免用户为升级前的暂停反复手点“重试托管”。侧栏对退避中的会话显示“上次检查失败（原因），第 N/3 次，下轮自动重试”，而不是笼统的“已暂停”。
+
+达到阈值后的 `PAUSED/CONVERSATION_UNAVAILABLE` 或 `PAUSED/SELECTOR_UNAVAILABLE` 仍然没有外部写入。岗位卡因此显示“重试托管”；store 只在会话没有活动待办、也没有 `SENDING` intent 时把它恢复为 `WAITING_HR`，保留 `lastIncomingFingerprint`、`lastCheckedAt` 和去重窗口。`TARGET_UNCERTAIN`、`MESSAGE_ORDER_UNCERTAIN`、`SEND_RESULT_UNKNOWN`、`RECOVERY_STATE_UNCERTAIN` 与 `UNKNOWN_PROCESSING_FAILURE` 仍要求更强的人工核对，不能走该捷径。runtime 和 engine 会原样保留安全的 `MESSAGE_ORDER_UNCERTAIN`，侧栏显示“Boss 消息结构发生变化，已停止自动回复”，不再归一化成无法定位根因的“会话暂不可用”。“立即检查”会展示 `checked/newMessages/pending/autoSent` 的安全计数；summary 含稳定错误时明确显示“检查未全部完成”，不再把零成功、已暂停的周期描述为完成。
 
 分类与草稿 adapter 只能调用 `ReplyAI.build*Messages`、既有 `callLLM` 和 `ReplyAI.parse*`，不会手工拼接 prompt，也不会把配置对象、API Key 或飞书凭证传给 ReplyAI。`getResumeFacts` 是 engine 的每轮一次 seam：每次调用只读取一份最新 `resumeText`，按非空行生成最多 100 条 `resume-line-N`，每条最多 600 code points；ReplyAI 仍按自身契约只选取 prompt 所需的有界窗口。
 
@@ -258,7 +269,7 @@ Boss 页面适配器绝不查询、复用或导航任何既有标签。每次 re
 
 ## 实现状态与验证记录
 
-当前状态：Task 9 release-review 的最后一个 gate-blocking P1（真实 background 包装丢失 owner 断言）已按 TDD 修复并完成新鲜自动化验证，等待新的 review-clean gate；无外部写入 Chrome 验收和分阶段实号验收仍未执行。真实 Boss 发送未验证。
+当前状态：API proof flat snapshot 缺字段导致只读周期误报 `CONVERSATION_UNAVAILABLE` 的实号缺陷已修复。2026-07-26 已通过 ego-browser 确认 10 分钟 alarm 存在，并完成两个已登记 canonical peer 的无外部写入受保护历史读取；显式“打开会话”也已在同一当前标签内完成徐海霞 ↔ 谭辉正反切换及动作后 canonical peer/alias、公司和 HR 身份复核。随后实号复现“全局托管关闭却显示检查 0 个已完成”，修复后恢复全局托管并再次手动运行，真实 summary 为 `checked=2 / newMessages=0 / pending=0 / autoSent=0 / errors=[]`，两个岗位最近检查时间均更新且 10 分钟 alarm 已重建。真实 Boss 发送、真实新来信后的 LLM 分类/草稿/自动回复与真实飞书通知仍未验证。
 
 - 基线：`npm test` 通过，47 tests、0 failures。
 - TDD RED：新增 manifest 权限契约后，`node --test tests/manifest.test.js` 如预期因缺少 `alarms` 失败。
@@ -378,6 +389,10 @@ Task 8 新检索的开源参考：[GoogleChrome/chrome-extensions-samples](https
 - UI 恢复指引 RED：10 tests 中 1 项失败，证明 `LOGIN_REQUIRED` / `BOSS_BLOCKED` 没有中文下一步提示。
 - 独立审查 P1 恢复 RED：integration 5 项中 4 项失败，证明来源状态未保存、legacy/损坏状态未 fail closed、恢复失败未重试；空 baseline 合法项通过。GREEN 后 5/5。
 - GREEN 自检又用 RED 证明“可靠登记 baseline 不一定已进入 processed window”；移除这一过强假设后 integration 最终 6/6。
+- 2026-07-26 ego-browser 实号诊断：同一 peer 的 `CAPTURE_ACTIVE_CONVERSATION`、不可见临时标签 PING、`READ_ACTIVE_CONVERSATION` 及持久 baseline 重放全部成功，但 engine 仍返回 `CONVERSATION_UNAVAILABLE`。直接调用 `protectedTrusteeshipPageAdapter.read` 得到 `API_PROOF_STALE`；安全摘要进一步证明原始 storage 的 Key、版本和 24 小时证明均有效，而 `PlatformConfig.loadFlat()` 丢失 `apiLastTestOk/apiLastTestAt`。新增配置投影和 engine 全局归类回归先 RED，修复后聚焦测试 GREEN。
+- 修复后全量 `npm test` 为 378/378；修改脚本 `node --check`、Manifest JSON 与 `git diff --check` 全部退出 0。精确重载当前工作区的未打包扩展后，真实 Service Worker 中 `protectedTrusteeshipPageAdapter.read` 成功，完整 controller 周期返回 `checked=1 / newMessages=0 / autoSent=0 / pending=0 / errors=[]`；store 为 `WAITING_HR`、`lastCheckedAt>0`、`readFailureCount=0`、`lastReadErrorCode=""`。这证明 Chrome 保持运行且登录有效时的已登记会话监控读取闭环可用，但没有证明新来信分类、LLM 草稿、真实发送或飞书出站。
+- 2026-07-26 ego-browser 切换会话登记复现：地址栏仍是徐海霞的 `uid=2ce53…`，可见 selected item、会话标题和最新精确 `historyMsg` 已是谭辉且 `bossId=71208…`，旧 handler 却返回徐海霞并读取旧 baseline。新增“旧 page uid + 新 history id + 新 scoped identity”的生产 handler 回归先 RED（实际得到 `stale-peer`），三证据唯一绑定并把历史读取移到 canonical peer 确认之后再 GREEN；真实扩展复测必须同时看到返回 peer 为 `71208…` 且“已登记岗位”数量新增，不能只凭按钮提示判定成功。
+- 2026-07-26 ego-browser 手动检查复现：两个岗位均已启用且为 `WAITING_HR`，但全局为 `enabled=false / paused=true / PREREQUISITE_CHANGED`，alarm 不存在；旧 `TRUSTEESHIP_RUN_NOW` 仍进入 engine，engine 因全局门禁返回全零 summary，侧栏错误显示“本轮检查已完成：检查 0 个”。新增 runtime/sidepanel 回归先 RED，再以 `TRUSTEESHIP_NOT_RUNNING` 和明确中文恢复指引 GREEN。全部前置证明仍有效时恢复全局托管并现场重跑，得到 `checked=2 / errors=[]`，两个 `lastCheckedAt` 更新、失败计数为 0、10 分钟 alarm 重建；没有新消息，也没有发送。
 - 独立审查 P1 隐私 RED：修正测试自身 substring 定位错误后，3 项中 2 项按预期因最终飞书 HTTP body 含开头 marker 失败；send-error 分支通过。固定通知文案后 3/3。
 - 独立审查 P1 UI RED：目标用例因没有 `RECOVERY_STATE_UNCERTAIN` 中文文案失败；修复后 sidepanel VM 12/12。
 - 第二轮复审恢复优先级 RED：integration 8 项中 2 项失败，分别证明组合 `CLASSIFYING + SENDING` 被错误走入分类恢复、首次未知终态写失败没有按预期拒绝；修复并校正测试时钟后 8/8。
@@ -391,8 +406,12 @@ Task 8 新检索的开源参考：[GoogleChrome/chrome-extensions-samples](https
 - release-review background 组合 RED：真实生产 VM 的 8 个核心路径中 6 个 owner 竞态错误 fetch 1，正常 fetch 1 与 API rotation fetch 0 通过；补入 resolved 断言透传后完整 RED 为 10 项中 7 项失败。包装层改为双断言组合后 background 组合 10/10，完整 background VM 31/31。
 - 最终广覆盖聚焦命令（Feishu/runtime/monitor/privacy/background/sidepanel/store/recovery）195/195；全量：`npm test` 306/306。修改的生产/测试 JavaScript `node --check`、Manifest JSON、敏感/egress 扫描和 `git diff --check` 全部退出 0；扫描仍明确列出 Task 9 范围外的旧联系/扫描 raw error 日志。仓库仍无可验证 Git `HEAD`，因此 `git diff --check` 不能替代 commit-range 审查。
 
-全部测试使用内存存储、fake Chrome、fake fetch、Node VM 和合成消息。没有读取真实 Boss 会话，没有调用真实 LLM/飞书，没有控制 Chrome，也没有执行外部写入。当前状态是：**release-review 的最后一个 gate-blocking P1 已实现修复并完成新鲜自动化验证，新的 review-clean gate 仍 pending；待无外部写入 Chrome 验收和分阶段实号验收**。
+Task 9 的自动化测试使用内存存储、fake Chrome、fake fetch、Node VM 和合成消息；它本身不构成真实平台验收。此后已经用 ego-browser 完成上述无外部写入的真实 Boss alarm、双会话读取、显式打开会话和 `checked=2` 手动周期验收。真实 LLM/飞书与 Boss 发送仍必须按下一节分阶段验证。
 
 Task 10 必须分阶段且每阶段单独获授权：先做一个完整工作日的只读监控；再用测试岗位人工确认发送一条；然后仅一个会话、日限 1 条观察一条低风险自动回复；最后验证登录失效、验证码/风控和页面变化停机。任一阶段未通过都不能进入下一阶段，也不能宣称真实 Boss 发送已验证。
 
 这些是既有计划结论；本任务的新实现建议仅限于以固定、最小权限落实上述契约。
+
+历史记录（已被 2026-07-26 实号验收取代）：2026-07-25 后台会话恢复修复新增读/发送目标激活、临时暂停无损恢复和周期摘要回归；当时全量为 356/356，但真实平台证据仍停留在“登记成功、旧后台恢复路径失败”。
+
+历史记录（真实只读周期已于 2026-07-26 验收）：2026-07-25 反复暂停修复把只读路径与写路径彻底分级：只读复用用户已打开的 Boss 聊天标签并放宽可见性否决、`historyMsg` 解析不再以顶层 `type` 为判据且补 `time` 游标回退、可重试只读失败改为 3 次有界退避、侧栏投影 `readFailureCount / readRetryLimit / lastReadErrorCode` 并显示重试进度。新增回归覆盖复用标签只读、临时标签回退、发送仍只用临时标签、未知 body 类型、缺方向条目、空文本正文、无 `mid` 时的 `time` 回退、退避计数与清零、旧版遗留暂停自动恢复以及 DTO 投影；当时全量 `npm test` 为 376/376。

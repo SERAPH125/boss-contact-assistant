@@ -541,7 +541,7 @@ test('a failed notification is retried once on the next run and never twice in o
   assert.equal(notifyCount, 2);
 });
 
-test('target and selector failures pause only their conversations while a safe peer can send', async () => {
+test('target failure pauses its conversation, selector failure only defers it, and a safe peer still sends', async () => {
   const harness = await makeHarness({
     reader: {
       async read(conversation) {
@@ -568,10 +568,202 @@ test('target and selector failures pause only their conversations while a safe p
 
   const summary = await harness.engine.runCycle();
   const snapshot = await harness.store.getSnapshot();
+  assert.equal(snapshot.managedConversations['a-target'].state, 'PAUSED');
   assert.equal(snapshot.managedConversations['a-target'].pauseCode, 'TARGET_UNCERTAIN');
-  assert.equal(snapshot.managedConversations['b-selector'].pauseCode, 'SELECTOR_UNAVAILABLE');
+  const deferred = snapshot.managedConversations['b-selector'];
+  assert.deepEqual(
+    {
+      state: deferred.state,
+      pauseCode: deferred.pauseCode,
+      readFailureCount: deferred.readFailureCount,
+      lastReadErrorCode: deferred.lastReadErrorCode
+    },
+    {
+      state: 'WAITING_HR',
+      pauseCode: '',
+      readFailureCount: 1,
+      lastReadErrorCode: 'SELECTOR_UNAVAILABLE'
+    }
+  );
+  assert.ok(summary.errors.includes('SELECTOR_UNAVAILABLE'));
   assert.equal(summary.autoSent, 1);
   assert.deepEqual(harness.calls.send.map((item) => item.conversationId), ['c-safe']);
+});
+
+test('message-order uncertainty is preserved as a per-conversation pause', async () => {
+  const harness = await makeHarness({
+    reader: {
+      async read() {
+        return { success: false, errorCode: 'MESSAGE_ORDER_UNCERTAIN' };
+      },
+      async send() {
+        throw new Error('must not send');
+      }
+    }
+  });
+  await harness.register(['conv-1']);
+  await harness.enableGlobal();
+
+  const summary = await harness.engine.runCycle();
+  const conversation = (await harness.store.getSnapshot())
+    .managedConversations['conv-1'];
+
+  assert.equal(conversation.pauseCode, 'MESSAGE_ORDER_UNCERTAIN');
+  assert.deepEqual(summary.errors, ['MESSAGE_ORDER_UNCERTAIN']);
+});
+
+test('baseline diagnostics remain visible as per-conversation pauses', async () => {
+  for (const errorCode of ['BASELINE_NOT_FOUND', 'BASELINE_REQUIRED']) {
+    const harness = await makeHarness({
+      reader: {
+        async read() {
+          return { success: false, errorCode };
+        },
+        async send() {
+          throw new Error('must not send');
+        }
+      }
+    });
+    await harness.register(['conv-' + errorCode]);
+    await harness.enableGlobal();
+
+    const summary = await harness.engine.runCycle();
+    const conversation = (await harness.store.getSnapshot())
+      .managedConversations['conv-' + errorCode];
+
+    assert.equal(conversation.pauseCode, errorCode);
+    assert.deepEqual(summary.errors, [errorCode]);
+  }
+});
+
+test('an API proof that becomes stale during reading pauses globally without charging the conversation retry budget', async () => {
+  const harness = await makeHarness({
+    reader: {
+      async read() {
+        const error = new Error('API_PROOF_STALE');
+        error.code = 'API_PROOF_STALE';
+        throw error;
+      },
+      async send() {
+        throw new Error('must not send');
+      }
+    }
+  });
+  await harness.register(['conv-1']);
+  await harness.enableGlobal();
+
+  const result = await harness.engine.runCycle();
+  const snapshot = await harness.store.getSnapshot();
+
+  assert.deepEqual(result.errors, ['PREREQUISITE_CHANGED']);
+  assert.equal(snapshot.conversationTrusteeship.paused, true);
+  assert.equal(snapshot.conversationTrusteeship.pauseCode, 'PREREQUISITE_CHANGED');
+  assert.equal(snapshot.managedConversations['conv-1'].state, 'WAITING_HR');
+  assert.equal(snapshot.managedConversations['conv-1'].readFailureCount, 0);
+});
+
+test('a transient read failure is retried with a bounded backoff before the conversation pauses', async () => {
+  const harness = await makeHarness({
+    reader: {
+      async read() {
+        return { success: false, errorCode: 'CONTENT_SCRIPT_UNAVAILABLE' };
+      },
+      async send() {
+        throw new Error('must not send');
+      }
+    }
+  });
+  await harness.register(['conv-flaky']);
+  await harness.enableGlobal();
+
+  const observed = [];
+  for (let cycle = 0; cycle < 3; cycle += 1) {
+    await harness.engine.runCycle();
+    const conversation = (await harness.store.getSnapshot()).managedConversations['conv-flaky'];
+    observed.push({ state: conversation.state, readFailureCount: conversation.readFailureCount });
+  }
+
+  assert.deepEqual(observed, [
+    { state: 'WAITING_HR', readFailureCount: 1 },
+    { state: 'WAITING_HR', readFailureCount: 2 },
+    { state: 'PAUSED', readFailureCount: 3 }
+  ]);
+  assert.equal(harness.calls.read.length, 3);
+  assert.equal(
+    (await harness.store.getSnapshot()).managedConversations['conv-flaky'].pauseCode,
+    'CONTENT_SCRIPT_UNAVAILABLE'
+  );
+});
+
+test('a successful check clears the read backoff counter', async () => {
+  let failNext = true;
+  const harness = await makeHarness({
+    reader: {
+      async read(conversation) {
+        if (failNext) {
+          failNext = false;
+          return { success: false, errorCode: 'CONVERSATION_UNAVAILABLE' };
+        }
+        return readOk(conversation, []);
+      },
+      async send() {
+        throw new Error('must not send');
+      }
+    }
+  });
+  await harness.register(['conv-recovers']);
+  await harness.enableGlobal();
+
+  await harness.engine.runCycle();
+  const afterFailure = (await harness.store.getSnapshot()).managedConversations['conv-recovers'];
+  await harness.engine.runCycle();
+  const afterSuccess = (await harness.store.getSnapshot()).managedConversations['conv-recovers'];
+
+  assert.equal(afterFailure.readFailureCount, 1);
+  assert.deepEqual(
+    { count: afterSuccess.readFailureCount, code: afterSuccess.lastReadErrorCode },
+    { count: 0, code: '' }
+  );
+});
+
+test('a retryable pause left by an earlier version resumes once at the start of the next cycle', async () => {
+  const harness = await makeHarness();
+  await harness.register(['conv-stale']);
+  await harness.enableGlobal();
+  await harness.store.pauseConversation('conv-stale', 'CONVERSATION_UNAVAILABLE');
+
+  await harness.engine.runCycle();
+  const conversation = (await harness.store.getSnapshot()).managedConversations['conv-stale'];
+
+  assert.deepEqual(harness.calls.read, ['conv-stale']);
+  assert.deepEqual(
+    { state: conversation.state, pauseCode: conversation.pauseCode },
+    { state: 'WAITING_HR', pauseCode: '' }
+  );
+});
+
+test('a pause that already exhausted the read backoff still requires manual review', async () => {
+  const harness = await makeHarness({
+    reader: {
+      async read() {
+        return { success: false, errorCode: 'CONVERSATION_UNAVAILABLE' };
+      },
+      async send() {
+        throw new Error('must not send');
+      }
+    }
+  });
+  await harness.register(['conv-exhausted']);
+  await harness.enableGlobal();
+  for (let cycle = 0; cycle < 3; cycle += 1) await harness.engine.runCycle();
+  const readsBeforeExtraCycle = harness.calls.read.length;
+
+  const summary = await harness.engine.runCycle();
+  const conversation = (await harness.store.getSnapshot()).managedConversations['conv-exhausted'];
+
+  assert.equal(harness.calls.read.length, readsBeforeExtraCycle);
+  assert.equal(summary.skipped, 1);
+  assert.equal(conversation.state, 'PAUSED');
 });
 
 test('login or block failure globally pauses and prevents later conversations from being read', async () => {
@@ -1150,9 +1342,23 @@ test('rejects an empty batch whose baseline differs from the requested checkpoin
   await harness.enableGlobal();
 
   await harness.engine.runCycle();
-  const conversation = (await harness.store.getSnapshot()).managedConversations['conv-1'];
-  assert.equal(conversation.lastIncomingFingerprint, 'requested-base');
-  assert.equal(conversation.state, 'PAUSED');
+  const deferred = (await harness.store.getSnapshot()).managedConversations['conv-1'];
+  assert.deepEqual(
+    {
+      baseline: deferred.lastIncomingFingerprint,
+      state: deferred.state,
+      readFailureCount: deferred.readFailureCount
+    },
+    { baseline: 'requested-base', state: 'WAITING_HR', readFailureCount: 1 }
+  );
+
+  await harness.engine.runCycle();
+  await harness.engine.runCycle();
+  const exhausted = (await harness.store.getSnapshot()).managedConversations['conv-1'];
+  assert.deepEqual(
+    { baseline: exhausted.lastIncomingFingerprint, state: exhausted.state },
+    { baseline: 'requested-base', state: 'PAUSED' }
+  );
 });
 
 test('global login pause advances the cursor only past slots actually attempted', async () => {

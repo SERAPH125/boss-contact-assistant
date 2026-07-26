@@ -969,6 +969,23 @@ test('pauses one conversation with an allowlisted code and rejects raw reasons',
   assert.equal(JSON.stringify(await harness.store.getSnapshot()).includes('secret raw reason'), false);
 });
 
+test('setManaged retries a transiently unavailable enabled conversation without deleting its cursor', async () => {
+  const harness = makeHarness();
+  await registerAndEnable(harness);
+  await harness.store.markConversationChecked('conv-1', {
+    baseline: 'incoming-fp-before-pause'
+  });
+  await harness.store.pauseConversation('conv-1', 'CONVERSATION_UNAVAILABLE');
+
+  const resumed = await harness.store.setManaged('conv-1', true);
+
+  assert.equal(resumed.enabled, true);
+  assert.equal(resumed.state, 'WAITING_HR');
+  assert.equal(resumed.pauseCode, '');
+  assert.equal(resumed.lastIncomingFingerprint, 'incoming-fp-before-pause');
+  assert.ok(resumed.lastCheckedAt > 0);
+});
+
 test('resolves an approval as NO_REPLY, clears its link, and cannot consume it again', async () => {
   const harness = makeHarness();
   await registerAndEnable(harness);
@@ -1359,6 +1376,7 @@ test('store exposes one notification transition API within the exact public meth
     'markSendUnknown',
     'pauseConversation',
     'recordNotificationAttempt',
+    'recordReadFailure',
     'registerConversation',
     'removeConversation',
     'resetConversation',

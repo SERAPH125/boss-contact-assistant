@@ -40,6 +40,29 @@ function createHarness(initial) {
   return { PlatformConfig: context.PlatformConfig, data, writes };
 }
 
+test('loadFlat preserves the complete credential-bound API proof snapshot', async () => {
+  const h = createHarness({
+    configVersion: 2,
+    activePlatform: 'boss',
+    byPlatform: { boss: {} },
+    provider: 'deepseek',
+    apiKey: 'test-key',
+    dsKey: 'test-key',
+    baseUrl: '',
+    apiConfigVersion: 3,
+    apiLastTestVersion: 3,
+    apiLastTestOk: true,
+    apiLastTestAt: 123456
+  });
+
+  const flat = await h.PlatformConfig.loadFlat();
+
+  assert.equal(flat.apiConfigVersion, 3);
+  assert.equal(flat.apiLastTestVersion, 3);
+  assert.equal(flat.apiLastTestOk, true);
+  assert.equal(flat.apiLastTestAt, 123456);
+});
+
 test('API connection proof is bound to provider, key and base URL credentials', async () => {
   for (const [field, changed] of [
     ['provider', 'openai-compatible'],

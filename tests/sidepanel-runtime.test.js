@@ -180,6 +180,7 @@ async function loadFullSidepanel(options) {
           else callback({ ok: true, approvals });
         }
         else if (message.type === 'TRUSTEESHIP_RESOLVE_APPROVAL') callback(options.resolve ? options.resolve(message) : { ok: true });
+        else if (message.type === 'TRUSTEESHIP_RUN_NOW') callback(options.runNow ? options.runNow(message) : { ok: true });
         else if (message.type === 'TRUSTEESHIP_SET_CONVERSATION') callback({ ok: false, code: 'CONVERSATION_NOT_REGISTERED' });
         else if (message.type === 'GET_STATE') callback({ phase: 'idle' });
         else callback({ ok: true });
@@ -286,8 +287,10 @@ test('full sidepanel uses the global enabled gate and rolls back a confirmed con
   const conversation = { conversationId: 'conv-1', company: '甲公司', position: '前端', hrName: '李', enabled: true, state: 'WAITING_HR', lastCheckedAt: 1234 };
   const h = await loadFullSidepanel({ state: { settings: { enabled: false, paused: false }, managedConversations: { 'conv-1': conversation }, pendingApprovalCount: 1 }, approvals: [] });
   assert.equal(h.ids.trusteeshipStatus.textContent, '托管已关闭');
+  assert.equal(h.ids.managedConversationsHeading.textContent, '已登记岗位（1）');
   h.context.applyTrusteeshipState({ settings: { enabled: true, paused: false }, managedConversations: {}, pendingApprovalCount: 0 });
   assert.equal(h.ids.trusteeshipStatus.textContent, '正在托管 0 个岗位');
+  assert.equal(h.ids.managedConversationsHeading.textContent, '已登记岗位（0）');
   h.context.applyTrusteeshipState({ settings: { enabled: true, paused: true }, managedConversations: {}, pendingApprovalCount: 1 });
   assert.equal(h.ids.trusteeshipStatus.textContent, '托管已暂停');
   h.context.applyTrusteeshipState({ settings: { enabled: true, paused: false }, managedConversations: { 'conv-1': conversation }, pendingApprovalCount: 0 });
@@ -378,6 +381,200 @@ test('full sidepanel gives stable manual guidance for normalized unknown process
     .find((child) => child.tagName === 'P');
   assert.match(details.textContent, /处理状态异常/);
   assert.match(details.textContent, /人工核对后重试/);
+});
+
+test('full sidepanel identifies a Boss message-structure pause', async () => {
+  const h = await loadFullSidepanel({
+    state: {
+      settings: { enabled: true, paused: false },
+      managedConversations: {
+        'conv-order': {
+          conversationId: 'conv-order',
+          company: '结构测试公司',
+          position: '前端',
+          hrName: '李',
+          enabled: true,
+          state: 'PAUSED',
+          pauseCode: 'MESSAGE_ORDER_UNCERTAIN',
+          lastCheckedAt: 0
+        }
+      },
+      pendingApprovalCount: 0
+    },
+    approvals: []
+  });
+
+  const details = h.ids.managedConversations.children[0].children
+    .find((child) => child.tagName === 'P');
+  assert.match(details.textContent, /Boss 消息结构发生变化/);
+  assert.match(details.textContent, /停止自动回复/);
+});
+
+test('full sidepanel identifies missing history baselines and content-script failures', async () => {
+  for (const [pauseCode, expectedText] of [
+    ['BASELINE_NOT_FOUND', /历史消息基线已失效/],
+    ['BASELINE_REQUIRED', /登记消息基线缺失/],
+    ['CONTENT_SCRIPT_UNAVAILABLE', /后台页面脚本未就绪/]
+  ]) {
+    const h = await loadFullSidepanel({
+      state: {
+        settings: { enabled: true, paused: false },
+        managedConversations: {
+          ['conv-' + pauseCode]: {
+            conversationId: 'conv-' + pauseCode,
+            company: '诊断公司',
+            position: '前端',
+            hrName: '李',
+            enabled: true,
+            state: 'PAUSED',
+            pauseCode,
+            lastCheckedAt: 0
+          }
+        },
+        pendingApprovalCount: 0
+      },
+      approvals: []
+    });
+    const details = h.ids.managedConversations.children[0].children
+      .find((child) => child.tagName === 'P');
+    assert.match(details.textContent, expectedText);
+  }
+});
+
+test('full sidepanel offers a non-destructive retry for a transient unavailable pause', async () => {
+  const sent = [];
+  const conversation = {
+    conversationId: 'conv-unavailable',
+    company: '甲公司',
+    position: '前端',
+    hrName: '李',
+    enabled: true,
+    state: 'PAUSED',
+    pauseCode: 'CONVERSATION_UNAVAILABLE',
+    lastCheckedAt: 0
+  };
+  const h = await loadFullSidepanel({
+    state: {
+      settings: { enabled: true, paused: false },
+      managedConversations: { 'conv-unavailable': conversation },
+      pendingApprovalCount: 0
+    },
+    approvals: []
+  });
+  h.context.chrome.runtime.sendMessage = (message, callback) => {
+    sent.push(message);
+    callback(message.type === 'TRUSTEESHIP_SET_CONVERSATION'
+      ? { ok: true }
+      : { ok: true, settings: { enabled: true, paused: false }, managedConversations: {}, pendingApprovalCount: 0 });
+  };
+
+  const retry = findDescendants(h.ids.managedConversations, 'button')
+    .find((button) => button.textContent === '重试托管');
+  assert.ok(retry);
+  await retry.trigger('click');
+  assert.deepEqual(JSON.parse(JSON.stringify(sent[0])), {
+    type: 'TRUSTEESHIP_SET_CONVERSATION',
+    conversationId: 'conv-unavailable',
+    enabled: true
+  });
+});
+
+test('full sidepanel shows the automatic retry progress instead of a pause for a deferred read failure', async () => {
+  const h = await loadFullSidepanel({
+    state: {
+      settings: { enabled: true, paused: false },
+      managedConversations: {
+        'conv-deferred': {
+          conversationId: 'conv-deferred',
+          company: '重试测试公司',
+          position: '前端',
+          hrName: '李',
+          enabled: true,
+          state: 'WAITING_HR',
+          pauseCode: '',
+          readFailureCount: 2,
+          readRetryLimit: 3,
+          lastReadErrorCode: 'CONTENT_SCRIPT_UNAVAILABLE',
+          lastCheckedAt: 0
+        }
+      },
+      pendingApprovalCount: 0
+    },
+    approvals: []
+  });
+
+  const card = h.ids.managedConversations.children[0];
+  const details = card.children.find((child) => child.tagName === 'P');
+  assert.match(details.textContent, /状态：等待 HR/);
+  assert.match(details.textContent, /上次检查失败（后台页面脚本未就绪，请重试托管）/);
+  assert.match(details.textContent, /第 2\/3 次，下轮自动重试/);
+  assert.equal(
+    findDescendants(h.ids.managedConversations, 'button')
+      .some((button) => button.textContent === '重试托管'),
+    false
+  );
+});
+
+test('full sidepanel reports a failed manual monitoring cycle instead of claiming completion', async () => {
+  const h = await loadFullSidepanel({
+    state: {
+      settings: { enabled: true, paused: false },
+      managedConversations: {},
+      pendingApprovalCount: 0
+    },
+    approvals: [],
+    runNow: () => ({
+      ok: true,
+      summary: {
+        checked: 0,
+        newMessages: 0,
+        autoSent: 0,
+        pending: 0,
+        skipped: 0,
+        errors: ['CONVERSATION_UNAVAILABLE']
+      }
+    })
+  });
+
+  await h.ids.btnRunTrusteeshipNow.trigger('click');
+
+  assert.match(h.ids.trusteeshipConfigMsg.textContent, /检查未全部完成/);
+  assert.match(h.ids.trusteeshipConfigMsg.textContent, /成功检查 0 个/);
+});
+
+test('full sidepanel tells the user to enable and save trusteeship when a manual check is globally gated', async () => {
+  const h = await loadFullSidepanel({
+    state: {
+      settings: {
+        enabled: false,
+        paused: true,
+        pauseCode: 'PREREQUISITE_CHANGED'
+      },
+      managedConversations: {
+        'conv-1': {
+          conversationId: 'conv-1',
+          company: '甲公司',
+          position: '前端',
+          hrName: '李',
+          enabled: true,
+          state: 'WAITING_HR'
+        }
+      },
+      pendingApprovalCount: 0
+    },
+    approvals: [],
+    runNow: () => ({
+      ok: false,
+      code: 'TRUSTEESHIP_NOT_RUNNING'
+    })
+  });
+
+  await h.ids.btnRunTrusteeshipNow.trigger('click');
+
+  assert.equal(
+    h.ids.trusteeshipConfigMsg.textContent,
+    '无法开始检查：请先开启 AI 对话托管并保存设置'
+  );
 });
 
 test('full sidepanel status and managed DOM mask unknown provider and credential-shaped pause canaries', async () => {

@@ -19,6 +19,7 @@ vm.runInNewContext(selectorsSource, selectorsContext);
 const BOSS_SELECTORS = selectorsContext.globalThis.SELECTORS;
 
 const S = {
+  userList: BOSS_SELECTORS.chat.userList,
   conversationLink: BOSS_SELECTORS.chat.conversationLink,
   activeUser: BOSS_SELECTORS.chat.activeUser,
   messageList: BOSS_SELECTORS.chat.messageList,
@@ -27,6 +28,8 @@ const S = {
   outgoing: BOSS_SELECTORS.chat.messageOutgoing,
   text: BOSS_SELECTORS.chat.messageText,
   time: BOSS_SELECTORS.chat.messageTime,
+  userName: BOSS_SELECTORS.chat.userName,
+  userCompany: BOSS_SELECTORS.chat.userCompany,
   header: BOSS_SELECTORS.chat.activeContext,
   input: BOSS_SELECTORS.chat.chatInput,
   button: BOSS_SELECTORS.chat.btnSend
@@ -154,7 +157,7 @@ function createHarness(options = {}) {
     dataset: Object.hasOwn(options, 'activeDataset')
       ? options.activeDataset
       : { conversationId: 'conv1' },
-    selectors: [S.activeUser]
+    selectors: [S.activeUser, S.userList]
   }));
   const activeLink = activeItem.append(new FakeElement({
     tagName: 'a',
@@ -167,6 +170,18 @@ function createHarness(options = {}) {
       : { conversationId: 'conv1' },
     selectors: [S.conversationLink]
   }));
+  if (Object.hasOwn(options, 'activeNameText')) {
+    activeItem.append(new FakeElement({
+      text: options.activeNameText,
+      selectors: [S.userName]
+    }));
+  }
+  if (Object.hasOwn(options, 'activeCompanyText')) {
+    activeItem.append(new FakeElement({
+      text: options.activeCompanyText,
+      selectors: [S.userCompany]
+    }));
+  }
 
   const pane = documentRoot.append(new FakeElement());
   pane.append(new FakeElement({
@@ -212,8 +227,11 @@ function createHarness(options = {}) {
     button,
     listener: null,
     externalActions: 0,
-    nextMessage: 1000
+    nextMessage: 1000,
+    historyMessages: [],
+    pendingConversationSwitch: null
   };
+  const header = pane.querySelector(S.header);
 
   state.addMessage = function addMessage(config = {}, target = container) {
     const index = state.nextMessage++;
@@ -237,6 +255,25 @@ function createHarness(options = {}) {
       },
       selectors: [S.time]
     }));
+    if (target === container && config.history !== false) {
+      const historyEntry = {
+        mid: Object.hasOwn(config, 'id') ? config.id : 'm' + index,
+        type: Object.hasOwn(config, 'historyType')
+          ? config.historyType
+          : (direction === 'unknown' ? 99 : 3),
+        received: Object.hasOwn(config, 'historyReceived')
+          ? config.historyReceived
+          : direction === 'incoming',
+        body: {
+          type: Object.hasOwn(config, 'historyBodyType') ? config.historyBodyType : 1,
+          text: config.text === undefined ? '消息 ' + index : config.text
+        },
+        from: { uid: 100, name: '示例HR' },
+        to: { uid: 200 }
+      };
+      if (Object.hasOwn(config, 'historyTime')) historyEntry.time = config.historyTime;
+      state.historyMessages.push(historyEntry);
+    }
     return item;
   };
 
@@ -275,16 +312,49 @@ function createHarness(options = {}) {
     }));
   };
 
-  state.switchConversation = function switchConversation(id) {
+  state.switchConversation = function switchConversation(id, text) {
     activeItem.dataset.conversationId = id;
     activeLink.dataset.conversationId = id;
     activeLink.href = 'https://www.zhipin.com/web/geek/chat?conversationId=' + id;
     container.dataset.conversationId = id;
+    if (typeof text === 'string') {
+      activeItem.textContent = text;
+      activeItem.innerText = text;
+      activeLink.textContent = text;
+      activeLink.innerText = text;
+      header.textContent = text;
+      header.innerText = text;
+    }
+  };
+
+  state.addConversationCandidate = function addConversationCandidate(config = {}) {
+    const candidate = activeList.append(new FakeElement({
+      className: 'friend-content',
+      text: config.text || '候选会话',
+      selectors: [S.userList]
+    }));
+    candidate._onClick = () => {
+      const next = {
+        conversationId: config.conversationId || 'conv-extra',
+        activeText: config.activeText || config.text || '候选会话'
+      };
+      if (Number.isSafeInteger(config.switchAfterSleeps) &&
+          config.switchAfterSleeps > 0) {
+        state.pendingConversationSwitch = Object.assign(
+          { sleepsRemaining: config.switchAfterSleeps },
+          next
+        );
+      } else {
+        state.switchConversation(next.conversationId, next.activeText);
+      }
+    };
+    return candidate;
   };
 
   const contextObject = {
     console,
     URL,
+    URLSearchParams,
     Date,
     Promise,
     Array,
@@ -312,6 +382,14 @@ function createHarness(options = {}) {
       return { position: element.offsetParent === null ? 'static' : 'relative' };
     },
     setTimeout(callback) {
+      if (state.pendingConversationSwitch) {
+        state.pendingConversationSwitch.sleepsRemaining -= 1;
+        if (state.pendingConversationSwitch.sleepsRemaining <= 0) {
+          const pending = state.pendingConversationSwitch;
+          state.pendingConversationSwitch = null;
+          state.switchConversation(pending.conversationId, pending.activeText);
+        }
+      }
       Promise.resolve().then(callback);
       return 1;
     },
@@ -349,6 +427,24 @@ function createHarness(options = {}) {
     },
     async fetch(url) {
       const href = String(url || '');
+      if (href.indexOf('/wapi/zpchat/geek/historyMsg?') !== -1) {
+        if (options.historyUnavailable) {
+          return { ok: false, status: 500, async json() { return { code: 1 }; } };
+        }
+        return {
+          ok: true,
+          status: 200,
+          async json() {
+            return {
+              code: 0,
+              zpData: {
+                hasMore: false,
+                messages: state.historyMessages.slice().reverse()
+              }
+            };
+          }
+        };
+      }
       if (href.indexOf('getGeekFriendList.json') === -1) {
         return { ok: false, status: 404, async json() { return {}; } };
       }
@@ -484,6 +580,60 @@ test('READ requires an explicit string baseline', async () => {
   assert.equal(nonString.errorCode, 'BASELINE_REQUIRED');
 });
 
+test('READ leaves an unrelated active conversation unchanged', async () => {
+  const h = createHarness({
+    activeText: '其他公司 其他岗位 其他HR',
+    headerText: '其他公司 其他岗位 其他HR',
+    activeDataset: { conversationId: 'conv-other' },
+    activeLinkDataset: { conversationId: 'conv-other' },
+    containerDataset: { conversationId: 'conv-other' }
+  });
+  h.addConversationCandidate({
+    conversationId: 'conv1',
+    text: '示例HR 示例公司 示例岗位'
+  });
+
+  const result = await h.dispatch({
+    type: 'READ_ACTIVE_CONVERSATION',
+    expected: h.expected,
+    conversationRef: h.ref,
+    lastFingerprint: 'id:initial-incoming'
+  });
+
+  assert.equal(result.success, true);
+  assert.equal(result.conversationRef.conversationId, 'conv1');
+  assert.deepEqual(Array.from(result.messages), []);
+  assert.equal(h.activeItem.dataset.conversationId, 'conv-other');
+});
+
+test('READ uses the registered stable peer without activating a visible conversation', async () => {
+  const h = createHarness({
+    activeText: '其他公司 其他岗位 其他HR',
+    headerText: '其他公司 其他岗位 其他HR',
+    activeDataset: { conversationId: 'conv-other' },
+    activeLinkDataset: { conversationId: 'conv-other' },
+    containerDataset: { conversationId: 'conv-other' },
+    friends: [{
+      encryptUid: 'conv1',
+      name: '示例HR',
+      brandName: '示例公司',
+      jobName: '示例岗位'
+    }]
+  });
+
+  const result = await h.dispatch({
+    type: 'READ_ACTIVE_CONVERSATION',
+    expected: { company: '示例公司', hrName: '示例HR', name: '示例岗位' },
+    conversationRef: h.ref,
+    lastFingerprint: 'id:initial-incoming'
+  });
+
+  assert.equal(result.success, true);
+  assert.equal(result.conversationRef.conversationId, 'conv1');
+  assert.deepEqual(Array.from(result.messages), []);
+  assert.equal(h.activeItem.dataset.conversationId, 'conv-other');
+});
+
 test('GET returns an empty incoming sentinel that READ accepts unchanged', async () => {
   const h = createHarness({
     messages: [{ id: 'only-outgoing', direction: 'outgoing', text: '我方消息' }]
@@ -565,6 +715,7 @@ test('CAPTURE supports modern chat-record DOM without geek/chat anchors', async 
   const contextObject = {
     console,
     URL,
+    URLSearchParams,
     Date,
     Promise,
     Array,
@@ -621,7 +772,30 @@ test('CAPTURE supports modern chat-record DOM without geek/chat anchors', async 
       }
     },
     async fetch(url) {
-      if (String(url || '').indexOf('getGeekFriendList.json') === -1) {
+      const href = String(url || '');
+      if (href.indexOf('/wapi/zpchat/geek/historyMsg?') !== -1) {
+        return {
+          ok: true,
+          status: 200,
+          async json() {
+            return {
+              code: 0,
+              zpData: {
+                hasMore: false,
+                messages: [{
+                  mid: 337069469603329,
+                  type: 3,
+                  received: false,
+                  body: { type: 1, text: '您好，我对这个岗位很感兴趣' },
+                  from: { uid: 200, name: '我' },
+                  to: { uid: 100 }
+                }]
+              }
+            };
+          }
+        };
+      }
+      if (href.indexOf('getGeekFriendList.json') === -1) {
         return { ok: false, status: 404, async json() { return {}; } };
       }
       return {
@@ -669,7 +843,7 @@ test('CAPTURE supports modern chat-record DOM without geek/chat anchors', async 
   );
   assert.equal(result.conversationRef.conversationId, peerId);
   assert.equal(result.baselineIncomingFingerprint, '');
-  assert.equal(result.position, '跨境电商运营 9-14K 杭州');
+  assert.equal(result.position, '跨境电商运营');
   assert.match(result.company + result.hrName, /云禾|江女士/);
 });
 
@@ -698,6 +872,9 @@ test('CAPTURE rejects an unclassified history node beside a valid outgoing messa
       {
         id: '',
         direction: 'unknown',
+        historyType: 7,
+        historyBodyType: 42,
+        historyReceived: true,
         text: '无法确认方向的历史节点',
         at: null
       }
@@ -706,6 +883,122 @@ test('CAPTURE rejects an unclassified history node beside a valid outgoing messa
   const result = await h.dispatch({ type: 'CAPTURE_ACTIVE_CONVERSATION' });
   assert.equal(result.success, false);
   assert.equal(result.errorCode, 'MESSAGE_ORDER_UNCERTAIN');
+  assert.match(result.error, /type=7, body\.type=42, received=true/);
+  assert.doesNotMatch(result.error, /无法确认方向的历史节点/);
+});
+
+test('CAPTURE ignores the directionless Boss competitor analysis system card', async () => {
+  const h = createHarness({
+    messages: [
+      {
+        id: 'known-outgoing',
+        direction: 'outgoing',
+        text: '历史回复'
+      },
+      {
+        id: '',
+        direction: 'unknown',
+        text: '你与该职位竞争者PK情况 共10人投递 查看详细分析',
+        historyType: 4,
+        at: null
+      }
+    ]
+  });
+  const result = await h.dispatch({ type: 'CAPTURE_ACTIVE_CONVERSATION' });
+  assert.equal(result.success, true);
+  assert.equal(result.baselineIncomingFingerprint, '');
+});
+
+test('CAPTURE uses history message direction and ignores Boss system messages', async () => {
+  const h = createHarness({
+    messages: [
+      {
+        id: '337069469603329',
+        direction: 'unknown',
+        historyType: 3,
+        historyReceived: true,
+        text: '方便发一份简历吗'
+      },
+      {
+        id: '337069469603330',
+        direction: 'unknown',
+        historyType: 4,
+        text: '对方已同意，您的附件简历已发送给对方'
+      }
+    ]
+  });
+
+  const result = await h.dispatch({ type: 'CAPTURE_ACTIVE_CONVERSATION' });
+
+  assert.equal(result.success, true);
+  assert.equal(result.baselineIncomingFingerprint, 'id:337069469603329');
+});
+
+test('CAPTURE accepts the live Boss type-1 plain-text envelope', async () => {
+  const h = createHarness({
+    messages: [{
+      id: '337069469603333',
+      direction: 'unknown',
+      historyType: 1,
+      historyBodyType: 1,
+      historyReceived: true,
+      text: '方便发一份简历吗'
+    }]
+  });
+
+  const result = await h.dispatch({ type: 'CAPTURE_ACTIVE_CONVERSATION' });
+
+  assert.equal(result.success, true);
+  assert.equal(result.baselineIncomingFingerprint, 'id:337069469603333');
+});
+
+test('CAPTURE prefers structured friend identity over composite DOM text', async () => {
+  const h = createHarness({
+    activeText: '韩女士 杭州益身礼 数据运营招聘专员',
+    activeNameText: '韩女士杭州益身礼数据运营招聘专员',
+    activeCompanyText: '韩女士杭州益身礼数据运营招聘专员',
+    friends: [{
+      encryptUid: 'conv1',
+      name: '韩女士',
+      brandName: '杭州益身礼',
+      jobName: '数据运营招聘专员'
+    }]
+  });
+
+  const result = await h.dispatch({ type: 'CAPTURE_ACTIVE_CONVERSATION' });
+
+  assert.equal(result.success, true);
+  assert.deepEqual(
+    { company: result.company, position: result.position, hrName: result.hrName },
+    { company: '杭州益身礼', position: '数据运营招聘专员', hrName: '韩女士' }
+  );
+});
+
+test('GET builds the baseline from history API when DOM system nodes have no direction', async () => {
+  const h = createHarness({
+    messages: [
+      {
+        id: '337069469603331',
+        direction: 'incoming',
+        historyType: 3,
+        text: '还在看机会吗'
+      },
+      {
+        id: '337069469603332',
+        direction: 'unknown',
+        historyType: 4,
+        text: '您的消息已被心仪 Boss 优先查看'
+      }
+    ]
+  });
+
+  const result = await h.dispatch({
+    type: 'GET_ACTIVE_CONVERSATION_REF',
+    expected: h.expected
+  });
+
+  assert.equal(result.success, true);
+  assert.equal(result.baselineIncomingFingerprint, 'id:337069469603331');
 });
 
 test('CAPTURE ignores a foreign resource that mimics the Boss history path', async () => {
@@ -732,7 +1025,7 @@ test('CAPTURE ignores a foreign resource that mimics the Boss history path', asy
   assert.equal(result.conversationRef.conversationId, 'current-peer');
 });
 
-test('CAPTURE rejects ambiguous Boss history ids without independent ownership', async () => {
+test('CAPTURE uses the newest Boss history id after the user switches conversations', async () => {
   const h = createHarness({
     activeDataset: {},
     activeLinkDataset: {},
@@ -752,8 +1045,8 @@ test('CAPTURE rejects ambiguous Boss history ids without independent ownership',
     ]
   });
   const result = await h.dispatch({ type: 'CAPTURE_ACTIVE_CONVERSATION' });
-  assert.equal(result.success, false);
-  assert.equal(result.errorCode, 'TARGET_UNCERTAIN');
+  assert.equal(result.success, true);
+  assert.equal(result.conversationRef.conversationId, 'current-peer');
 });
 
 test('CAPTURE rejects malformed matching history resources instead of using an older id', async () => {
@@ -801,6 +1094,40 @@ test('CAPTURE prefers the page uid over an older history resource', async () => 
   assert.equal(result.conversationRef.conversationId, 'current-peer');
 });
 
+test('CAPTURE ignores a stale page uid after the visible Boss conversation switches', async () => {
+  const h = createHarness({
+    activeText: '谭辉 江西盐选科技有限公司 人事',
+    headerText: '谭辉 江西盐选科技有限公司 跨境电商运营助理（五险）',
+    activeDataset: {},
+    activeLinkDataset: {},
+    activeHref: '',
+    containerDataset: {},
+    locationHref: 'https://www.zhipin.com/web/geek/chat?uid=stale-peer',
+    historyResources: [{
+      name: 'https://www.zhipin.com/wapi/zpchat/geek/historyMsg?bossId=current-peer'
+    }],
+    friends: [
+      {
+        encryptUid: 'stale-peer',
+        name: '徐海霞',
+        brandName: '智驭信息'
+      },
+      {
+        encryptUid: 'current-peer',
+        name: '谭辉',
+        brandName: '江西盐选科技有限公司'
+      }
+    ]
+  });
+
+  const result = await h.dispatch({ type: 'CAPTURE_ACTIVE_CONVERSATION' });
+
+  assert.equal(result.success, true);
+  assert.equal(result.conversationRef.conversationId, 'current-peer');
+  assert.equal(result.company, '江西盐选科技有限公司');
+  assert.equal(result.hrName, '谭辉');
+});
+
 test('CAPTURE rejects when the active conversation has no identity text', async () => {
   const h = createHarness({ activeText: '', headerText: '' });
   const result = await h.dispatch({ type: 'CAPTURE_ACTIVE_CONVERSATION' });
@@ -832,7 +1159,15 @@ test('PROBE_PEER_IDENTITY reports whether DOM id matches encryptUid', async () =
 });
 
 test('READ accepts DOM conversationId when it is an alias of the managed peerId', async () => {
-  const h = createHarness();
+  const h = createHarness({
+    friends: [{
+      encryptUid: 'peer~~stable',
+      uid: 'conv1',
+      name: '示例HR',
+      brandName: '示例公司',
+      jobName: '示例岗位'
+    }]
+  });
   const result = await h.dispatch({
     type: 'READ_ACTIVE_CONVERSATION',
     expected: h.expected,
@@ -846,6 +1181,161 @@ test('READ accepts DOM conversationId when it is an alias of the managed peerId'
   assert.equal(result.success, true);
   assert.equal(result.conversationRef.conversationId, 'peer~~stable');
   assert.equal(result.conversationRef.url, 'https://www.zhipin.com/web/geek/chat?uid=peer~~stable');
+});
+
+test('READ uses the registered stable peer when the friend list is temporarily unavailable', async () => {
+  const h = createHarness({ friendListUnavailable: true });
+
+  const result = await h.dispatch({
+    type: 'READ_ACTIVE_CONVERSATION',
+    expected: h.expected,
+    conversationRef: h.ref,
+    lastFingerprint: 'id:initial-incoming'
+  });
+
+  assert.equal(result.success, true);
+  assert.equal(result.conversationRef.conversationId, h.ref.conversationId);
+  assert.deepEqual(Array.from(result.messages), []);
+});
+
+test('READ uses history API direction instead of directionless DOM messages', async () => {
+  const h = createHarness({
+    messages: [{
+      id: '337069469603340',
+      direction: 'unknown',
+      historyType: 3,
+      historyReceived: true,
+      text: '第一条来信'
+    }]
+  });
+  h.addMessage({
+    id: '337069469603341',
+    direction: 'unknown',
+    historyType: 3,
+    historyReceived: true,
+    text: '第二条来信'
+  });
+
+  const result = await h.dispatch({
+    type: 'READ_ACTIVE_CONVERSATION',
+    expected: h.expected,
+    conversationRef: h.ref,
+    lastFingerprint: 'id:337069469603340'
+  });
+
+  assert.equal(result.success, true);
+  assert.deepEqual(Array.from(result.messages, (item) => item.text), ['第二条来信']);
+  assert.equal(result.baselineIncomingFingerprint, 'id:337069469603341');
+});
+
+test('READ keeps an unknown history body type as a non-text message instead of failing the batch', async () => {
+  const h = createHarness({
+    messages: [{ id: '337069469603360', direction: 'incoming', text: '第一条来信' }]
+  });
+  h.addMessage({
+    id: '337069469603361',
+    direction: 'unknown',
+    historyType: 9,
+    historyBodyType: 42,
+    historyReceived: true,
+    text: '无法解析的正文'
+  });
+
+  const result = await h.dispatch({
+    type: 'READ_ACTIVE_CONVERSATION',
+    expected: h.expected,
+    conversationRef: h.ref,
+    lastFingerprint: 'id:337069469603360'
+  });
+
+  assert.equal(result.success, true);
+  assert.deepEqual(
+    Array.from(result.messages, (item) => ({ kind: item.kind, text: item.text })),
+    [{ kind: 'attachment', text: '' }]
+  );
+  assert.equal(result.baselineIncomingFingerprint, 'id:337069469603361');
+});
+
+test('READ skips a history entry without an explicit direction and still reads the rest', async () => {
+  const h = createHarness({
+    messages: [{ id: '337069469603370', direction: 'incoming', text: '第一条来信' }]
+  });
+  h.addMessage({
+    id: '337069469603371',
+    direction: 'unknown',
+    historyType: 5,
+    historyReceived: null,
+    text: '没有方向的系统提示'
+  });
+  h.addMessage({
+    id: '337069469603372',
+    direction: 'unknown',
+    historyType: 3,
+    historyReceived: true,
+    text: '第二条来信'
+  });
+
+  const result = await h.dispatch({
+    type: 'READ_ACTIVE_CONVERSATION',
+    expected: h.expected,
+    conversationRef: h.ref,
+    lastFingerprint: 'id:337069469603370'
+  });
+
+  assert.equal(result.success, true);
+  assert.deepEqual(Array.from(result.messages, (item) => item.text), ['第二条来信']);
+});
+
+test('READ keeps an empty text body as a non-text message instead of dropping the batch', async () => {
+  const h = createHarness({
+    messages: [{ id: '337069469603375', direction: 'incoming', text: '第一条来信' }]
+  });
+  h.addMessage({
+    id: '337069469603376',
+    direction: 'unknown',
+    historyType: 1,
+    historyBodyType: 1,
+    historyReceived: true,
+    text: '   '
+  });
+
+  const result = await h.dispatch({
+    type: 'READ_ACTIVE_CONVERSATION',
+    expected: h.expected,
+    conversationRef: h.ref,
+    lastFingerprint: 'id:337069469603375'
+  });
+
+  assert.equal(result.success, true);
+  assert.deepEqual(
+    Array.from(result.messages, (item) => ({ kind: item.kind, text: item.text })),
+    [{ kind: 'attachment', text: '' }]
+  );
+});
+
+test('READ falls back to the history timestamp when a message carries no usable mid', async () => {
+  const h = createHarness({
+    messages: [{ id: '337069469603380', direction: 'incoming', text: '第一条来信' }]
+  });
+  h.addMessage({
+    id: '',
+    direction: 'unknown',
+    historyType: 3,
+    historyReceived: true,
+    historyTime: 1770000000123,
+    text: '没有 mid 的来信'
+  });
+
+  const result = await h.dispatch({
+    type: 'READ_ACTIVE_CONVERSATION',
+    expected: h.expected,
+    conversationRef: h.ref,
+    lastFingerprint: 'id:337069469603380'
+  });
+
+  assert.equal(result.success, true);
+  assert.deepEqual(Array.from(result.messages, (item) => item.text), ['没有 mid 的来信']);
+  assert.match(result.baselineIncomingFingerprint, /^hash:/);
 });
 
 test('READ rejects an outgoing fingerprint as an incoming baseline', async () => {
@@ -912,7 +1402,7 @@ test('managed operations wrap login and block failures with stable error codes',
   })).errorCode, 'BOSS_BLOCKED');
 });
 
-test('managed read and send reject a user-visible tab at the content-script boundary', async () => {
+test('managed send rejects a user-visible tab while the passive read still works there', async () => {
   const h = createHarness({ visibilityState: 'visible' });
   h.input._onDispatch = () => { h.externalActions++; };
   h.button._onClick = () => { h.externalActions++; };
@@ -931,15 +1421,131 @@ test('managed read and send reject a user-visible tab at the content-script boun
     intentId: 'intent-1'
   });
 
-  assert.deepEqual(
-    { success: read.success, errorCode: read.errorCode },
-    { success: false, errorCode: 'TARGET_UNCERTAIN' }
-  );
+  assert.equal(read.success, true);
   assert.deepEqual(
     { success: sent.success, errorCode: sent.errorCode },
     { success: false, errorCode: 'TARGET_UNCERTAIN' }
   );
   assert.equal(h.externalActions, 0);
+});
+
+test('OPEN activates the uniquely matching registered conversation without sending a message', async () => {
+  const h = createHarness({
+    visibilityState: 'visible',
+    activeText: '其他公司 其他岗位 其他HR',
+    headerText: '其他公司 其他岗位 其他HR',
+    activeDataset: { conversationId: 'conv-other' },
+    activeLinkDataset: { conversationId: 'conv-other' },
+    containerDataset: { conversationId: 'conv-other' }
+  });
+  h.addConversationCandidate({
+    conversationId: 'conv1',
+    text: '示例HR 示例公司 示例岗位'
+  });
+  h.input._onDispatch = () => { h.externalActions++; };
+  h.button._onClick = () => { h.externalActions++; };
+
+  const result = await new Promise((resolve) => {
+    const keepsChannelOpen = h.listener({
+      type: 'OPEN_MANAGED_CONVERSATION',
+      expected: h.expected,
+      conversationRef: h.ref
+    }, {}, resolve);
+    if (keepsChannelOpen !== true) resolve(null);
+  });
+
+  assert.equal(result && result.success, true);
+  assert.equal(result.conversationRef.conversationId, 'conv1');
+  assert.equal(h.activeItem.dataset.conversationId, 'conv1');
+  assert.equal(h.externalActions, 0);
+});
+
+test('OPEN waits for a slow Boss SPA conversation switch before confirming the target', async () => {
+  const h = createHarness({
+    visibilityState: 'visible',
+    activeText: '其他公司 其他岗位 其他HR',
+    headerText: '其他公司 其他岗位 其他HR',
+    activeDataset: { conversationId: 'conv-other' },
+    activeLinkDataset: { conversationId: 'conv-other' },
+    containerDataset: { conversationId: 'conv-other' }
+  });
+  h.addConversationCandidate({
+    conversationId: 'conv1',
+    text: '示例HR 示例公司 示例岗位',
+    switchAfterSleeps: 40
+  });
+
+  const result = await h.dispatch({
+    type: 'OPEN_MANAGED_CONVERSATION',
+    expected: h.expected,
+    conversationRef: h.ref
+  });
+
+  assert.equal(result.success, true);
+  assert.equal(result.conversationRef.conversationId, 'conv1');
+  assert.equal(h.activeItem.dataset.conversationId, 'conv1');
+});
+
+test('OPEN accepts the uniquely matching managed peer when the Boss page uid is stale', async () => {
+  const h = createHarness({
+    visibilityState: 'visible',
+    activeText: '示例HR 示例公司 示例岗位',
+    headerText: '示例HR 示例公司 示例岗位',
+    activeDataset: {},
+    activeLinkDataset: {},
+    activeHref: '',
+    containerDataset: {},
+    locationHref: 'https://www.zhipin.com/web/geek/chat?uid=stale-peer',
+    historyResources: [{
+      name: 'https://www.zhipin.com/wapi/zpchat/geek/historyMsg?bossId=conv1'
+    }]
+  });
+
+  const result = await h.dispatch({
+    type: 'OPEN_MANAGED_CONVERSATION',
+    expected: h.expected,
+    conversationRef: h.ref
+  });
+
+  assert.equal(result.success, true);
+  assert.equal(result.conversationRef.conversationId, 'conv1');
+});
+
+test('SEND activates the uniquely matching registered conversation before entering the send protocol', async () => {
+  const h = createHarness({
+    activeText: '其他公司 其他岗位 其他HR',
+    headerText: '其他公司 其他岗位 其他HR',
+    activeDataset: { conversationId: 'conv-other' },
+    activeLinkDataset: { conversationId: 'conv-other' },
+    containerDataset: { conversationId: 'conv-other' },
+    messages: [{ id: 'old-outgoing', direction: 'outgoing', text: '旧消息' }]
+  });
+  h.addConversationCandidate({
+    conversationId: 'conv1',
+    text: '示例HR 示例公司 示例岗位'
+  });
+  h.input._onDispatch = (event) => {
+    if (event.type !== 'keydown' || event.key !== 'Enter') return;
+    h.externalActions++;
+    h.addMessage({
+      id: 'sent-after-activation',
+      direction: 'outgoing',
+      text: '确认收到'
+    });
+    h.input.textContent = '';
+  };
+
+  const result = await h.dispatch({
+    type: 'SEND_MANAGED_REPLY',
+    expected: h.expected,
+    conversationRef: h.ref,
+    draft: '确认收到'
+  });
+
+  assert.equal(result.success, true);
+  assert.equal(result.targetConversationId, 'conv1');
+  assert.equal(result.sentFingerprint, 'id:sent-after-activation');
+  assert.equal(h.externalActions, 1);
 });
 
 test('SEND refuses Enter when the temporary tab becomes visible after draft fill', async () => {
@@ -1039,6 +1645,41 @@ test('SEND requires a new scoped outgoing bubble matching the draft', async () =
   assert.equal(result.sentFingerprint, 'id:sent-evidence');
   assert.equal(result.targetConversationId, 'conv1');
   assert.equal(Number.isFinite(result.observedAt) && result.observedAt > 0, true);
+  assert.equal(h.externalActions, 1);
+});
+
+test('SEND verifies evidence through history API despite directionless DOM system messages', async () => {
+  const h = createHarness({
+    messages: [
+      { id: '337069469603350', direction: 'outgoing', text: '旧消息' },
+      {
+        id: '337069469603351',
+        direction: 'unknown',
+        historyType: 4,
+        text: '对方已同意，您的附件简历已发送给对方'
+      }
+    ]
+  });
+  h.input._onDispatch = (event) => {
+    if (event.type !== 'keydown' || event.key !== 'Enter') return;
+    h.externalActions++;
+    h.addMessage({
+      id: '337069469603352',
+      direction: 'outgoing',
+      text: '确认收到'
+    });
+    h.input.textContent = '';
+  };
+
+  const result = await h.dispatch({
+    type: 'SEND_MANAGED_REPLY',
+    expected: h.expected,
+    conversationRef: h.ref,
+    draft: '确认收到'
+  });
+
+  assert.equal(result.success, true);
+  assert.equal(result.sentFingerprint, 'id:337069469603352');
   assert.equal(h.externalActions, 1);
 });
 

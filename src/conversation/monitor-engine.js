@@ -19,8 +19,24 @@
     'important',
     'unknown'
   ]);
-  var GLOBAL_READER_ERRORS = new Set(['LOGIN_REQUIRED', 'BOSS_BLOCKED']);
-  var CONVERSATION_READER_ERRORS = new Set(['TARGET_UNCERTAIN', 'SELECTOR_UNAVAILABLE']);
+  var GLOBAL_READER_ERRORS = new Set([
+    'LOGIN_REQUIRED',
+    'BOSS_BLOCKED',
+    'PREREQUISITE_CHANGED'
+  ]);
+  var RETRYABLE_READ_PAUSE_CODES = new Set([
+    'CONVERSATION_UNAVAILABLE',
+    'SELECTOR_UNAVAILABLE',
+    'CONTENT_SCRIPT_UNAVAILABLE'
+  ]);
+  var CONVERSATION_READER_ERRORS = new Set([
+    'TARGET_UNCERTAIN',
+    'SELECTOR_UNAVAILABLE',
+    'MESSAGE_ORDER_UNCERTAIN',
+    'BASELINE_NOT_FOUND',
+    'BASELINE_REQUIRED',
+    'CONTENT_SCRIPT_UNAVAILABLE'
+  ]);
   var NOTIFICATION_FAILURE_CODES = new Set([
     'NETWORK_ERROR',
     'HTTP_ERROR',
@@ -32,6 +48,10 @@
     'BOSS_BLOCKED',
     'TARGET_UNCERTAIN',
     'SELECTOR_UNAVAILABLE',
+    'MESSAGE_ORDER_UNCERTAIN',
+    'BASELINE_NOT_FOUND',
+    'BASELINE_REQUIRED',
+    'CONTENT_SCRIPT_UNAVAILABLE',
     'CONVERSATION_UNAVAILABLE',
     'SEND_RESULT_UNKNOWN',
     'AI_CLASSIFY_FAILED',
@@ -39,6 +59,7 @@
     'AI_DRAFT_FAILED',
     'AI_DRAFT_INVALID',
     'API_PROOF_STALE',
+    'PREREQUISITE_CHANGED',
     'DUPLICATE_MESSAGE',
     'AUTO_REPLY_NOT_ALLOWED',
     'DAILY_AUTO_REPLY_LIMIT_REACHED',
@@ -66,6 +87,7 @@
     'markSendUnknown',
     'markConversationChecked',
     'pauseConversation',
+    'recordReadFailure',
     'resolveApprovalWithoutSend',
     'recordNotificationAttempt'
   ];
@@ -255,6 +277,7 @@
   }
 
   function mapReaderError(code) {
+    if (code === 'API_PROOF_STALE') return 'PREREQUISITE_CHANGED';
     if (GLOBAL_READER_ERRORS.has(code) || CONVERSATION_READER_ERRORS.has(code)) return code;
     return 'CONVERSATION_UNAVAILABLE';
   }
@@ -389,12 +412,29 @@
         await store.saveSettings({ paused: true, pauseCode: mappedCode, pauseReason: '' });
         return true;
       }
-      if (CONVERSATION_READER_ERRORS.has(mappedCode)) {
-        await store.pauseConversation(conversation.conversationId, mappedCode);
-        return false;
-      }
-      await store.pauseConversation(conversation.conversationId, 'CONVERSATION_UNAVAILABLE');
+      await store.recordReadFailure(
+        conversation.conversationId,
+        CONVERSATION_READER_ERRORS.has(mappedCode) ? mappedCode : 'CONVERSATION_UNAVAILABLE'
+      );
       return false;
+    }
+
+    // 只有还没有累计过只读失败的暂停（旧版本或发送前读取写入的）才在周期开始无损恢复一次；
+    // 退避次数已经用尽的暂停仍然要求人工核对。
+    async function resumeStaleReadPause(conversation, output) {
+      if (conversation.state !== 'PAUSED' ||
+        !RETRYABLE_READ_PAUSE_CODES.has(conversation.pauseCode) ||
+        conversation.pendingApprovalId ||
+        (conversation.sendIntent && conversation.sendIntent.status === 'SENDING') ||
+        conversation.readFailureCount !== 0) {
+        return conversation;
+      }
+      try {
+        return await store.setManaged(conversation.conversationId, true);
+      } catch (error) {
+        addError(output, mapStoreError(error && error.code));
+        return conversation;
+      }
     }
 
     async function notifyPendingApprovals(settings, quiet, notifiedThisCycle, output) {
@@ -737,7 +777,7 @@
 
       for (var selectedIndex = 0; selectedIndex < selected.length; selectedIndex += 1) {
         if (stopGlobally) break;
-        var conversation = selected[selectedIndex];
+        var conversation = await resumeStaleReadPause(selected[selectedIndex], output);
         attemptedSlots += 1;
         if (conversation.state !== 'WAITING_HR' &&
           conversation.state !== 'WAITING_CONFIRMATION') {

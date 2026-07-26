@@ -48,7 +48,11 @@
           apiConfigVersion: Number.isSafeInteger(all.apiConfigVersion) &&
             all.apiConfigVersion >= 0 ? all.apiConfigVersion : 0,
           apiLastTestVersion: Number.isSafeInteger(all.apiLastTestVersion) &&
-            all.apiLastTestVersion >= 0 ? all.apiLastTestVersion : 0
+            all.apiLastTestVersion >= 0 ? all.apiLastTestVersion : 0,
+          apiLastTestOk: all.apiLastTestOk === true,
+          apiLastTestAt: Number.isFinite(Number(all.apiLastTestAt))
+            ? Number(all.apiLastTestAt)
+            : 0
         };
         return chrome.storage.local.set(patch).then(function () {
           return Object.assign({}, all, patch);
@@ -74,7 +78,11 @@
           apiConfigVersion: Number.isSafeInteger(all.apiConfigVersion) &&
             all.apiConfigVersion >= 0 ? all.apiConfigVersion : 0,
           apiLastTestVersion: Number.isSafeInteger(all.apiLastTestVersion) &&
-            all.apiLastTestVersion >= 0 ? all.apiLastTestVersion : 0
+            all.apiLastTestVersion >= 0 ? all.apiLastTestVersion : 0,
+          apiLastTestOk: all.apiLastTestOk === true,
+          apiLastTestAt: Number.isFinite(Number(all.apiLastTestAt))
+            ? Number(all.apiLastTestAt)
+            : 0
         });
         return flat;
       });
