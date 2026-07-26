@@ -141,8 +141,8 @@
     return facts;
   }
 
-  function idsAreSubset(ids, facts) {
-    if (!Array.isArray(ids) || ids.length === 0) return false;
+  function idsAreSubset(ids, facts, requireOne) {
+    if (!Array.isArray(ids) || (requireOne && ids.length === 0)) return false;
     var allowed = new Set(facts.map(function (fact) { return fact.id; }));
     var seen = new Set();
     return ids.every(function (id) {
@@ -163,7 +163,7 @@
       !boundedString(value.reasonCode, 120) ||
       !Array.isArray(value.fieldsNeeded) ||
       !value.fieldsNeeded.every(function (field) { return boundedString(field, 120); }) ||
-      !idsAreSubset(value.evidenceIds, facts)) {
+      !idsAreSubset(value.evidenceIds, facts, value.category === 'resume_fact')) {
       throw engineError('AI_CLASSIFICATION_INVALID');
     }
     return {
@@ -180,7 +180,7 @@
       typeof value.draft !== 'string' ||
       value.draft.trim() === '' ||
       Array.from(value.draft).length > MAX_DRAFT_CODE_POINTS ||
-      !idsAreSubset(value.evidenceIds, facts)) {
+      !idsAreSubset(value.evidenceIds, facts, true)) {
       throw engineError('AI_DRAFT_INVALID');
     }
     return { draft: value.draft.trim(), evidenceIds: value.evidenceIds.slice() };

@@ -306,6 +306,45 @@ test('confidence 0.85 with valid resume evidence sends once after a second polic
   assert.equal(snapshot.managedConversations['conv-1'].sendIntent.mode, 'AUTO');
 });
 
+test('an important explicit rejection needs no resume evidence and still requires confirmation', async () => {
+  const harness = await makeHarness({
+    reader: {
+      async read(conversation) {
+        return readOk(conversation, [incoming('reject', '不合适')], 'id:reject');
+      },
+      async send() {
+        throw new Error('must not send');
+      }
+    },
+    classifier: {
+      async classify() {
+        return {
+          category: 'important',
+          confidence: 0.99,
+          reasonCode: 'EXPLICIT_REJECTION',
+          evidenceIds: [],
+          fieldsNeeded: []
+        };
+      },
+      async draft() {
+        throw new Error('explicit rejection needs no automatic draft');
+      }
+    }
+  });
+  await harness.register(['conv-1']);
+  await harness.enableGlobal();
+
+  const summary = await harness.engine.runCycle();
+  const snapshot = await harness.store.getSnapshot();
+  const approval = snapshot.pendingApprovals[
+    snapshot.managedConversations['conv-1'].pendingApprovalId
+  ];
+
+  assert.equal(summary.autoSent, 0);
+  assert.equal(summary.pending, 1);
+  assert.equal(approval.reasonCode, 'CATEGORY_REQUIRES_CONFIRMATION');
+});
+
 test('low confidence, hard risk, AI failure, non-text, and evidence mismatch become local approvals', async () => {
   const messages = {
     low: incoming('low', '您好'),
