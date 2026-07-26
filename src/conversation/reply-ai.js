@@ -78,31 +78,40 @@
     };
   }
 
+  function jobseekerRules() {
+    return [
+      '身份：我是求职者本人。回复简短、自然、礼貌，不超过45个汉字。',
+      '最高优先级：',
+      '1. HR明确表示“不合适、不匹配、暂不考虑、不符合、岗位关闭、已招满、谢谢关注、祝求职顺利”时，不继续争取，不追问原因，不生成自动回复，将会话视为“已结束－未匹配”。',
+      '2. “经验可能不太匹配”等含糊表达，只生成草稿并等待人工确认。',
+      '3. 只有能从简历或已填写问答直接获得答案的低风险事实问题，才允许自动回复。',
+      '4. 不编造经验、年限、项目和公司，不承诺薪资、面试或到岗时间。',
+      '5. 若用户选择礼貌结束，只回复一次：“好的，感谢您的回复，祝工作顺利。”',
+      '6. 会话结束后，即使再次定时检查，也不得重复回复。',
+      '兼容当前分类协议：遇到第1条时，category必须为important且reasonCode为EXPLICIT_REJECTION；遇到第2条时，category必须为important。两种情况都不得自动批准。'
+    ];
+  }
+
   function systemPrompt(kind) {
     if (kind === 'draft') {
-      return [
-        'You are the job seeker in an ongoing Boss chat after the first greeting.',
-        'Goal: help win a chance to continue talking or interview — 争取岗位机会.',
-        'Draft one short Chinese reply. Prefer about 80 Chinese characters or fewer; never write a resume-style essay, bullet list, or long self-introduction.',
+      return jobseekerRules().concat([
+        'Draft one short Chinese reply using no more than 45 Chinese characters; never write a resume-style essay, bullet list, or long self-introduction.',
         'Use only the supplied resume facts when stating experience; never invent skills, years, companies, or projects.',
-        'If facts are weak or the fit looks incomplete, do NOT refuse or sound cold — briefly show strong interest and ask for a try / chat / interview chance (想试一试、希望给一次机会).',
         'The deterministic policy is authoritative. It runs after you and can reject every result.',
         'Important topics including salary/薪资, interview/面试, arrival or start date/到岗, resignation, contact details, experience expansion, assessments, offers, or commitments cannot be auto-approved.',
         'Use only approved categories: ' + CATEGORIES.join(', ') + '.',
         'Return exactly one JSON object with no prose and no markdown fences.',
         'Schema: {"draft":"nonempty string no longer than 300 Unicode code points","evidenceIds":["nonempty resume fact id"]}. Evidence IDs must be nonempty and unique.'
-      ].join('\n');
+      ]).join('\n');
     }
-    return [
-      'You are an assistant in a job-conversation workflow.',
+    return jobseekerRules().concat([
       'Classify the newest recruiter message using the supplied target conversation and resume facts.',
-      'Do not treat a weak skill match as a reason to sound rejecting; low-risk courtesy questions stay in low-risk categories when appropriate.',
       'The deterministic policy is authoritative. It runs after you and can reject every result.',
       'Important topics including salary/薪资, interview/面试, arrival or start date/到岗, resignation, contact details, experience expansion, assessments, offers, or commitments cannot be auto-approved.',
       'Use only approved categories: ' + CATEGORIES.join(', ') + '.',
       'Return exactly one JSON object with no prose and no markdown fences.',
       'Schema: {"category":"approved category","confidence":0..1,"reasonCode":"nonempty string","evidenceIds":["resume fact id"],"fieldsNeeded":["nonempty field name"]}. resume_fact requires evidenceIds.'
-    ].join('\n');
+    ]).join('\n');
   }
 
   function buildMessages(input, kind) {

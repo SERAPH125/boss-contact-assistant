@@ -168,7 +168,7 @@ Task 7 组合层必须保持一个后台 Worker、一个共享 storage 对象和
 
 托管主键对齐开源实践：以好友列表 API 的 **`encryptUid` 作为 canonical peerId**（存储字段名仍为 `conversationId`），打开 URL 统一为 `?uid=<peerId>`；DOM 上的 `conversationId`/`uid` 仅作 `aliases`。活动会话、身份和发送控件仍要求 DOM owned-scope；登记基线、周期增量与发送后证据改读当前页面同源 `/wapi/zpchat/geek/historyMsg`，**不引入 MQTT / 内部发信协议，也不调用内部发信 API**。好友列表或历史接口不可用、响应结构不明确、无法唯一对齐时均失败关闭，不得用未验证 DOM ID 或页面文案冒充稳定主键。
 
-**首条招呼不由托管/联系 AI 生成**：联系流程只发送用户配置的招呼语模板（可含 `{jobName}` / `{company}`）。建联后的多轮草稿由 ReplyAI 生成，目标是简短争取继续沟通或面试机会；匹配不足时也表达想试一试，不得编造简历事实；薪资/面试/到岗等硬风险仍进待确认。
+**首条招呼不由托管/联系 AI 生成**：联系流程只发送用户配置的招呼语模板（可含 `{jobName}` / `{company}`）。建联后的多轮分类与草稿统一采用“求职者本人”身份、45 个汉字上限和六条最高优先级规则：明确拒绝时提示模型不要继续争取或生成自动回复，并要求在现有枚举内归为 `important`；含糊拒绝也归为 `important` 并等待人工确认；事实回复只能引用简历或 HR 常用问答，不得编造经验或承诺薪资、面试和到岗时间；用户选择礼貌结束时只建议一次固定回复，结束后的后续检查不得重复回复。该变更仅约束模型输出，不新增拒绝分类、会话终态或确定性拦截；最终动作仍由现有策略与状态机决定，薪资/面试/到岗等硬风险仍进待确认。
 
 `src/platform/boss/peer-identity.js` 负责纯函数解析：`resolvePeerIdentity({ domIds, friends, origin })` → `{ peerId, url, aliases, peerSource: 'encryptUid' }`。`src/platform/boss/conversation-reader.js` 仍是零 DOM、零网络模块，只从页面 URL / 活动链接 / dataset 抽取原始 `conversationId` 或 `uid`；公司、岗位、HR、预览文本不能生成会话 ID。
 

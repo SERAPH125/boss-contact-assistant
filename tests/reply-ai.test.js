@@ -112,11 +112,32 @@ test('draft prompt has the same bounded allowlisted context and approved categor
   assert.equal(messages.length, 2);
   assert.match(messages[0].content, /still_looking/);
   assert.match(messages[0].content, /deterministic policy is authoritative/i);
-  assert.match(messages[0].content, /争取岗位|win a chance|试一试|try/i);
-  assert.match(messages[0].content, /80 Chinese characters|简短|short/i);
+  assert.match(messages[0].content, /45 Chinese characters|45个汉字/i);
   assert.match(messages[0].content, /never invent|不得编造|only the supplied resume facts/i);
+  assert.doesNotMatch(messages[0].content, /If facts are weak or the fit looks incomplete/);
   assert.match(serialized, /resume-line-1/);
   assert.doesNotMatch(serialized, /api-key-secret|open\.feishu\.cn|消息 0/);
+});
+
+test('classification and draft prompts carry the approved jobseeker reply rules', function () {
+  const classificationPrompt = ReplyAI.buildClassificationMessages(promptInput)[0].content;
+  const draftPrompt = ReplyAI.buildDraftMessages(promptInput)[0].content;
+
+  for (const prompt of [classificationPrompt, draftPrompt]) {
+    assert.match(prompt, /job seeker|求职者本人/i);
+    assert.match(prompt, /45 Chinese characters|45个汉字/i);
+    assert.match(prompt, /不合适/);
+    assert.match(prompt, /不匹配/);
+    assert.match(prompt, /暂不考虑/);
+    assert.match(prompt, /岗位关闭/);
+    assert.match(prompt, /已招满/);
+    assert.match(prompt, /已结束[－-]未匹配/);
+    assert.match(prompt, /等待人工确认/);
+    assert.match(prompt, /不编造/);
+    assert.match(prompt, /不承诺薪资、面试或到岗时间/);
+    assert.match(prompt, /好的，感谢您的回复，祝工作顺利。/);
+    assert.match(prompt, /不得重复回复/);
+  }
 });
 
 test('prompts keep the latest twenty target messages in chronological order', function () {
