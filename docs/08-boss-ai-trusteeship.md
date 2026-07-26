@@ -33,6 +33,8 @@
 - 自动回复日限默认 10，所有配置和决策都硬裁剪为 1–20。
 - 只有全局 `settings.enabled === true` 且会话 `conversationEnabled === true`，才可能返回 `AUTO_REPLY`；任一条件为 `false` 或缺失均进入人工确认。AI 置信度、依据、类别、待办、日限和静默检查不构成对这两个显式授权门的替代。
 - 在双开关已开启的前提下，只有 `still_looking`、`resume_permission`、`courtesy`、`please_wait`、`resume_fact` 五类，且 AI 置信度 `>= 0.85`、有非空简历/明确配置依据、无待确认任务、未到日限、非静默时段时，才返回 `AUTO_REPLY`。
+- `explicit_rejection` 是独立结束动作，不进入普通自动回复白名单。只有 AI 同时给出 `confidence >= 0.90`、`reasonCode=EXPLICIT_REJECTION`、空 `evidenceIds` 和空 `fieldsNeeded`，且全局/单会话开启、没有活动待办时，策略才返回 `AUTO_CLOSE`；静默时段返回 `DEFER_AUTO_CLOSE`。该动作不回答原问题，所以不受原消息中的普通硬风险词或每日自动回复额度阻挡。这里没有读取 HR 正文的拒绝关键词或正则。
+- `validateAutoCloseDraft` 只校验 AI 已生成的外发结束语：去首尾空白后必须为 1–45 个 Unicode code points、单行、礼貌且不含问题、列表、继续争取、经历推销或薪资/面试/到岗承诺。校验器不读取 HR 正文，也不参与判断是否属于明确拒绝。
 - 薪资、面试、到岗、离职原因、联系方式、经历补充、测评/作业/Offer/承诺均由文本规则先拦截；例如 `月薪`、`年薪`、`笔试`、`机试`、`测试题`、`工作经验`、`项目经验`。图片、附件、语音及任何非 `text` 类型也一律人工确认。AI 结果不能覆盖这些结论。
 - 英文薪资只匹配明确短语 `salary package` 和 `compensation package`；单独的 `package`（例如 `package manager`）不视为薪资风险。
 
@@ -46,6 +48,8 @@
 | 静默、已有待办、已达日限 | `QUIET_HOURS` / `PENDING_APPROVAL_EXISTS` / `DAILY_AUTO_REPLY_LIMIT_REACHED` |
 | AI 不可用、类别非白名单、置信度不足、缺少依据 | `AI_UNAVAILABLE` / `CATEGORY_REQUIRES_CONFIRMATION` / `AI_CONFIDENCE_TOO_LOW` / `MISSING_RESUME_EVIDENCE` |
 | 通过所有确定性门 | `AUTO_REPLY_ALLOWED` |
+| 明确拒绝立即结束 / 静默延迟结束 | `EXPLICIT_REJECTION_AUTO_CLOSE` / `QUIET_HOURS_AUTO_CLOSE` |
+| 结束语安全校验 | `AUTO_CLOSE_DRAFT_VALID` 或固定 `AUTO_CLOSE_DRAFT_*` 失败码 |
 
 ## AI 分类与草稿契约
 
@@ -168,7 +172,7 @@ Task 7 组合层必须保持一个后台 Worker、一个共享 storage 对象和
 
 托管主键对齐开源实践：以好友列表 API 的 **`encryptUid` 作为 canonical peerId**（存储字段名仍为 `conversationId`），打开 URL 统一为 `?uid=<peerId>`；DOM 上的 `conversationId`/`uid` 仅作 `aliases`。活动会话、身份和发送控件仍要求 DOM owned-scope；登记基线、周期增量与发送后证据改读当前页面同源 `/wapi/zpchat/geek/historyMsg`，**不引入 MQTT / 内部发信协议，也不调用内部发信 API**。好友列表或历史接口不可用、响应结构不明确、无法唯一对齐时均失败关闭，不得用未验证 DOM ID 或页面文案冒充稳定主键。
 
-**首条招呼不由托管/联系 AI 生成**：联系流程只发送用户配置的招呼语模板（可含 `{jobName}` / `{company}`）。建联后的多轮分类与草稿统一采用“求职者本人”身份、45 个汉字上限和六条最高优先级规则：明确拒绝完全由 AI 语义判断为 `explicit_rejection / EXPLICIT_REJECTION`，示例短语只是提示上下文而不是本地关键词规则；含糊拒绝归为 `important` 并等待人工确认；事实回复只能引用简历或 HR 常用问答，不得编造经验或承诺薪资、面试和到岗时间。明确拒绝的草稿只允许一次简短礼貌结束语，不继续争取、追问或推销经历，结束后的后续检查不得重复回复。本阶段只扩展模型输出和严格解析契约，尚未新增自动结束策略或会话终态；最终动作仍由现有策略与状态机决定，薪资/面试/到岗等硬风险仍进待确认。
+**首条招呼不由托管/联系 AI 生成**：联系流程只发送用户配置的招呼语模板（可含 `{jobName}` / `{company}`）。建联后的多轮分类与草稿统一采用“求职者本人”身份、45 个汉字上限和六条最高优先级规则：明确拒绝完全由 AI 语义判断为 `explicit_rejection / EXPLICIT_REJECTION`，示例短语只是提示上下文而不是本地关键词规则；含糊拒绝归为 `important` 并等待人工确认；事实回复只能引用简历或 HR 常用问答，不得编造经验或承诺薪资、面试和到岗时间。明确拒绝的草稿只允许一次简短礼貌结束语，不继续争取、追问或推销经历，结束后的后续检查不得重复回复。纯策略层已经能返回 `AUTO_CLOSE / DEFER_AUTO_CLOSE` 并校验结束语，但本阶段尚未接入持久会话终态和真实发送；薪资/面试/到岗等普通回答仍由原硬风险门进入待确认。
 
 `src/platform/boss/peer-identity.js` 负责纯函数解析：`resolvePeerIdentity({ domIds, friends, origin })` → `{ peerId, peerUid, url, aliases, peerSource: 'encryptUid' }`。`peerId` 是好友列表 `encryptUid`，`peerUid` 是同一条好友记录的数字 `uid`，后者只用于历史消息方向判定。`src/platform/boss/conversation-reader.js` 仍是零 DOM、零网络模块，只从页面 URL / 活动链接 / dataset 抽取原始 `conversationId` 或 `uid`；公司、岗位、HR、预览文本不能生成会话 ID。
 

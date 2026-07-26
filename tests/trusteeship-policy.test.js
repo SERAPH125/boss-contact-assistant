@@ -15,6 +15,25 @@ function safeDecision(overrides) {
   }, overrides);
 }
 
+function explicitRejectionDecision(overrides) {
+  return safeDecision(Object.assign({
+    hardRisk: {
+      blocked: true,
+      reasonCode: 'HARD_RISK_SALARY',
+      fieldsNeeded: ['salaryExpectation']
+    },
+    settings: { enabled: true, dailyAutoReplyLimit: 1 },
+    dailyCount: 99,
+    ai: {
+      category: 'explicit_rejection',
+      confidence: 0.96,
+      reasonCode: 'EXPLICIT_REJECTION',
+      evidenceIds: [],
+      fieldsNeeded: []
+    }
+  }, overrides));
+}
+
 test('defaults global trusteeship on while keeping quiet hours off', () => {
   const source = {};
   const cfg = Policy.normalizeSettings(source);
@@ -164,6 +183,80 @@ test('requires confirmation below confidence or without resume evidence', () => 
     action: 'REQUIRE_CONFIRMATION',
     reasonCode: 'MISSING_RESUME_EVIDENCE'
   });
+});
+
+test('AI-only explicit rejection bypasses hard risk and daily quota but defers in quiet hours', () => {
+  assert.deepEqual(Policy.decide(explicitRejectionDecision()), {
+    action: 'AUTO_CLOSE',
+    reasonCode: 'EXPLICIT_REJECTION_AUTO_CLOSE'
+  });
+  assert.deepEqual(Policy.decide(explicitRejectionDecision({ quiet: true })), {
+    action: 'DEFER_AUTO_CLOSE',
+    reasonCode: 'QUIET_HOURS_AUTO_CLOSE'
+  });
+});
+
+test('explicit rejection still requires global, conversation, and pending-approval authorization', () => {
+  assert.deepEqual(Policy.decide(explicitRejectionDecision({
+    settings: { enabled: false, dailyAutoReplyLimit: 1 }
+  })), {
+    action: 'REQUIRE_CONFIRMATION',
+    reasonCode: 'TRUSTEESHIP_DISABLED'
+  });
+  assert.deepEqual(Policy.decide(explicitRejectionDecision({
+    conversationEnabled: false
+  })), {
+    action: 'REQUIRE_CONFIRMATION',
+    reasonCode: 'CONVERSATION_NOT_MANAGED'
+  });
+  assert.deepEqual(Policy.decide(explicitRejectionDecision({
+    hasPendingApproval: true
+  })), {
+    action: 'REQUIRE_CONFIRMATION',
+    reasonCode: 'PENDING_APPROVAL_EXISTS'
+  });
+});
+
+test('explicit rejection confidence and structured fields fail closed', () => {
+  const invalid = [
+    { confidence: 0.89 },
+    { reasonCode: 'OTHER_REASON' },
+    { evidenceIds: ['resume-1'] },
+    { fieldsNeeded: ['rejectionReason'] }
+  ];
+  for (const patch of invalid) {
+    const ai = Object.assign({}, explicitRejectionDecision().ai, patch);
+    assert.deepEqual(Policy.decide(explicitRejectionDecision({ ai })), {
+      action: 'REQUIRE_CONFIRMATION',
+      reasonCode: patch.confidence === 0.89
+        ? 'AI_CONFIDENCE_TOO_LOW'
+        : 'CATEGORY_REQUIRES_CONFIRMATION'
+    });
+  }
+});
+
+test('validates a short polite close without inspecting the HR message', () => {
+  assert.deepEqual(
+    Policy.validateAutoCloseDraft('收到，感谢您的回复，祝工作顺利。'),
+    {
+      ok: true,
+      draft: '收到，感谢您的回复，祝工作顺利。',
+      reasonCode: 'AUTO_CLOSE_DRAFT_VALID'
+    }
+  );
+
+  for (const unsafe of [
+    '',
+    '请问为什么不合适？',
+    '能再考虑一下吗',
+    '我有三年经验\n可以胜任',
+    '薪资和到岗时间都可以商量',
+    '感谢您的回复，'.repeat(7)
+  ]) {
+    const result = Policy.validateAutoCloseDraft(unsafe);
+    assert.equal(result.ok, false, unsafe);
+    assert.equal(typeof result.reasonCode, 'string', unsafe);
+  }
 });
 
 test('requires explicit global and conversation enablement before any auto-reply', () => {

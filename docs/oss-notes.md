@@ -237,6 +237,8 @@ ego-lite 对徐海霞会话的精确单次发送排查得到三组现场证据�
 
 `ReplyAI` 新增 `explicit_rejection` 类别。分类提示要求 AI 独立判断语义，使用 `reasonCode=EXPLICIT_REJECTION`、空 `evidenceIds` 和空 `fieldsNeeded`；代码没有新增 HR 正文关键词或正则分类器。草稿阶段只投影有界分类摘要，并且只有当前分类上下文确认为 `explicit_rejection` 时才允许空简历依据；其他事实或普通回复仍保留非空 evidence 要求。拒绝示例和礼貌结束语只存在于模型提示中，不参与本地分类覆盖。该提交尚未授权真实自动结束，后续仍需策略、状态机、静默延迟和发送证据门。
 
+策略阶段延续 [Open Policy Agent](https://github.com/open-policy-agent/opa) 的“结构化输入与确定性授权分离”思路：`TrusteeshipPolicy` 不重新解释 HR 正文，只验证 AI 分类的类别、原因码、置信度和空字段形状。严格命中时返回 `AUTO_CLOSE`，静默时段返回 `DEFER_AUTO_CLOSE`；全局/单会话授权和活动待办仍先行，普通自动回复日限不参与结束动作。另一个确定性校验器只检查将要外发的 AI 结束语是否短、单行、礼貌且不包含问题、争取、经历推销或承诺，因此没有变相加入拒绝关键词分类。该阶段 19 项 policy 测试先 RED 后 GREEN；状态持久化和真实发送仍在后续任务中完成。
+
 ## v0.3.5 Task 9 恢复、幂等与隐私回归参考
 
 - [Chrome Extension Service Worker 迁移文档源码](https://github.com/GoogleChrome/developer.chrome.com/blob/main/site/en/docs/extensions/migrating/to-service-workers/index.md) 与 [GoogleChrome/chrome-extensions-samples](https://github.com/GoogleChrome/chrome-extensions-samples)（Apache-2.0）用于复核 MV3 Worker 会被终止、持久存储应作为事实源、事件监听应在顶层注册，以及周期任务应使用具名 `chrome.alarms`。本项目据此验证同名 `boss-ai-chat-monitor` 只表达一个逻辑 alarm，并验证旧 `scheduledTime` 事件只触发一次当前周期。

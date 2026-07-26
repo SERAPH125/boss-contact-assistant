@@ -124,26 +124,91 @@
     return { action: action, reasonCode: reasonCode };
   }
 
+  function explicitRejectionShape(ai) {
+    return !!ai &&
+      typeof ai === 'object' &&
+      ai.category === 'explicit_rejection' &&
+      ai.reasonCode === 'EXPLICIT_REJECTION' &&
+      typeof ai.confidence === 'number' &&
+      Number.isFinite(ai.confidence) &&
+      ai.confidence >= 0.90 &&
+      Array.isArray(ai.evidenceIds) &&
+      ai.evidenceIds.length === 0 &&
+      Array.isArray(ai.fieldsNeeded) &&
+      ai.fieldsNeeded.length === 0;
+  }
+
+  function autoCloseDraftResult(ok, draft, reasonCode) {
+    return {
+      ok: ok,
+      draft: ok ? draft : '',
+      reasonCode: reasonCode
+    };
+  }
+
+  function validateAutoCloseDraft(value) {
+    if (typeof value !== 'string') {
+      return autoCloseDraftResult(false, '', 'AUTO_CLOSE_DRAFT_INVALID');
+    }
+    var draft = value.trim();
+    if (draft === '') {
+      return autoCloseDraftResult(false, '', 'AUTO_CLOSE_DRAFT_INVALID');
+    }
+    if (Array.from(draft).length > 45) {
+      return autoCloseDraftResult(false, '', 'AUTO_CLOSE_DRAFT_TOO_LONG');
+    }
+    if (/[\r\n]|(?:^|\s)(?:[-*•]|\d+[.、])/.test(draft)) {
+      return autoCloseDraftResult(false, '', 'AUTO_CLOSE_DRAFT_FORMAT_UNSAFE');
+    }
+    if (/[?？]/.test(draft)) {
+      return autoCloseDraftResult(false, '', 'AUTO_CLOSE_DRAFT_QUESTION');
+    }
+    if (/再考虑|给.{0,4}机会|争取|胜任|优势|匹配|合适|经验|项目|能力|推荐自己/.test(draft)) {
+      return autoCloseDraftResult(false, '', 'AUTO_CLOSE_DRAFT_PERSUASION');
+    }
+    if (/薪资|薪水|工资|面试|到岗|入职|离职|承诺|保证|都可以商量|随时可以/.test(draft)) {
+      return autoCloseDraftResult(false, '', 'AUTO_CLOSE_DRAFT_COMMITMENT');
+    }
+    if (!/谢谢|感谢|收到|好的|明白|祝/.test(draft)) {
+      return autoCloseDraftResult(false, '', 'AUTO_CLOSE_DRAFT_NOT_POLITE');
+    }
+    return autoCloseDraftResult(true, draft, 'AUTO_CLOSE_DRAFT_VALID');
+  }
+
   function decide(input) {
     var source = input && typeof input === 'object' ? input : {};
+    var settings = normalizeSettings(source.settings);
+    if (settings.enabled !== true) return decision('REQUIRE_CONFIRMATION', 'TRUSTEESHIP_DISABLED');
+    if (source.conversationEnabled !== true) return decision('REQUIRE_CONFIRMATION', 'CONVERSATION_NOT_MANAGED');
+    if (source.hasPendingApproval === true) return decision('REQUIRE_CONFIRMATION', 'PENDING_APPROVAL_EXISTS');
+
+    var ai = source.ai;
+    if (ai && typeof ai === 'object' && ai.category === 'explicit_rejection') {
+      if (typeof ai.confidence !== 'number' || !Number.isFinite(ai.confidence) || ai.confidence < 0.90) {
+        return decision('REQUIRE_CONFIRMATION', 'AI_CONFIDENCE_TOO_LOW');
+      }
+      if (!explicitRejectionShape(ai)) {
+        return decision('REQUIRE_CONFIRMATION', 'CATEGORY_REQUIRES_CONFIRMATION');
+      }
+      if (source.quiet === true) {
+        return decision('DEFER_AUTO_CLOSE', 'QUIET_HOURS_AUTO_CLOSE');
+      }
+      return decision('AUTO_CLOSE', 'EXPLICIT_REJECTION_AUTO_CLOSE');
+    }
+
     var hardRisk = source.hardRisk && typeof source.hardRisk === 'object' ? source.hardRisk : null;
     if (!hardRisk) return decision('REQUIRE_CONFIRMATION', 'HARD_RISK_UNAVAILABLE');
     if (hardRisk.blocked === true) {
       return decision('REQUIRE_CONFIRMATION',
         typeof hardRisk.reasonCode === 'string' && hardRisk.reasonCode ? hardRisk.reasonCode : 'HARD_RISK_BLOCKED');
     }
-    var settings = normalizeSettings(source.settings);
-    if (settings.enabled !== true) return decision('REQUIRE_CONFIRMATION', 'TRUSTEESHIP_DISABLED');
-    if (source.conversationEnabled !== true) return decision('REQUIRE_CONFIRMATION', 'CONVERSATION_NOT_MANAGED');
     if (source.quiet === true) return decision('REQUIRE_CONFIRMATION', 'QUIET_HOURS');
-    if (source.hasPendingApproval === true) return decision('REQUIRE_CONFIRMATION', 'PENDING_APPROVAL_EXISTS');
 
     var dailyCount = Math.max(0, readInteger(source.dailyCount, 0));
     if (dailyCount >= settings.dailyAutoReplyLimit) {
       return decision('REQUIRE_CONFIRMATION', 'DAILY_AUTO_REPLY_LIMIT_REACHED');
     }
 
-    var ai = source.ai;
     if (!ai || typeof ai !== 'object' || ai.error || ai.failed || typeof ai.category !== 'string') {
       return decision('REQUIRE_CONFIRMATION', 'AI_UNAVAILABLE');
     }
@@ -163,6 +228,7 @@
     normalizeSettings: normalizeSettings,
     detectHardRisk: detectHardRisk,
     isQuietHours: isQuietHours,
-    decide: decide
+    decide: decide,
+    validateAutoCloseDraft: validateAutoCloseDraft
   };
 });
