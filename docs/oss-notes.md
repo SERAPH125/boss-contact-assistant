@@ -255,6 +255,16 @@ ego-lite 对徐海霞会话的精确单次发送排查得到三组现场证据�
 
 浏览器验收按无外发边界执行：已在新建 ego-lite Agent 任务空间重载扩展，并确认新版侧栏存在 `AUTO_CLOSE` 演练投影和“当前尚未发送给 HR”提示。该隔离空间不继承用户窗口中的扩展本地存储，因此没有 API 配置和已登记会话，无法运行真实 AI 演练；尝试只读接入现有用户窗口时，扩展管理页原生菜单阻断了可靠自动操作，已停止而未创建待办、未发飞书、未写 Boss，并关闭隔离任务空间。自动化 live-drill 回归覆盖合成明确拒绝并证明 `AUTO_CLOSE / EXPLICIT_REJECTION_AUTO_CLOSE / wouldSend=true / sentToBoss=false`，但不能替代真实新来信生产验收。
 
+## v0.3.7 审核页自动登记“未知公司/无法打开”修复
+
+- [GeekGeekRun](https://github.com/geekgeekrun/geekgeekrun) 明确提示其页面交互会随 BOSS DOM 变化而失效，本轮只借鉴“页面适配层必须可替换”的边界。
+- [Chrome 扩展 Service Worker 迁移文档源码](https://github.com/GoogleChrome/developer.chrome.com/blob/main/site/en/docs/extensions/migrating/to-service-workers/index.md) 要求 MV3 使用持久存储而不是 Worker 内存作为事实源；[消息传递文档源码](https://github.com/GoogleChrome/developer.chrome.com/blob/main/site/en/docs/extensions/mv3/messaging/index.md) 要求把 content script 数据视为不可信并在边界验证。当前实现据此把“规范会话引用 + 结构化好友身份”作为登记事实，而不是直接信任审核卡片。
+- 本地知识库 `技术复用/浏览器扩展-AI会话托管可靠性复盘.md` 的既有结论是“先 canonical ID 对齐，再读取结构化 friend-list 字段，DOM 仅补缺；打开成功需要动作后重新证明”。本轮新诊断是：旧自动联系路径虽然已经解析出规范身份，却在 `captureManagementMetadata → background.registerConversation` 跨层传递中丢掉了公司、岗位、联系人和 `peerUid`；`WAITING_HR` 因而只是本地状态，不是可打开性的证据。
+
+修复新增纯函数登记边界，规范聊天元数据优先、审核卡片回退，并防止空回退覆盖已知身份。打开路径携带 `peerUid`，先按 canonical peerId 唯一恢复好友结构化身份，再定位唯一列表候选并执行 canonical/alias + scoped identity 复核；成功后 runtime 原地回写，惰性修复旧“未知公司/联系人错位”记录。没有引入开源运行时、没有复制选择器或平台写入代码，也没有新增真实发送路径。
+
+2026-07-27 ego-browser 验收先把页面切到另一位 HR，再用“canonical peerId 正确、公司为空、联系人误存公司名、缺少 peerUid”的旧记录打开目标。任务空间内扩展精确重载后，页面切回正确 HR，handler 返回规范公司、联系人、数字 peerUid 和同一 canonical 引用；动作后的 selected item 与最新 `historyMsg bossId` 同时支持该结果。验收没有触发任何外部写入。测试过程中还确认：仅重载网页不足以替换已经安装实例中的旧 content listener，开发验收必须先精确重载对应浏览器上下文里的扩展，再重载目标页，否则会把旧代码行为误判为新代码失败。
+
 ## v0.3.5 Task 9 恢复、幂等与隐私回归参考
 
 - [Chrome Extension Service Worker 迁移文档源码](https://github.com/GoogleChrome/developer.chrome.com/blob/main/site/en/docs/extensions/migrating/to-service-workers/index.md) 与 [GoogleChrome/chrome-extensions-samples](https://github.com/GoogleChrome/chrome-extensions-samples)（Apache-2.0）用于复核 MV3 Worker 会被终止、持久存储应作为事实源、事件监听应在顶层注册，以及周期任务应使用具名 `chrome.alarms`。本项目据此验证同名 `boss-ai-chat-monitor` 只表达一个逻辑 alarm，并验证旧 `scheduledTime` 事件只触发一次当前周期。

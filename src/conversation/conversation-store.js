@@ -880,9 +880,12 @@
         conversation.jobId = jobId;
         conversation.platform = 'boss';
         conversation.url = ref.url;
-        conversation.company = typeof ref.company === 'string' ? ref.company.slice(0, 1000) : '';
-        conversation.position = typeof ref.position === 'string' ? ref.position.slice(0, 1000) : '';
-        conversation.hrName = typeof ref.hrName === 'string' ? ref.hrName.slice(0, 1000) : '';
+        var nextCompany = typeof ref.company === 'string' ? ref.company.slice(0, 1000).trim() : '';
+        var nextPosition = typeof ref.position === 'string' ? ref.position.slice(0, 1000).trim() : '';
+        var nextHrName = typeof ref.hrName === 'string' ? ref.hrName.slice(0, 1000).trim() : '';
+        conversation.company = nextCompany || conversation.company || '';
+        conversation.position = nextPosition || conversation.position || '';
+        conversation.hrName = nextHrName || conversation.hrName || '';
         conversation.peerUid = safePeerUid(ref.peerUid) || conversation.peerUid || '';
         conversation.aliases = normalizeAliases(
           (conversation.aliases || []).concat(incomingAliases),

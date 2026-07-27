@@ -1947,7 +1947,8 @@ test('OPEN_CONVERSATION reuses a Boss chat tab and succeeds only after the store
     created: [],
     queried: [],
     updated: [],
-    messages: []
+    messages: [],
+    registered: []
   };
   const chromeApi = {
     alarms: {
@@ -1989,8 +1990,13 @@ test('OPEN_CONVERSATION reuses a Boss chat tab and succeeds only after the store
             conversationRef: {
               conversationId: 'conv-1',
               url: URL,
-              aliases: ['conv-legacy']
-            }
+              aliases: ['conv-legacy'],
+              peerUid: '10001'
+            },
+            peerSource: 'encryptUid',
+            company: '修复后的公司',
+            position: '修复后的岗位',
+            hrName: '修复后的HR'
           };
         }
         return { success: false };
@@ -2010,11 +2016,27 @@ test('OPEN_CONVERSATION reuses a Boss chat tab and succeeds only after the store
     },
     feishuNotification: {},
     managedConversations: {
-      'conv-1': conversation({ aliases: ['conv-legacy'] })
+      'conv-1': conversation({
+        aliases: ['conv-legacy'],
+        peerUid: '10001'
+      })
     },
     pendingApprovals: {}
   };
-  const h = controllerHarness({ chromeApi, snapshot });
+  const store = {
+    async getSnapshot() {
+      return structuredClone(snapshot);
+    },
+    async registerConversation(ref) {
+      calls.registered.push(structuredClone(ref));
+      Object.assign(snapshot.managedConversations[ref.conversationId], ref);
+      return structuredClone(snapshot.managedConversations[ref.conversationId]);
+    },
+    async saveSettings() {
+      return structuredClone(snapshot.conversationTrusteeship);
+    }
+  };
+  const h = controllerHarness({ chromeApi, snapshot, store });
 
   const result = await h.controller.handleMessage({
     type: 'TRUSTEESHIP_OPEN_CONVERSATION',
@@ -2043,8 +2065,21 @@ test('OPEN_CONVERSATION reuses a Boss chat tab and succeeds only after the store
     conversationRef: {
       conversationId: 'conv-1',
       url: URL,
-      aliases: ['conv-legacy']
+      aliases: ['conv-legacy'],
+      peerUid: '10001'
     }
+  }]);
+  assert.deepEqual(calls.registered, [{
+    platform: 'boss',
+    conversationId: 'conv-1',
+    url: URL,
+    jobId: 'job-1',
+    company: '修复后的公司',
+    position: '修复后的岗位',
+    hrName: '修复后的HR',
+    aliases: ['conv-legacy'],
+    peerUid: '10001',
+    peerSource: 'encryptUid'
   }]);
 });
 

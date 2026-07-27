@@ -906,7 +906,10 @@
     return {
       conversationRef: peer.conversationRef,
       peerSource: peer.peerSource,
-      baselineIncomingFingerprint: lastIncomingFingerprint(read.messages)
+      baselineIncomingFingerprint: lastIncomingFingerprint(read.messages),
+      company: peer.matchedCompany || '',
+      position: peer.matchedPosition || '',
+      hrName: peer.matchedName || ''
     };
   }
 
@@ -1244,15 +1247,27 @@
   async function openManagedConversation(msg) {
     const preflight = managedPreflight();
     if (preflight) return preflight;
+    const metadata = await resolveStoredConversationMetadata(msg.conversationRef);
+    const peer = metadata.success
+      ? metadata
+      : await ensureStoredPeerUid(msg.conversationRef);
+    if (!peer.success) return peer;
+    const expected = metadata.success
+      ? expectedFromResolvedPeer(msg.expected, metadata)
+      : msg.expected;
     const active = await activateManagedConversation(
-      msg.expected,
-      msg.conversationRef,
+      expected,
+      peer.conversationRef,
       { allowVisible: true, maxAttempts: 60 }
     );
     if (!active.success) return active;
     return {
       success: true,
-      conversationRef: active.conversationRef
+      conversationRef: active.conversationRef,
+      peerSource: metadata.success ? metadata.peerSource : '',
+      company: metadata.success ? metadata.matchedCompany : '',
+      position: metadata.success ? metadata.matchedPosition : '',
+      hrName: metadata.success ? metadata.matchedName : ''
     };
   }
 
@@ -1303,6 +1318,58 @@
         ),
         peerUid: resolved.peerUid
       }
+    };
+  }
+
+  async function resolveStoredConversationMetadata(conversationRef) {
+    const wanted = sanitizedExpectedRef(conversationRef);
+    if (!wanted) return targetFailure('登记会话缺少可靠的稳定标识');
+    const list = await fetchGeekFriendList();
+    if (!list.ok || typeof BossPeerIdentity.resolvePeerByCanonicalId !== 'function') {
+      return {
+        success: false,
+        errorCode: 'CONVERSATION_UNAVAILABLE',
+        error: '无法读取 Boss 好友列表以修复登记身份'
+      };
+    }
+    const resolved = BossPeerIdentity.resolvePeerByCanonicalId({
+      peerId: wanted.conversationId,
+      friends: list.friends,
+      origin: location.origin || 'https://www.zhipin.com'
+    });
+    if (!resolved.ok) {
+      return {
+        success: false,
+        errorCode: 'TARGET_UNCERTAIN',
+        targetUncertain: true,
+        error: '无法从 Boss 好友列表确认登记身份'
+      };
+    }
+    return {
+      success: true,
+      conversationRef: {
+        conversationId: wanted.conversationId,
+        url: wanted.url,
+        aliases: BossPeerIdentity.normalizeAliases(
+          (wanted.aliases || []).concat(resolved.aliases || []),
+          wanted.conversationId
+        ),
+        peerUid: resolved.peerUid
+      },
+      peerSource: resolved.peerSource,
+      matchedName: resolved.matchedName || '',
+      matchedCompany: resolved.matchedCompany || '',
+      matchedPosition: resolved.matchedPosition || ''
+    };
+  }
+
+  function expectedFromResolvedPeer(expected, resolved) {
+    const source = expected && typeof expected === 'object' ? expected : {};
+    return {
+      id: source.id,
+      company: resolved.matchedCompany || source.company || '',
+      name: resolved.matchedPosition || source.name || source.position || '',
+      hrName: resolved.matchedName || source.hrName || ''
     };
   }
 
@@ -1426,10 +1493,16 @@
     const allowVisible = msg && msg.allowVisible === true;
     const preflight = allowVisible ? managedPreflight() : managedBackgroundPreflight();
     if (preflight) return preflight;
-    const peer = await ensureStoredPeerUid(msg.conversationRef);
+    const metadata = await resolveStoredConversationMetadata(msg.conversationRef);
+    const peer = metadata.success
+      ? metadata
+      : await ensureStoredPeerUid(msg.conversationRef);
     if (!peer.success) return peer;
+    const expected = metadata.success
+      ? expectedFromResolvedPeer(msg.expected, metadata)
+      : msg.expected;
     const active = await activateManagedConversation(
-      msg.expected,
+      expected,
       peer.conversationRef,
       { allowVisible: allowVisible }
     );

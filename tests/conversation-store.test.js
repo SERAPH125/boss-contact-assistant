@@ -177,6 +177,28 @@ test('preserves a reliable initial incoming fingerprint only when first register
   assert.equal(empty.lastIncomingFingerprint, '');
 });
 
+test('re-registration cannot erase known identity fields with empty fallback metadata', async () => {
+  const harness = makeHarness();
+  await harness.store.registerConversation(reliableRef({
+    peerUid: '10001',
+    company: '甲公司',
+    position: '前端工程师',
+    hrName: '李经理'
+  }));
+
+  const updated = await harness.store.registerConversation(reliableRef({
+    peerUid: '',
+    company: '',
+    position: '',
+    hrName: ''
+  }));
+
+  assert.equal(updated.peerUid, '10001');
+  assert.equal(updated.company, '甲公司');
+  assert.equal(updated.position, '前端工程师');
+  assert.equal(updated.hrName, '李经理');
+});
+
 test('normalizes settings and resets the daily counter when the local day changes', async () => {
   const harness = makeHarness({
     conversationTrusteeship: {

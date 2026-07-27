@@ -11,6 +11,7 @@ importScripts(
   '/src/delivery-guard.js',
   '/src/conversation/trusteeship-policy.js',
   '/src/conversation/conversation-store.js',
+  '/src/conversation/conversation-registration.js',
   '/src/conversation/reply-ai.js',
   '/src/conversation/feishu-notifier.js',
   '/src/platform/boss/peer-identity.js',
@@ -1088,20 +1089,9 @@ async function runDeliver(jobIds, options) {
           if (r && r.success && r.conversationRef &&
               typeof r.baselineIncomingFingerprint === 'string') {
             try {
-              await conversationStore.registerConversation({
-                platform: 'boss',
-                conversationId: r.conversationRef.conversationId,
-                url: r.conversationRef.url,
-                jobId: job.id,
-                company: job.company || '',
-                position: job.name || '',
-                hrName: job.hrName || '',
-                aliases: Array.isArray(r.conversationRef.aliases)
-                  ? r.conversationRef.aliases
-                  : [],
-                peerSource: 'encryptUid',
-                initialIncomingFingerprint: r.baselineIncomingFingerprint
-              });
+              await conversationStore.registerConversation(
+                ConversationRegistration.fromSuccessfulContact(job, r)
+              );
             } catch (_registrationFailure) {
               // 联系已明确成功；不可靠的托管元数据不能追溯改变本次结果。
             }

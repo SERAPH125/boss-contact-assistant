@@ -1400,7 +1400,10 @@
             url: url,
             aliases: Array.isArray(conversation.aliases)
               ? conversation.aliases.slice(0, 8)
-              : []
+              : [],
+            peerUid: typeof conversation.peerUid === 'string'
+              ? conversation.peerUid
+              : ''
           }
         }]);
       } catch (_) {
@@ -1413,6 +1416,26 @@
           ? response.errorCode
           : 'TARGET_UNCERTAIN';
         return safeError(responseCode);
+      }
+      try {
+        await store.registerConversation({
+          platform: 'boss',
+          conversationId: response.conversationRef.conversationId,
+          url: response.conversationRef.url || url,
+          jobId: conversation.jobId,
+          company: response.company || conversation.company || '',
+          position: response.position || conversation.position || '',
+          hrName: response.hrName || conversation.hrName || '',
+          aliases: Array.isArray(response.conversationRef.aliases)
+            ? response.conversationRef.aliases
+            : (Array.isArray(conversation.aliases) ? conversation.aliases : []),
+          peerUid: response.conversationRef.peerUid || conversation.peerUid || '',
+          peerSource: response.peerSource === 'encryptUid'
+            ? 'encryptUid'
+            : conversation.peerSource
+        });
+      } catch (_) {
+        return safeError('TRUSTEESHIP_REGISTER_FAILED');
       }
       return { ok: true, tabId: tab.id };
     }

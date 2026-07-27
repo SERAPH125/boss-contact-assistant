@@ -729,6 +729,95 @@ test('CAPTURE registers the owned active conversation without expected identity'
   assert.ok(result.company || result.position || result.hrName);
 });
 
+test('SEND_ACTIVE returns canonical friend-list identity for auto registration', async () => {
+  const h = createHarness({
+    activeText: '审核卡片公司 跨境电商运营',
+    headerText: '审核卡片公司 跨境电商运营',
+    peerId: 'peer~~canonical-1',
+    friends: [{
+      encryptUid: 'peer~~canonical-1',
+      uid: 100,
+      conversationId: 'conv1',
+      name: '罗榜伟',
+      brandName: '杭州双一科技有限公司',
+      jobName: '跨境电商运营'
+    }]
+  });
+  h.input._selectors.add('div#chat-input');
+  h.input._onDispatch = (event) => {
+    if (event.type === 'keydown' && event.key === 'Enter') {
+      h.input.textContent = '';
+      h.addMessage({
+        id: 'sent-greeting',
+        direction: 'outgoing',
+        text: '您好，我对岗位很感兴趣'
+      });
+    }
+  };
+
+  const result = await h.dispatch({
+    type: 'SEND_ACTIVE',
+    image: '',
+    greeting: '您好，我对岗位很感兴趣',
+    expected: {
+      company: '审核卡片公司',
+      name: '跨境电商运营',
+      hrName: ''
+    }
+  });
+
+  assert.equal(result.success, true, JSON.stringify(result));
+  assert.equal(result.conversationRef.conversationId, 'peer~~canonical-1');
+  assert.equal(result.conversationRef.peerUid, '100');
+  assert.equal(result.company, '杭州双一科技有限公司');
+  assert.equal(result.position, '跨境电商运营');
+  assert.equal(result.hrName, '罗榜伟');
+});
+
+test('OPEN repairs stale identity from canonical friend data before locating the conversation', async () => {
+  const h = createHarness({
+    activeText: '其他公司 其他岗位',
+    headerText: '其他公司 其他岗位',
+    activeDataset: { conversationId: 'conv-other' },
+    activeLinkDataset: { conversationId: 'conv-other' },
+    containerDataset: { conversationId: 'conv-other' },
+    friends: [{
+      encryptUid: 'peer~~canonical-2',
+      uid: 10002,
+      conversationId: 'conv-target',
+      name: '罗榜伟',
+      brandName: '杭州双一科技有限公司',
+      jobName: '跨境电商运营'
+    }]
+  });
+  h.addConversationCandidate({
+    conversationId: 'conv-target',
+    text: '罗榜伟 杭州双一科技有限公司 跨境电商运营'
+  });
+
+  const result = await h.dispatch({
+    type: 'OPEN_MANAGED_CONVERSATION',
+    expected: {
+      company: '未知公司',
+      name: '未知岗位',
+      hrName: '错误联系人'
+    },
+    conversationRef: {
+      conversationId: 'peer~~canonical-2',
+      url: 'https://www.zhipin.com/web/geek/chat?uid=peer~~canonical-2',
+      aliases: ['conv-target']
+    }
+  });
+
+  assert.equal(result.success, true, JSON.stringify(result));
+  assert.equal(result.conversationRef.conversationId, 'peer~~canonical-2');
+  assert.equal(result.conversationRef.peerUid, '10002');
+  assert.equal(result.company, '杭州双一科技有限公司');
+  assert.equal(result.position, '跨境电商运营');
+  assert.equal(result.hrName, '罗榜伟');
+  assert.equal(h.activeItem.dataset.conversationId, 'conv-target');
+});
+
 test('CAPTURE supports modern chat-record DOM without geek/chat anchors', async () => {
   const peerId = 'peer~~modern1';
   const documentRoot = new FakeElement();
