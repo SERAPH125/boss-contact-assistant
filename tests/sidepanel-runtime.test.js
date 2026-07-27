@@ -169,6 +169,7 @@ async function loadFullSidepanel(options) {
   const state = options.state;
   const approvals = options.approvals;
   const sent = [];
+  const storageChangedListeners = [];
   const chrome = {
     runtime: {
       lastError: null,
@@ -184,12 +185,23 @@ async function loadFullSidepanel(options) {
         else if (message.type === 'TRUSTEESHIP_STAGE_LIVE_DRILL') {
           callback(options.liveDrill ? options.liveDrill(message) : { ok: false, code: 'TRUSTEESHIP_LIVE_DRILL_FAILED' });
         }
+        else if (message.type === 'TRUSTEESHIP_SET_ALL_CONVERSATIONS') {
+          callback(options.setAll ? options.setAll(message) : {
+            ok: true, enabled: 0, unchanged: 0, skipped: 0, failed: 0
+          });
+        }
         else if (message.type === 'TRUSTEESHIP_SET_CONVERSATION') callback({ ok: false, code: 'CONVERSATION_NOT_REGISTERED' });
         else if (message.type === 'GET_STATE') callback({ phase: 'idle' });
         else callback({ ok: true });
       }, onMessage: { addListener() {} }
     },
-    storage: { local: { set() {} }, onChanged: { addListener() {} } }, tabs: { query() {} }
+    storage: {
+      local: { set() {} },
+      onChanged: {
+        addListener(listener) { storageChangedListeners.push(listener); }
+      }
+    },
+    tabs: { query() {} }
   };
   const context = {
     globalThis: null, document, window: { confirm: () => true }, chrome,
@@ -202,7 +214,17 @@ async function loadFullSidepanel(options) {
   context.globalThis = context;
   vm.runInNewContext(script, context);
   await Promise.resolve(); await Promise.resolve();
-  return { ids, tabs, sent, context };
+  return {
+    ids,
+    tabs,
+    sent,
+    context,
+    async triggerStorageChange(changes) {
+      storageChangedListeners.forEach((listener) => listener(changes, 'local'));
+      await new Promise((resolve) => setTimeout(resolve, 180));
+      await Promise.resolve();
+    }
+  };
 }
 
 test('full sidepanel wiring keeps unknown outcomes visible and disables unsafe retries', async () => {
@@ -348,6 +370,94 @@ test('full sidepanel renders deferred and ended unmatched without counting or re
   assert.deepEqual(
     findDescendants(endedCard, 'button').map((button) => button.textContent),
     ['打开会话', '从列表移除']
+  );
+});
+
+test('one-click trusteeship uses one bulk command and reports ended conversations as skipped', async () => {
+  const ended = {
+    conversationId: 'ended',
+    company: '乙公司',
+    position: '运营',
+    hrName: '王',
+    enabled: false,
+    state: 'ENDED_UNMATCHED'
+  };
+  const waiting = {
+    conversationId: 'waiting',
+    company: '甲公司',
+    position: '前端',
+    hrName: '李',
+    enabled: false,
+    state: 'DISABLED'
+  };
+  const state = {
+    settings: { enabled: true, paused: false },
+    managedConversations: { ended, waiting },
+    pendingApprovalCount: 0
+  };
+  const h = await loadFullSidepanel({
+    state,
+    approvals: [],
+    setAll(message) {
+      assert.deepEqual({ ...message }, {
+        type: 'TRUSTEESHIP_SET_ALL_CONVERSATIONS',
+        enabled: true
+      });
+      waiting.enabled = true;
+      waiting.state = 'WAITING_HR';
+      return { ok: true, enabled: 1, unchanged: 0, skipped: 1, failed: 0 };
+    }
+  });
+
+  await h.ids.btnEnableAllManagedConversations.trigger('click');
+
+  const bulkMessages = h.sent.filter(
+    (message) => message.type === 'TRUSTEESHIP_SET_ALL_CONVERSATIONS'
+  );
+  assert.equal(bulkMessages.length, 1);
+  assert.match(h.ids.managedBulkStatus.textContent, /已启用 1 个/);
+  assert.match(h.ids.managedBulkStatus.textContent, /跳过 1 个/);
+  assert.match(h.ids.managedBulkStatus.textContent, /明确拒绝/);
+  const endedCard = h.ids.managedConversations.children.find((card) =>
+    card.children[0].textContent.includes('乙公司')
+  );
+  assert.equal(findDescendants(endedCard, 'input').length, 0);
+});
+
+test('managed conversation storage changes refresh cards without overwriting dirty settings fields', async () => {
+  const state = {
+    settings: {
+      enabled: true,
+      paused: false,
+      intervalMinutes: 10,
+      dailyAutoReplyLimit: 10
+    },
+    managedConversations: {},
+    pendingApprovalCount: 0
+  };
+  const h = await loadFullSidepanel({ state, approvals: [] });
+  h.ids.trusteeshipInterval.value = '5';
+  h.ids.autoReplyDailyLimit.value = '17';
+  state.managedConversations['new-conversation'] = {
+    conversationId: 'new-conversation',
+    company: '新登记公司',
+    position: '运营',
+    hrName: '陈女士',
+    enabled: true,
+    state: 'WAITING_HR'
+  };
+
+  await h.triggerStorageChange({
+    managedConversations: { oldValue: {}, newValue: state.managedConversations }
+  });
+
+  assert.equal(h.ids.managedConversationsHeading.textContent, '已登记岗位（1）');
+  assert.match(h.ids.managedConversations.children[0].children[0].textContent, /新登记公司/);
+  assert.equal(h.ids.trusteeshipInterval.value, '5');
+  assert.equal(h.ids.autoReplyDailyLimit.value, '17');
+  assert.equal(
+    h.sent.filter((message) => message.type === 'TRUSTEESHIP_GET_STATE').length >= 2,
+    true
   );
 });
 

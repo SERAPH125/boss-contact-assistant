@@ -146,6 +146,13 @@
     };
   }
 
+  function replyDelayMs(random) {
+    var sampled = typeof random === 'function' ? Number(random()) : 0;
+    if (!Number.isFinite(sampled)) sampled = 0;
+    sampled = Math.min(1, Math.max(0, sampled));
+    return 30000 + Math.round(sampled * 270000);
+  }
+
   function validateAutoCloseDraft(value) {
     if (typeof value !== 'string') {
       return autoCloseDraftResult(false, '', 'AUTO_CLOSE_DRAFT_INVALID');
@@ -202,8 +209,6 @@
       return decision('REQUIRE_CONFIRMATION',
         typeof hardRisk.reasonCode === 'string' && hardRisk.reasonCode ? hardRisk.reasonCode : 'HARD_RISK_BLOCKED');
     }
-    if (source.quiet === true) return decision('REQUIRE_CONFIRMATION', 'QUIET_HOURS');
-
     var dailyCount = Math.max(0, readInteger(source.dailyCount, 0));
     if (dailyCount >= settings.dailyAutoReplyLimit) {
       return decision('REQUIRE_CONFIRMATION', 'DAILY_AUTO_REPLY_LIMIT_REACHED');
@@ -221,6 +226,9 @@
     if (!hasEvidence(ai.evidenceIds)) {
       return decision('REQUIRE_CONFIRMATION', 'MISSING_RESUME_EVIDENCE');
     }
+    if (source.quiet === true) {
+      return decision('DEFER_AUTO_REPLY', 'QUIET_HOURS_AUTO_REPLY');
+    }
     return decision('AUTO_REPLY', 'AUTO_REPLY_ALLOWED');
   }
 
@@ -228,6 +236,7 @@
     normalizeSettings: normalizeSettings,
     detectHardRisk: detectHardRisk,
     isQuietHours: isQuietHours,
+    replyDelayMs: replyDelayMs,
     decide: decide,
     validateAutoCloseDraft: validateAutoCloseDraft
   };

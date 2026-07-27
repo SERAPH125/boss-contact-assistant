@@ -83,6 +83,7 @@
     conversation.lastReadErrorCode = '';
     delete conversation.pendingApprovalId;
     delete conversation.sendIntent;
+    delete conversation.pendingReply;
     delete conversation.activeFingerprint;
     delete conversation.classificationBaseline;
     delete conversation.classificationOriginState;
@@ -155,14 +156,27 @@
     }
     if (failureCode) throw liveDrillError(failureCode);
 
-    var wouldSend = observations.sentDraft !== '';
+    var isolated = snapshot.managedConversations &&
+      snapshot.managedConversations[input.conversationId];
+    var scheduledReply = isolated &&
+      isolated.state === 'WAITING_REPLY_DUE' &&
+      isPlainObject(isolated.pendingReply)
+      ? isolated.pendingReply
+      : null;
+    var scheduledDraft = scheduledReply &&
+      typeof scheduledReply.draft === 'string'
+      ? scheduledReply.draft
+      : '';
+    var wouldSend = observations.sentDraft !== '' || scheduledDraft !== '';
     var autoClose = wouldSend &&
       observations.sentMode === 'AUTO_CLOSE' &&
       observations.classification &&
       observations.classification.category === 'explicit_rejection';
     if (!wouldSend && !approval) throw liveDrillError('TRUSTEESHIP_LIVE_DRILL_FAILED');
-    var draft = wouldSend
+    var draft = observations.sentDraft !== ''
       ? observations.sentDraft
+      : scheduledDraft !== ''
+        ? scheduledDraft
       : (approval && typeof approval.draft === 'string' ? approval.draft : '');
     var draftEvidenceIds = observations.draft &&
       Array.isArray(observations.draft.evidenceIds)

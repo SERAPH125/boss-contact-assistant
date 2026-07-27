@@ -14,7 +14,7 @@
 | `src/content-search.js` | 列表 scrape、开 JD、立即沟通→继续沟通 |
 | `src/content-chat.js` | 聊天页发图 + 招呼语 |
 | `src/selectors.js` | DOM 选择器 + 城市码 |
-| `src/sidepanel.*` | 配置 / 审核 / 执行 |
+| `src/sidepanel.*` | 配置 / 岗位筛选 / 执行 |
 
 ## 消息流（保留）
 
@@ -45,7 +45,7 @@ Service Worker ──LOG / PHASE / PROGRESS / SCREENED / DONE──→ Sidepanel
 | 「投递选中」、默认勾选匹配项 | 「联系已选」、**默认全不选**、未选禁用主按钮 |
 | 强依赖 DeepSeek Key 才能收集 | BYOK；无 Key 时规则扫描可用 |
 | 固定短间隔 | 可配置日限 + 拟人间隔 + 批次休息 |
-| 单页折叠卡片 UI | 底栏三 Tab：配置 / 审核 / 执行 |
+| 单页折叠卡片 UI | 底栏三 Tab：配置 / 岗位筛选 / 执行 |
 
 ## 多平台进展（v0.3）
 
@@ -273,3 +273,22 @@ ego-lite 对徐海霞会话的精确单次发送排查得到三组现场证据�
 - [AWS SDK for JavaScript v3](https://github.com/aws/aws-sdk-js-v3)（Apache-2.0）的 middleware lifecycle 将签名归入 `finalizeRequest`、网络请求归入 HTTP handler，说明“准备完整请求”和“实际 dispatch”可以保持为两个明确阶段。本项目只借鉴该分层原则：飞书 client 完成异步签名和序列化后交出同步 fetch thunk，runtime 在最新持久状态门禁后才 dispatch；background 组合层同步串联 API-proof 与调用方 owner 断言，不能用前者覆盖后者。没有复制 AWS SDK 代码或引入依赖。
 
 上述项目均为参考依据，没有复制源代码、没有新增运行时依赖。Task 9 的具体新增实现——`SENDING` 恢复优先级、`classificationBaseline + classificationOriginState` 严格证据、单会话唯一 PENDING 门禁、固定且不含模型自由文本的飞书卡片、签名后 prepared dispatch 门禁、pause-code/reason 双层归一化、settings 逐字段公共 DTO、统一元数据清理及实际 store/engine/runtime/sidepanel 组合测试——均为本仓库独立实现。
+
+## v0.3.8 持续多轮托管与列表自动同步
+
+- [AWS Transactional Outbox Pattern](https://github.com/aws-samples/transactional-outbox-pattern)：采用“持久意图先于外部发送”，但不把唯一 intent ID 误当成站外 exactly-once 保证。
+- [Temporal](https://github.com/temporalio/temporal) 与 [LangGraph](https://github.com/langchain-ai/langgraph)：采用显式、可恢复的等待节点，把随机回复时刻作为持久业务状态，而不是依赖 Service Worker 内存计时器。
+- [Plasmo](https://github.com/PlasmoHQ/plasmo) 与 [WXT](https://github.com/wxt-dev/wxt)：采用扩展页面把 storage change 当作失效通知、重新读取可信公共状态的同步边界；当前实现仍使用原生 Chrome API，没有引入框架。
+
+用户实测表明“发送后约 0.1 秒没有回执就暂停”不符合持续托管产品语义。修复后，普通安全回复持久化 30–300 秒随机 due time，到点重读后才发送；成功后回到 `WAITING_HR`，不会因完成一轮回复而退出。明确拒绝仍单次礼貌结束为 `ENDED_UNMATCHED`，批量开启明确跳过该状态。
+
+发送结果未知被拆成“原 intent 不可重放”和“会话仍可只读核验”两个正交事实。content sender 在发送动作后有界轮询历史回执；仍未知时 store 进入 `VERIFYING_SEND`，后续周期通过独立 `VERIFY_MANAGED_SEND` 查找同一 canonical peer 上、同一冻结草稿且晚于意图创建时间的唯一 outgoing。命中后原子收束为 SENT 并恢复 `WAITING_HR`；没有证据时保持核验，不再次按 Enter 或点击发送。
+
+“一键托管全部可用岗位”只发送一次严格 runtime 消息并由 store 原子处理，不在 UI 循环单卡操作。岗位筛选页联系成功产生的 `managedConversations` 写入会触发 150ms 合并刷新，sidepanel 重新读取 runtime DTO 并重绘卡片；刷新不覆盖用户尚未保存的表单值。该实现对应本地知识库 `技术复用/浏览器扩展-AI会话托管可靠性复盘.md` 的既有“持久事实源 + 不盲重放”结论；“核验与托管状态正交、未知发送后可恢复持续监控”是本轮新增结论。
+
+## 岗位筛选 UI 命名
+
+- [boss_batch_push](https://github.com/yangfeng20/boss_batch_push) 把批量联系前的步骤描述为先筛选、再确认投递目标。
+- [get_jobs](https://github.com/loks666/get_jobs) 以 AI 匹配和岗位筛选组织求职流程。
+
+当前 UI 因此把用户可见的“审核”统一改为“岗位筛选”，同时保留内部 `review` 状态键，避免纯产品文案调整扩大为状态机迁移。

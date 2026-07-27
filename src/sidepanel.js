@@ -111,6 +111,7 @@ let deliveryConfirmationSubmitting = false;
 // TRUSTEESHIP_UI_CONTROLLER_END
 
 let trusteeshipSnapshot = { settings: {}, managedConversations: {}, pendingApprovalCount: 0 };
+let trusteeshipStorageRefreshTimer = null;
 
 function todayStr() {
   const d = new Date();
@@ -403,21 +404,24 @@ function renderHrFaq(items) {
   custom.forEach((item) => addHrFaqRow(item));
 }
 
-function applyTrusteeshipState(state) {
+function applyTrusteeshipState(state, options) {
   trusteeshipSnapshot = state || trusteeshipSnapshot;
   const settings = trusteeshipSnapshot.settings || {};
   const feishu = trusteeshipSnapshot.feishuNotification || {};
-  if ($('trusteeshipEnabled')) $('trusteeshipEnabled').checked = settings.enabled === true;
-  if ($('trusteeshipInterval')) $('trusteeshipInterval').value = String(settings.intervalMinutes || 10);
-  if ($('autoReplyDailyLimit')) $('autoReplyDailyLimit').value = String(settings.dailyAutoReplyLimit || 10);
-  const quiet = settings.quietHours || {};
-  if ($('quietHoursEnabled')) $('quietHoursEnabled').checked = quiet.enabled === true;
-  if ($('quietHoursStart')) $('quietHoursStart').value = quiet.start || '22:00';
-  if ($('quietHoursEnd')) $('quietHoursEnd').value = quiet.end || '08:00';
-  if ($('feishuEnabled')) $('feishuEnabled').checked = feishu.enabled === true;
-  if ($('feishuWebhook')) $('feishuWebhook').placeholder = feishu.hasWebhook ? '已保存；重新输入可替换' : '';
-  if ($('feishuSigningSecret')) $('feishuSigningSecret').placeholder = feishu.hasSigningSecret ? '已保存；重新输入可替换' : '';
-  renderHrFaq(trusteeshipSnapshot.hrFaq);
+  const preserveForms = options && options.preserveForms === true;
+  if (!preserveForms) {
+    if ($('trusteeshipEnabled')) $('trusteeshipEnabled').checked = settings.enabled === true;
+    if ($('trusteeshipInterval')) $('trusteeshipInterval').value = String(settings.intervalMinutes || 10);
+    if ($('autoReplyDailyLimit')) $('autoReplyDailyLimit').value = String(settings.dailyAutoReplyLimit || 10);
+    const quiet = settings.quietHours || {};
+    if ($('quietHoursEnabled')) $('quietHoursEnabled').checked = quiet.enabled === true;
+    if ($('quietHoursStart')) $('quietHoursStart').value = quiet.start || '22:00';
+    if ($('quietHoursEnd')) $('quietHoursEnd').value = quiet.end || '08:00';
+    if ($('feishuEnabled')) $('feishuEnabled').checked = feishu.enabled === true;
+    if ($('feishuWebhook')) $('feishuWebhook').placeholder = feishu.hasWebhook ? '已保存；重新输入可替换' : '';
+    if ($('feishuSigningSecret')) $('feishuSigningSecret').placeholder = feishu.hasSigningSecret ? '已保存；重新输入可替换' : '';
+    renderHrFaq(trusteeshipSnapshot.hrFaq);
+  }
   const pending = Number(trusteeshipSnapshot.pendingApprovalCount) || 0;
   const conversations = Object.values(trusteeshipSnapshot.managedConversations || {});
   const active = conversations.filter((conversation) =>
@@ -439,10 +443,10 @@ function applyTrusteeshipState(state) {
   renderManagedConversations(conversations);
 }
 
-async function refreshTrusteeshipState() {
+async function refreshTrusteeshipState(options) {
   try {
     const response = await sendRuntimeMessage({ type: 'TRUSTEESHIP_GET_STATE' });
-    if (response && response.ok === true) applyTrusteeshipState(response);
+    if (response && response.ok === true) applyTrusteeshipState(response, options);
   } catch (_) {
     if ($('trusteeshipStatus')) $('trusteeshipStatus').textContent = '托管已暂停';
   }
@@ -701,7 +705,9 @@ function managedStateText(state) {
   const map = {
     WAITING_HR: '等待 HR',
     WAITING_CONFIRMATION: '等待确认',
+    WAITING_REPLY_DUE: '等待回复时机',
     WAITING_AUTO_CLOSE: '等待静默结束后礼貌回复',
+    VERIFYING_SEND: '正在核验发送 · 持续监控',
     ENDED_UNMATCHED: '已结束－未匹配',
     PAUSED: '已暂停',
     DISABLED: '已关闭'
@@ -931,7 +937,7 @@ function refreshHeader() {
   }
   if ($('scanHint')) {
     $('scanHint').textContent = m.ready
-      ? '保存本页后开始扫描；不会自动联系。完成后到「审核」勾选。意向与节奏按平台独立存储。'
+      ? '保存本页后开始扫描；不会自动联系。完成后到「岗位筛选」勾选。意向与节奏按平台独立存储。'
       : (m.short + ' 架构已预留，适配器尚未上线。请先用 Boss 或等待后续版本。');
   }
   if ($('filterPlatTitle')) {
@@ -1156,6 +1162,57 @@ $('btnRunTrusteeshipNow').addEventListener('click', async () => {
   }
 });
 
+async function setAllManagedConversations(enabled) {
+  const enableButton = $('btnEnableAllManagedConversations');
+  const disableButton = $('btnDisableAllManagedConversations');
+  if (!enabled && !window.confirm('将关闭所有尚未结束的岗位托管。是否继续？')) return;
+  enableButton.disabled = true;
+  disableButton.disabled = true;
+  if ($('managedBulkStatus')) {
+    $('managedBulkStatus').textContent = enabled ? '正在启用全部可用岗位…' : '正在结束全部岗位托管…';
+  }
+  try {
+    const response = await sendRuntimeMessage({
+      type: 'TRUSTEESHIP_SET_ALL_CONVERSATIONS',
+      enabled: enabled
+    });
+    if (!response || response.ok !== true) {
+      if ($('managedBulkStatus')) {
+        $('managedBulkStatus').textContent = '批量操作失败：' +
+          stableTrusteeshipError(response && (response.code || response.errorCode));
+      }
+      return;
+    }
+    const parts = [
+      (enabled ? '已启用 ' : '已关闭 ') + (Number(response.enabled) || 0) + ' 个',
+      '保持 ' + (Number(response.unchanged) || 0) + ' 个',
+      '跳过 ' + (Number(response.skipped) || 0) + ' 个',
+      '失败 ' + (Number(response.failed) || 0) + ' 个'
+    ];
+    if (enabled && Number(response.skipped) > 0) {
+      parts.push('明确拒绝或需人工处理的会话不会重新开启');
+    }
+    if ($('managedBulkStatus')) $('managedBulkStatus').textContent = parts.join('，');
+    await refreshTrusteeshipState({ preserveForms: true });
+  } catch (_) {
+    if ($('managedBulkStatus')) {
+      $('managedBulkStatus').textContent = '批量操作失败：' +
+        stableTrusteeshipError('SERVICE_WORKER_INTERRUPTED');
+    }
+  } finally {
+    enableButton.disabled = false;
+    disableButton.disabled = false;
+  }
+}
+
+$('btnEnableAllManagedConversations').addEventListener('click', () => {
+  setAllManagedConversations(true);
+});
+
+$('btnDisableAllManagedConversations').addEventListener('click', () => {
+  setAllManagedConversations(false);
+});
+
 if ($('btnRunTrusteeshipLiveDrill')) {
   $('btnRunTrusteeshipLiveDrill').addEventListener('click', async () => {
     const button = $('btnRunTrusteeshipLiveDrill');
@@ -1294,6 +1351,19 @@ chrome.storage.onChanged.addListener((changes, area) => {
   if (changes.byPlatform) {
     byPlatformCache = changes.byPlatform.newValue || byPlatformCache;
     refreshUsage();
+  }
+  const trusteeshipKeys = [
+    'managedConversations',
+    'pendingApprovals',
+    'conversationTrusteeship',
+    'feishuNotification'
+  ];
+  if (trusteeshipKeys.some((key) => Object.prototype.hasOwnProperty.call(changes, key))) {
+    if (trusteeshipStorageRefreshTimer) clearTimeout(trusteeshipStorageRefreshTimer);
+    trusteeshipStorageRefreshTimer = setTimeout(() => {
+      trusteeshipStorageRefreshTimer = null;
+      refreshTrusteeshipState({ preserveForms: true });
+    }, 150);
   }
 });
 
@@ -1793,7 +1863,7 @@ chrome.runtime.onMessage.addListener((msg) => {
   if (msg.type === 'PHASE') {
     const map = {
       idle: '未开始', collecting: '扫描中', screening: '筛选中',
-      review: '待审核', delivering: '联系中', done: '已完成', blocked: '已停机'
+      review: '待筛选', delivering: '联系中', done: '已完成', blocked: '已停机'
     };
     $('phaseText').textContent = map[msg.phase] || msg.phase;
     if (msg.phase === 'collecting' || msg.phase === 'screening' || msg.phase === 'delivering') {

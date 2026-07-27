@@ -546,7 +546,10 @@ test('TRUSTEESHIP_GET_STATE rebuilds settings from a strict public field allowli
 test('alarm reconcile clears off or paused state and creates one approved period', async () => {
   const h = controllerHarness();
   await h.controller.reconcileAlarm();
-  assert.deepEqual(h.calls.clear, [Runtime.TRUSTEESHIP_ALARM]);
+  assert.deepEqual(h.calls.clear, [
+    Runtime.TRUSTEESHIP_ALARM,
+    Runtime.TRUSTEESHIP_DUE_ALARM
+  ]);
   assert.deepEqual(h.calls.create, []);
 
   h.snapshot.conversationTrusteeship.enabled = true;
@@ -564,7 +567,66 @@ test('alarm reconcile clears off or paused state and creates one approved period
 
   h.snapshot.conversationTrusteeship.paused = true;
   await h.controller.reconcileAlarm();
-  assert.equal(h.calls.clear.length, 2);
+  assert.equal(h.calls.clear.length, 6);
+});
+
+test('alarm reconcile creates one due alarm for the earliest delayed reply', async () => {
+  const dueAt = Date.parse('2026-07-26T09:02:00+08:00');
+  const h = controllerHarness();
+  h.snapshot.conversationTrusteeship.enabled = true;
+  h.snapshot.managedConversations = {
+    'conv-1': conversation({
+      state: 'WAITING_REPLY_DUE',
+      pendingReply: {
+        fingerprint: 'id:m1',
+        draft: '是的，我还在看机会。',
+        evidenceIds: ['resume-1'],
+        classification: { category: 'courtesy', confidence: 0.9 },
+        createdAt: Date.parse('2026-07-26T09:00:00+08:00'),
+        dueAt
+      }
+    })
+  };
+
+  await h.controller.reconcileAlarm();
+
+  assert.deepEqual(h.calls.create.at(-1), [
+    Runtime.TRUSTEESHIP_DUE_ALARM,
+    { when: dueAt }
+  ]);
+});
+
+test('bulk trusteeship uses one atomic store operation and preserves bounded counts', async () => {
+  const calls = [];
+  const h = controllerHarness({
+    store: {
+      async getSnapshot() {
+        return structuredClone(h.snapshot);
+      },
+      async saveSettings(patch) {
+        Object.assign(h.snapshot.conversationTrusteeship, structuredClone(patch));
+        return structuredClone(h.snapshot.conversationTrusteeship);
+      },
+      async setAllManaged(enabled) {
+        calls.push(enabled);
+        return { enabled: 3, unchanged: 2, skipped: 1, failed: 0 };
+      }
+    }
+  });
+
+  const result = await h.controller.handleMessage({
+    type: 'TRUSTEESHIP_SET_ALL_CONVERSATIONS',
+    enabled: true
+  });
+
+  assert.deepEqual(calls, [true]);
+  assert.deepEqual(result, {
+    ok: true,
+    enabled: 3,
+    unchanged: 2,
+    skipped: 1,
+    failed: 0
+  });
 });
 
 test('alarm reconcile keeps global default on from creating monitors before prerequisites', async () => {
@@ -593,7 +655,10 @@ test('alarm reconcile keeps global default on from creating monitors before prer
   assert.equal(result.enabled, false);
   assert.ok(Array.isArray(result.missing) && result.missing.length > 0);
   assert.deepEqual(h.calls.create, []);
-  assert.deepEqual(h.calls.clear, [Runtime.TRUSTEESHIP_ALARM]);
+  assert.deepEqual(h.calls.clear, [
+    Runtime.TRUSTEESHIP_ALARM,
+    Runtime.TRUSTEESHIP_DUE_ALARM
+  ]);
 });
 
 test('saving enabled settings rejects invalid intervals and reports every missing prerequisite', async () => {
@@ -762,7 +827,10 @@ test('enabling rereads the API proof after awaited writes and fails closed on ro
   assert.equal(h.snapshot.conversationTrusteeship.enabled, false);
   assert.equal(h.snapshot.conversationTrusteeship.paused, true);
   assert.deepEqual(h.calls.create, []);
-  assert.deepEqual(h.calls.clear, [Runtime.TRUSTEESHIP_ALARM]);
+  assert.deepEqual(h.calls.clear, [
+    Runtime.TRUSTEESHIP_ALARM,
+    Runtime.TRUSTEESHIP_DUE_ALARM
+  ]);
 });
 
 test('run, schedule, and manual resolve reject a stale API proof before entering the engine', async () => {
@@ -840,7 +908,10 @@ test('live drill delegates one trimmed message only while production trusteeship
     message: '还在看机会吗？'
   }]);
   assert.equal(h.calls.run, 0);
-  assert.deepEqual(h.calls.clear, ['boss-ai-chat-monitor']);
+  assert.deepEqual(h.calls.clear, [
+    Runtime.TRUSTEESHIP_ALARM,
+    Runtime.TRUSTEESHIP_DUE_ALARM
+  ]);
   assert.deepEqual(h.calls.create, []);
 });
 
@@ -924,7 +995,10 @@ test('API proof invalidation is serialized, pauses globally, and clears alarms d
 
     assert.equal(result.ok, false);
     assert.equal(result.code, 'API_CONFIG_CHANGED');
-    assert.deepEqual(h.calls.clear, [Runtime.TRUSTEESHIP_ALARM]);
+    assert.deepEqual(h.calls.clear, [
+      Runtime.TRUSTEESHIP_ALARM,
+      Runtime.TRUSTEESHIP_DUE_ALARM
+    ]);
     assert.deepEqual(h.calls.create, []);
     if (!rejectPause) {
       assert.equal(h.snapshot.conversationTrusteeship.paused, true);
@@ -1544,6 +1618,52 @@ test('page sender rechecks the persisted unconsumed intent before managed protoc
   assert.equal(refused.errorCode, 'SEND_RESULT_UNKNOWN');
 });
 
+test('page adapter verifies an unknown send through a read-only managed protocol', async () => {
+  const sent = [];
+  const chromeApi = {
+    runtime: { lastError: null },
+    tabs: {
+      async query() { return [{ id: 9, active: true, status: 'complete', url: URL }]; },
+      async get(id) { return { id, active: true, status: 'complete', url: URL }; },
+      async sendMessage(id, message) {
+        sent.push(message);
+        if (message.type === 'PING') return { ok: true, page: 'chat' };
+        return {
+          success: true,
+          targetConversationId: 'conv-1',
+          sentFingerprint: 'id:verified-later',
+          observedAt: NOW
+        };
+      }
+    },
+    scripting: { async executeScript() {} }
+  };
+  const intent = {
+    intentId: 'intent-unknown',
+    status: 'SEND_RESULT_UNKNOWN',
+    draft: '好的',
+    createdAt: NOW - 1000
+  };
+  const store = {
+    async getSnapshot() {
+      return {
+        managedConversations: {
+          'conv-1': conversation({ state: 'VERIFYING_SEND', sendIntent: intent })
+        }
+      };
+    }
+  };
+  const adapter = Runtime.createPageAdapter({ chromeApi, store });
+
+  const result = await adapter.verifySend(conversation(), intent);
+
+  assert.equal(result.success, true);
+  const protocol = sent.find((message) => message.type === 'VERIFY_MANAGED_SEND');
+  assert.ok(protocol);
+  assert.equal(protocol.draft, '好的');
+  assert.equal(protocol.createdAt, NOW - 1000);
+});
+
 test('sender maps login and block preflight failures to a global pause without exposing raw errors', async () => {
   const savedSettings = [];
   const chromeApi = {
@@ -1665,7 +1785,7 @@ test('callback-only Chrome tabs, scripting and alarms have the same behavior as 
 
   const h = controllerHarness({ chromeApi });
   await h.controller.reconcileAlarm();
-  assert.equal(calls.clear, 1);
+  assert.equal(calls.clear, 2);
 });
 
 test('Promise-only and callback runtime.lastError Chrome APIs are each invoked exactly once', async () => {
@@ -1746,7 +1866,10 @@ test('run and resolve reconcile the latest paused state before another queued co
   });
   h.snapshot.conversationTrusteeship.enabled = true;
   await h.controller.handleMessage({ type: 'TRUSTEESHIP_RUN_NOW' });
-  assert.deepEqual(h.calls.clear, [Runtime.TRUSTEESHIP_ALARM]);
+  assert.deepEqual(h.calls.clear, [
+    Runtime.TRUSTEESHIP_ALARM,
+    Runtime.TRUSTEESHIP_DUE_ALARM
+  ]);
 
   h.snapshot.conversationTrusteeship.paused = false;
   await h.controller.handleMessage({
@@ -1756,7 +1879,9 @@ test('run and resolve reconcile the latest paused state before another queued co
   });
   assert.deepEqual(h.calls.clear, [
     Runtime.TRUSTEESHIP_ALARM,
-    Runtime.TRUSTEESHIP_ALARM
+    Runtime.TRUSTEESHIP_DUE_ALARM,
+    Runtime.TRUSTEESHIP_ALARM,
+    Runtime.TRUSTEESHIP_DUE_ALARM
   ]);
 });
 

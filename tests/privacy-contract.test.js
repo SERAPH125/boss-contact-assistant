@@ -8,6 +8,9 @@ const MonitorEngine = require('../src/conversation/monitor-engine.js');
 const Policy = require('../src/conversation/trusteeship-policy.js');
 const ReplyAI = require('../src/conversation/reply-ai.js');
 const Runtime = require('../src/conversation/trusteeship-runtime.js');
+const ImmediatePolicy = Object.assign({}, Policy, {
+  replyDelayMs() { return 0; }
+});
 
 const CANARIES = Object.freeze({
   apiKey: 'api-key-CANARY-PRIVACY-7f91',
@@ -175,7 +178,7 @@ async function privacyHarness(mode) {
   let reads = 0;
   const engine = MonitorEngine.create({
     store,
-    policy: Policy,
+    policy: ImmediatePolicy,
     clock: () => new Date('2026-07-25T09:00:00+08:00'),
     async getResumeFacts() {
       return [{ id: 'resume-1', text: '五年前端经验' }];
@@ -324,8 +327,8 @@ test('send errors execute the sender once and expose only a stable unknown code'
     llm: result.calls.llm,
     fetch: result.calls.fetch
   }, { classify: 1, draft: 1, send: 1, llm: 2, fetch: 0 });
-  assert.equal(conversation.state, 'PAUSED');
-  assert.equal(conversation.pauseCode, 'SEND_RESULT_UNKNOWN');
+  assert.equal(conversation.state, 'VERIFYING_SEND');
+  assert.equal(conversation.pauseCode, '');
   assert.equal(conversation.sendIntent.status, 'SEND_RESULT_UNKNOWN');
   assert.deepEqual(result.cycleSummary.errors, ['SEND_RESULT_UNKNOWN']);
   assertPublicSafe(result.cycleSummary, 'send-error cycle summary');

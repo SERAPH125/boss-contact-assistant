@@ -83,12 +83,14 @@
     'beginMessage',
     'createOrMergeApproval',
     'createSendIntent',
+    'deferAutoReply',
     'createAutoSendIntent',
     'createAutoCloseIntent',
     'deferAutoClose',
     'cancelDeferredAutoClose',
     'completeSend',
     'markSendUnknown',
+    'reconcileUnknownSend',
     'markConversationChecked',
     'pauseConversation',
     'recordReadFailure',
@@ -328,6 +330,23 @@
     return date;
   }
 
+  function nextQuietEndAt(now, quietHours) {
+    if (!quietHours || quietHours.enabled !== true ||
+      typeof quietHours.end !== 'string' ||
+      !/^([01]\d|2[0-3]):[0-5]\d$/.test(quietHours.end)) {
+      return now.getTime();
+    }
+    var end = new Date(now.getTime());
+    end.setHours(
+      Number(quietHours.end.slice(0, 2)),
+      Number(quietHours.end.slice(3, 5)),
+      0,
+      0
+    );
+    if (end.getTime() <= now.getTime()) end.setDate(end.getDate() + 1);
+    return end.getTime();
+  }
+
   function notificationPayload(approval, conversation) {
     var messages = approval && Array.isArray(approval.messages)
       ? approval.messages
@@ -388,10 +407,12 @@
       !hasMethods(source.policy, [
         'detectHardRisk',
         'isQuietHours',
+        'replyDelayMs',
         'decide',
         'validateAutoCloseDraft'
       ]) ||
       typeof source.clock !== 'function' ||
+      (source.random !== undefined && typeof source.random !== 'function') ||
       (source.guardExternalAction !== undefined &&
         typeof source.guardExternalAction !== 'function') ||
       (source.getResumeFacts !== undefined && typeof source.getResumeFacts !== 'function')) {
@@ -404,6 +425,7 @@
     var notifier = source.notifier;
     var policy = source.policy;
     var clock = source.clock;
+    var random = source.random || Math.random;
     var getResumeFacts = source.getResumeFacts;
     var guardExternalAction = source.guardExternalAction;
     var operationQueue = Promise.resolve();
@@ -687,6 +709,69 @@
       return { continueMessages: false, checkpoint: false };
     }
 
+    async function processDeferredAutoReply(context, conversation, read, output) {
+      var snapshot = await store.getSnapshot();
+      var current = snapshot.managedConversations[conversation.conversationId];
+      var pending = current && current.pendingReply;
+      if (!current ||
+        !current.enabled ||
+        current.state !== 'WAITING_REPLY_DUE' ||
+        !pending) {
+        addError(output, 'UNKNOWN_PROCESSING_FAILURE');
+        return { continueMessages: false, checkpoint: false };
+      }
+      if (read.messages.length > 0) {
+        return {
+          continueMessages: true,
+          checkpoint: false,
+          conversation: current
+        };
+      }
+      var now = readClock(clock).getTime();
+      if (context.quiet || now < pending.dueAt) {
+        return { continueMessages: false, checkpoint: true };
+      }
+      var classification = {
+        category: pending.classification.category,
+        confidence: pending.classification.confidence,
+        reasonCode: 'PERSISTED_DELAYED_REPLY',
+        evidenceIds: pending.evidenceIds,
+        fieldsNeeded: []
+      };
+      var recheck = policy.decide({
+        hardRisk: { blocked: false, reasonCode: '', fieldsNeeded: [] },
+        settings: snapshot.conversationTrusteeship,
+        conversationEnabled: current.enabled,
+        quiet: false,
+        hasPendingApproval: !!current.pendingApprovalId,
+        dailyCount: snapshot.conversationTrusteeship.autoReplyCount,
+        ai: classification
+      });
+      if (recheck.action !== 'AUTO_REPLY') {
+        return { continueMessages: false, checkpoint: true };
+      }
+      var intent;
+      try {
+        if (guardExternalAction) await guardExternalAction();
+        intent = await store.createAutoSendIntent(
+          current.conversationId,
+          pending.fingerprint,
+          pending.draft
+        );
+      } catch (error) {
+        addError(output, mapStoreError(error && error.code));
+        return { continueMessages: false, checkpoint: true };
+      }
+      var sendOutcome = await executeSend(current, pending.draft, intent);
+      if (sendOutcome.sent) {
+        output.autoSent += 1;
+        context.dailyCount += 1;
+      } else {
+        addError(output, sendOutcome.errorCode);
+      }
+      return { continueMessages: false, checkpoint: false };
+    }
+
     async function processMessage(context, conversation, message, output) {
       var current = (await store.getSnapshot()).managedConversations[conversation.conversationId];
       if (!current || !current.enabled || current.state === 'PAUSED' || current.state === 'DISABLED') {
@@ -756,6 +841,7 @@
         ai: classification
       });
       if (decision.action !== 'AUTO_REPLY' &&
+        decision.action !== 'DEFER_AUTO_REPLY' &&
         (hardRisk && hardRisk.blocked ||
           classification ||
           ['AI_CLASSIFY_FAILED', 'AI_CLASSIFICATION_INVALID', 'MISSING_RESUME_EVIDENCE']
@@ -772,6 +858,7 @@
           );
         } catch (_) {
           if (decision.action === 'AUTO_REPLY' ||
+            decision.action === 'DEFER_AUTO_REPLY' ||
             decision.action === 'AUTO_CLOSE' ||
             decision.action === 'DEFER_AUTO_CLOSE') {
             decision = { action: 'REQUIRE_CONFIRMATION', reasonCode: 'AI_DRAFT_FAILED' };
@@ -783,6 +870,7 @@
             draft = normalizeDraft(rawDraft, context.facts, classification);
           } catch (_) {
             if (decision.action === 'AUTO_REPLY' ||
+              decision.action === 'DEFER_AUTO_REPLY' ||
               decision.action === 'AUTO_CLOSE' ||
               decision.action === 'DEFER_AUTO_CLOSE') {
               decision = { action: 'REQUIRE_CONFIRMATION', reasonCode: 'AI_DRAFT_INVALID' };
@@ -867,7 +955,7 @@
         reasonCode = closeRecheck.reasonCode;
       }
 
-      if (decision.action === 'AUTO_REPLY' && draft) {
+      if ((decision.action === 'AUTO_REPLY' || decision.action === 'DEFER_AUTO_REPLY') && draft) {
         var fresh = await store.getSnapshot();
         var freshConversation = fresh.managedConversations[current.conversationId];
         var recheck = policy.decide({
@@ -879,15 +967,46 @@
           dailyCount: fresh.conversationTrusteeship.autoReplyCount,
           ai: classification
         });
-        if (recheck.action === 'AUTO_REPLY') {
-          var intent;
+        if (recheck.action === 'AUTO_REPLY' || recheck.action === 'DEFER_AUTO_REPLY') {
+          var scheduledReply = false;
           try {
-            if (guardExternalAction) await guardExternalAction();
-            intent = await store.createAutoSendIntent(
+            var now = readClock(clock);
+            var delay = policy.replyDelayMs(random);
+            if (recheck.action === 'AUTO_REPLY' && delay <= 0) {
+              if (guardExternalAction) await guardExternalAction();
+              var immediateIntent = await store.createAutoSendIntent(
+                current.conversationId,
+                message.fingerprint,
+                draft.draft
+              );
+              var immediateOutcome = await executeSend(
+                freshConversation,
+                draft.draft,
+                immediateIntent
+              );
+              if (immediateOutcome.sent) {
+                output.autoSent += 1;
+                context.dailyCount += 1;
+                return true;
+              }
+              addError(output, immediateOutcome.errorCode);
+              return false;
+            }
+            var earliest = recheck.action === 'DEFER_AUTO_REPLY'
+              ? nextQuietEndAt(now, fresh.conversationTrusteeship.quietHours)
+              : now.getTime();
+            await store.deferAutoReply(
               current.conversationId,
               message.fingerprint,
-              draft.draft
+              draft.draft,
+              draft.evidenceIds,
+              {
+                category: classification.category,
+                confidence: classification.confidence
+              },
+              earliest + delay
             );
+            scheduledReply = true;
           } catch (intentError) {
             var intentCode = mapStoreError(intentError && intentError.code);
             if (intentCode === 'AUTO_REPLY_NOT_ALLOWED' ||
@@ -897,16 +1016,7 @@
               throw engineError(intentCode);
             }
           }
-          if (intent) {
-            var sendOutcome = await executeSend(freshConversation, draft.draft, intent);
-            if (sendOutcome.sent) {
-              output.autoSent += 1;
-              context.dailyCount += 1;
-              return true;
-            }
-            addError(output, sendOutcome.errorCode);
-            return false;
-          }
+          if (scheduledReply) return true;
         } else {
           reasonCode = recheck.reasonCode;
         }
@@ -967,7 +1077,9 @@
         attemptedSlots += 1;
         if (conversation.state !== 'WAITING_HR' &&
           conversation.state !== 'WAITING_CONFIRMATION' &&
-          conversation.state !== 'WAITING_AUTO_CLOSE') {
+          conversation.state !== 'WAITING_REPLY_DUE' &&
+          conversation.state !== 'WAITING_AUTO_CLOSE' &&
+          conversation.state !== 'VERIFYING_SEND') {
           output.skipped += 1;
           continue;
         }
@@ -983,6 +1095,34 @@
           continue;
         }
         output.checked += 1;
+        if (conversation.state === 'VERIFYING_SEND') {
+          var unknownIntent = conversation.sendIntent;
+          if (!unknownIntent ||
+            unknownIntent.status !== 'SEND_RESULT_UNKNOWN' ||
+            typeof reader.verifySend !== 'function') {
+            output.skipped += 1;
+            continue;
+          }
+          var verifiedSend = null;
+          try {
+            verifiedSend = await reader.verifySend(conversation, unknownIntent);
+          } catch (_) {}
+          if (!verifiedSend || verifiedSend.success !== true) {
+            output.skipped += 1;
+            continue;
+          }
+          try {
+            await store.reconcileUnknownSend(unknownIntent.intentId, verifiedSend);
+            var afterVerification = await store.getSnapshot();
+            conversation = afterVerification.managedConversations[conversation.conversationId];
+          } catch (verificationStoreError) {
+            addError(
+              output,
+              mapStoreError(verificationStoreError && verificationStoreError.code)
+            );
+            continue;
+          }
+        }
         if (conversation.state === 'WAITING_AUTO_CLOSE') {
           var deferred = await processDeferredAutoClose(context, conversation, read, output);
           if (!deferred.continueMessages) {
@@ -999,6 +1139,31 @@
             continue;
           }
           conversation = deferred.conversation;
+        }
+        if (conversation.state === 'WAITING_REPLY_DUE') {
+          var delayedReply = await processDeferredAutoReply(
+            context,
+            conversation,
+            read,
+            output
+          );
+          if (!delayedReply.continueMessages) {
+            if (delayedReply.checkpoint) {
+              try {
+                await store.markConversationChecked(
+                  conversation.conversationId,
+                  { baseline: read.baseline }
+                );
+              } catch (replyCheckpointError) {
+                addError(
+                  output,
+                  mapStoreError(replyCheckpointError && replyCheckpointError.code)
+                );
+              }
+            }
+            continue;
+          }
+          conversation = delayedReply.conversation;
         }
         if (read.messages.length > 0) {
           context.facts = await loadFactsOnce();

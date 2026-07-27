@@ -40,7 +40,7 @@ function reliableRef() {
   };
 }
 
-test('fresh-worker AUTO_CLOSE recovery pauses without consuming the ordinary reply quota', async () => {
+test('fresh-worker AUTO_CLOSE recovery verifies without consuming the ordinary reply quota', async () => {
   const storage = memoryStorage();
   let ids = 0;
   const firstModule = loadFreshStoreModule();
@@ -64,7 +64,8 @@ test('fresh-worker AUTO_CLOSE recovery pauses without consuming the ordinary rep
   const snapshot = await recoveredStore.getSnapshot();
 
   assert.equal(snapshot.conversationTrusteeship.autoReplyCount, 0);
-  assert.equal(snapshot.managedConversations['conv-recovery'].state, 'PAUSED');
+  assert.equal(snapshot.managedConversations['conv-recovery'].state, 'VERIFYING_SEND');
+  assert.equal(snapshot.managedConversations['conv-recovery'].pauseCode, '');
   assert.equal(
     snapshot.managedConversations['conv-recovery'].sendIntent.intentId,
     intent.intentId
@@ -99,7 +100,9 @@ test('a fresh worker reclassifies an interrupted CLASSIFYING message and sends i
   const calls = { read: 0, classify: 0, draft: 0, send: 0, notify: 0 };
   const engine = MonitorEngine.create({
     store: recoveredStore,
-    policy: Policy,
+    policy: Object.assign({}, Policy, {
+      replyDelayMs() { return 0; }
+    }),
     clock: () => new Date('2026-07-25T09:00:00+08:00'),
     async getResumeFacts() {
       return [{ id: 'resume-1', text: '五年前端经验' }];
@@ -412,14 +415,29 @@ test('SENDING recovery takes precedence over invalid CLASSIFYING evidence and ne
   const FreshConversationStore = loadFreshStoreModule();
   const recoveryNow = Date.parse('2026-07-25T09:00:00+08:00');
   const store = FreshConversationStore.create(storage, () => recoveryNow, () => 'unused');
-  const calls = { read: 0, classify: 0, draft: 0, notify: 0, send: 0 };
+  const calls = { read: 0, verify: 0, classify: 0, draft: 0, notify: 0, send: 0 };
   const engine = MonitorEngine.create({
     store,
     policy: Policy,
     clock: () => new Date('2026-07-25T09:00:00+08:00'),
     async getResumeFacts() { return []; },
     reader: {
-      async read() { calls.read += 1; throw new Error('must not read'); },
+      async read(conversation) {
+        calls.read += 1;
+        return {
+          success: true,
+          conversationRef: {
+            conversationId: conversation.conversationId,
+            url: conversation.url
+          },
+          baseline: 'fp-active',
+          messages: []
+        };
+      },
+      async verifySend() {
+        calls.verify += 1;
+        return { success: false };
+      },
       async send() { calls.send += 1; throw new Error('must not send'); }
     },
     classifier: {
@@ -434,8 +452,8 @@ test('SENDING recovery takes precedence over invalid CLASSIFYING evidence and ne
 
   let recovered = await store.getSnapshot();
   const conversation = recovered.managedConversations['conv-recovery'];
-  assert.equal(conversation.state, 'PAUSED');
-  assert.equal(conversation.pauseCode, 'SEND_RESULT_UNKNOWN');
+  assert.equal(conversation.state, 'VERIFYING_SEND');
+  assert.equal(conversation.pauseCode, '');
   assert.equal(conversation.sendIntent.status, 'SEND_RESULT_UNKNOWN');
   assert.equal(
     recovered.pendingApprovals['approval-unknown-recovery'].status,
@@ -449,7 +467,14 @@ test('SENDING recovery takes precedence over invalid CLASSIFYING evidence and ne
   await engine.runCycle();
   recovered = await store.getSnapshot();
   assert.equal(recovered.conversationTrusteeship.autoReplyCount, 3);
-  assert.deepEqual(calls, { read: 0, classify: 0, draft: 0, notify: 0, send: 0 });
+  assert.deepEqual(calls, {
+    read: 1,
+    verify: 1,
+    classify: 0,
+    draft: 0,
+    notify: 0,
+    send: 0
+  });
 });
 
 test('precedence recovery retries its SEND_RESULT_UNKNOWN terminal write after the first persistence failure', async () => {
@@ -458,7 +483,7 @@ test('precedence recovery retries its SEND_RESULT_UNKNOWN terminal write after t
     const candidate = patch.managedConversations &&
       patch.managedConversations['conv-recovery'];
     if (failures > 0 && candidate &&
-      candidate.pauseCode === 'SEND_RESULT_UNKNOWN' &&
+      candidate.state === 'VERIFYING_SEND' &&
       candidate.sendIntent &&
       candidate.sendIntent.status === 'SEND_RESULT_UNKNOWN') {
       failures -= 1;
@@ -482,7 +507,7 @@ test('precedence recovery retries its SEND_RESULT_UNKNOWN terminal write after t
     recovered.managedConversations['conv-recovery'].sendIntent.status,
     'SEND_RESULT_UNKNOWN'
   );
-  assert.equal(recovered.managedConversations['conv-recovery'].pauseCode, 'SEND_RESULT_UNKNOWN');
+  assert.equal(recovered.managedConversations['conv-recovery'].pauseCode, '');
   assert.equal(recovered.conversationTrusteeship.autoReplyCount, 3);
   assert.equal(
     recovered.pendingApprovals['approval-unknown-recovery'].status,

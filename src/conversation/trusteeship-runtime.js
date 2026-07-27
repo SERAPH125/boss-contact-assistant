@@ -5,6 +5,7 @@
   if (typeof module !== 'undefined' && module.exports) module.exports = api;
 })(typeof globalThis !== 'undefined' ? globalThis : self, function () {
   var TRUSTEESHIP_ALARM = 'boss-ai-chat-monitor';
+  var TRUSTEESHIP_DUE_ALARM = 'boss-ai-chat-due';
   var ALLOWED_INTERVALS = [5, 10, 15];
   var RECENT_TEST_MS = 24 * 60 * 60 * 1000;
   var CONTENT_FILES = [
@@ -75,7 +76,9 @@
     'DRAFTING_AUTO',
     'SENDING',
     'WAITING_CONFIRMATION',
+    'WAITING_REPLY_DUE',
     'WAITING_AUTO_CLOSE',
+    'VERIFYING_SEND',
     'ENDED_UNMATCHED',
     'PAUSED'
   ]);
@@ -270,6 +273,10 @@
     if (message.type === 'TRUSTEESHIP_SET_CONVERSATION') {
       return exactKeys(message, ['type', 'conversationId', 'enabled']) &&
         boundedString(message.conversationId, 128, false) &&
+        typeof message.enabled === 'boolean';
+    }
+    if (message.type === 'TRUSTEESHIP_SET_ALL_CONVERSATIONS') {
+      return exactKeys(message, ['type', 'enabled']) &&
         typeof message.enabled === 'boolean';
     }
     if (message.type === 'TRUSTEESHIP_REMOVE_CONVERSATION') {
@@ -724,7 +731,63 @@
       return result;
     }
 
-    return { read: read, send: send };
+    async function verifySend(conversation, intent, assertLease) {
+      if (!safeConversationUrl(
+        conversation && conversation.url,
+        conversation && conversation.conversationId
+      )) {
+        return mappedReaderFailure(null, 'TARGET_UNCERTAIN');
+      }
+      var tabId = await findReusableChatTab(assertLease);
+      if (tabId === null) return mappedReaderFailure(null, 'SEND_RESULT_UNKNOWN');
+      try {
+        await ensureContentReady(tabId, assertLease, false);
+      } catch (error) {
+        if (error && error.code === 'API_PROOF_STALE') throw error;
+        return mappedReaderFailure(null, 'SEND_RESULT_UNKNOWN');
+      }
+      var snapshot = await store.getSnapshot();
+      var current = snapshot.managedConversations &&
+        snapshot.managedConversations[conversation.conversationId];
+      var persistedIntent = current && current.sendIntent;
+      if (!current ||
+        current.state !== 'VERIFYING_SEND' ||
+        !persistedIntent ||
+        persistedIntent.status !== 'SEND_RESULT_UNKNOWN' ||
+        persistedIntent.intentId !== (intent && intent.intentId) ||
+        persistedIntent.draft !== (intent && intent.draft)) {
+        return mappedReaderFailure(null, 'SEND_RESULT_UNKNOWN');
+      }
+      var response;
+      try {
+        response = await sendMessage(tabId, {
+          type: 'VERIFY_MANAGED_SEND',
+          expected: expectedIdentity(current),
+          conversationRef: {
+            conversationId: current.conversationId,
+            url: current.url,
+            aliases: Array.isArray(current.aliases) ? current.aliases.slice(0, 8) : [],
+            peerUid: current.peerUid || ''
+          },
+          draft: persistedIntent.draft,
+          createdAt: persistedIntent.createdAt
+        }, assertLease);
+      } catch (error) {
+        if (error && error.code === 'API_PROOF_STALE') throw error;
+        return mappedReaderFailure(null, 'SEND_RESULT_UNKNOWN');
+      }
+      if (!response || response.success !== true) {
+        return mappedReaderFailure(response, 'SEND_RESULT_UNKNOWN');
+      }
+      return {
+        success: true,
+        targetConversationId: response.targetConversationId,
+        sentFingerprint: response.sentFingerprint,
+        observedAt: response.observedAt
+      };
+    }
+
+    return { read: read, send: send, verifySend: verifySend };
   }
 
   function createClassifier(options) {
@@ -918,25 +981,58 @@
       return next;
     }
 
+    async function clearTrusteeshipAlarmsUnsafe() {
+      await callChrome(chromeApi, chromeApi.alarms, 'clear', [TRUSTEESHIP_ALARM]);
+      await callChrome(chromeApi, chromeApi.alarms, 'clear', [TRUSTEESHIP_DUE_ALARM]);
+    }
+
+    function earliestDueAt(snapshot) {
+      var earliest = 0;
+      Object.keys(snapshot.managedConversations || {}).forEach(function (id) {
+        var conversation = snapshot.managedConversations[id];
+        var dueAt = conversation && conversation.enabled &&
+          conversation.state === 'WAITING_REPLY_DUE' &&
+          conversation.pendingReply &&
+          Number(conversation.pendingReply.dueAt);
+        if (Number.isSafeInteger(dueAt) && dueAt > 0 && (!earliest || dueAt < earliest)) {
+          earliest = dueAt;
+        }
+      });
+      return earliest;
+    }
+
     async function reconcileAlarmUnsafe() {
       var snapshot = await store.getSnapshot();
       var settings = snapshot.conversationTrusteeship || {};
       if (settings.enabled !== true || settings.paused === true ||
         ALLOWED_INTERVALS.indexOf(settings.intervalMinutes) === -1) {
-        await callChrome(chromeApi, chromeApi.alarms, 'clear', [TRUSTEESHIP_ALARM]);
+        await clearTrusteeshipAlarmsUnsafe();
         return { enabled: false };
       }
       // 全局可默认开启，但未满足前置条件时绝不创建监控 alarm
       var current = await readCurrentPrerequisites();
       if (current.missing.length > 0) {
-        await callChrome(chromeApi, chromeApi.alarms, 'clear', [TRUSTEESHIP_ALARM]);
+        await clearTrusteeshipAlarmsUnsafe();
         return { enabled: false, missing: current.missing.slice() };
       }
       await callChrome(chromeApi, chromeApi.alarms, 'create', [TRUSTEESHIP_ALARM, {
         delayInMinutes: settings.intervalMinutes,
         periodInMinutes: settings.intervalMinutes
       }]);
-      return { enabled: true, intervalMinutes: settings.intervalMinutes };
+      var dueAt = earliestDueAt(snapshot);
+      if (dueAt) {
+        await callChrome(chromeApi, chromeApi.alarms, 'create', [
+          TRUSTEESHIP_DUE_ALARM,
+          { when: Math.max(Number(now()) + 1000, dueAt) }
+        ]);
+      } else {
+        await callChrome(chromeApi, chromeApi.alarms, 'clear', [TRUSTEESHIP_DUE_ALARM]);
+      }
+      return {
+        enabled: true,
+        intervalMinutes: settings.intervalMinutes,
+        dueAt: dueAt
+      };
     }
 
     async function readLocalConfig() {
@@ -1018,7 +1114,7 @@
         await store.saveSettings(patch);
       } catch (_) {}
       try {
-        await callChrome(chromeApi, chromeApi.alarms, 'clear', [TRUSTEESHIP_ALARM]);
+        await clearTrusteeshipAlarmsUnsafe();
       } catch (_) {}
     }
 
@@ -1179,9 +1275,30 @@
       }
       try {
         var saved = await store.setManaged(message.conversationId, message.enabled);
+        await reconcileAlarmUnsafe();
         return { ok: true, conversation: safeConversation(saved) };
       } catch (_) {
         return safeError('CONVERSATION_NOT_REGISTERED');
+      }
+    }
+
+    async function setAllConversations(message) {
+      if (typeof message.enabled !== 'boolean' ||
+        typeof store.setAllManaged !== 'function') {
+        return safeError('TRUSTEESHIP_CONVERSATION_INPUT_INVALID');
+      }
+      try {
+        var result = await store.setAllManaged(message.enabled);
+        await reconcileAlarmUnsafe();
+        return {
+          ok: true,
+          enabled: result.enabled,
+          unchanged: result.unchanged,
+          skipped: result.skipped,
+          failed: result.failed
+        };
+      } catch (_) {
+        return safeError('TRUSTEESHIP_CONVERSATION_INPUT_INVALID');
       }
     }
 
@@ -1477,6 +1594,9 @@
       if (input.type === 'TRUSTEESHIP_SAVE_SETTINGS') return saveSettings(input);
       if (input.type === 'TRUSTEESHIP_TEST_FEISHU') return testFeishu();
       if (input.type === 'TRUSTEESHIP_SET_CONVERSATION') return setConversation(input);
+      if (input.type === 'TRUSTEESHIP_SET_ALL_CONVERSATIONS') {
+        return setAllConversations(input);
+      }
       if (input.type === 'TRUSTEESHIP_REMOVE_CONVERSATION') return removeConversation(input);
       if (input.type === 'TRUSTEESHIP_ACK_UNKNOWN_SEND') {
         return acknowledgeUnknownSend(input);
@@ -1569,7 +1689,7 @@
             });
           } catch (_) {}
           try {
-            await callChrome(chromeApi, chromeApi.alarms, 'clear', [TRUSTEESHIP_ALARM]);
+            await clearTrusteeshipAlarmsUnsafe();
           } catch (_) {}
           return safeError('SERVICE_WORKER_INTERRUPTED');
         });
@@ -1606,6 +1726,7 @@
 
   return {
     TRUSTEESHIP_ALARM: TRUSTEESHIP_ALARM,
+    TRUSTEESHIP_DUE_ALARM: TRUSTEESHIP_DUE_ALARM,
     createPageAdapter: createPageAdapter,
     createClassifier: createClassifier,
     createResumeFacts: createResumeFacts,

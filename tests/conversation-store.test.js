@@ -561,7 +561,7 @@ test('rejects non-affirmative or mismatched send evidence without resolving stat
   assert.equal(snapshot.pendingApprovals[approval.approvalId].status, 'SENDING');
 });
 
-test('marks an uncertain send paused and never makes its intent replayable', async () => {
+test('keeps an uncertain send in read-only verification and never makes its intent replayable', async () => {
   const harness = makeHarness();
   await registerAndEnable(harness);
   const approval = await createPendingApproval(harness, 'fp-1', ['A']);
@@ -575,8 +575,8 @@ test('marks an uncertain send paused and never makes its intent replayable', asy
   assert.equal(unknown.reason, 'SEND_RESULT_UNKNOWN');
 
   const snapshot = await harness.store.getSnapshot();
-  assert.equal(snapshot.managedConversations['conv-1'].state, 'PAUSED');
-  assert.equal(snapshot.managedConversations['conv-1'].pauseCode, 'SEND_RESULT_UNKNOWN');
+  assert.equal(snapshot.managedConversations['conv-1'].state, 'VERIFYING_SEND');
+  assert.equal(snapshot.managedConversations['conv-1'].pauseCode, '');
   assert.equal(snapshot.managedConversations['conv-1'].sendIntent.status, 'SEND_RESULT_UNKNOWN');
   assert.equal(snapshot.pendingApprovals[approval.approvalId].status, 'SEND_RESULT_UNKNOWN');
   assert.equal(JSON.stringify(snapshot).includes('reason-secret'), false);
@@ -585,6 +585,139 @@ test('marks an uncertain send paused and never makes its intent replayable', asy
     () => harness.store.createSendIntent(approval.approvalId, '不要重放'),
     (error) => error.code === 'SEND_INTENT_ALREADY_EXISTS'
   );
+});
+
+test('persists one delayed automatic reply and consumes it only after its due time', async () => {
+  const harness = makeHarness();
+  await registerAndEnable(harness);
+  await harness.store.beginMessage('conv-1', 'fp-delayed-1');
+  const dueAt = Date.parse('2026-07-24T08:02:00+08:00');
+
+  const delayed = await harness.store.deferAutoReply(
+    'conv-1',
+    'fp-delayed-1',
+    '是的，我还在看机会。',
+    ['resume:availability'],
+    { category: 'low_risk_fact', confidence: 0.98 },
+    dueAt
+  );
+
+  assert.equal(delayed.state, 'WAITING_REPLY_DUE');
+  assert.deepEqual(delayed.pendingReply, {
+    fingerprint: 'fp-delayed-1',
+    draft: '是的，我还在看机会。',
+    evidenceIds: ['resume:availability'],
+    classification: {
+      category: 'low_risk_fact',
+      confidence: 0.98
+    },
+    createdAt: Date.parse('2026-07-24T08:00:00+08:00'),
+    dueAt
+  });
+
+  await assert.rejects(
+    () => harness.store.createAutoSendIntent(
+      'conv-1',
+      'fp-delayed-1',
+      '是的，我还在看机会。'
+    ),
+    (error) => error.code === 'AUTO_REPLY_NOT_DUE'
+  );
+
+  harness.setTime('2026-07-24T08:02:00+08:00');
+  const intent = await harness.store.createAutoSendIntent(
+    'conv-1',
+    'fp-delayed-1',
+    '是的，我还在看机会。'
+  );
+  assert.equal(intent.mode, 'AUTO');
+
+  const snapshot = await harness.store.getSnapshot();
+  assert.equal(snapshot.managedConversations['conv-1'].state, 'SENDING');
+  assert.equal(snapshot.managedConversations['conv-1'].pendingReply, undefined);
+});
+
+test('an unknown send stays enabled for read-only verification and can be reconciled once', async () => {
+  const harness = makeHarness();
+  await registerAndEnable(harness);
+  const approval = await createPendingApproval(harness, 'fp-verify-1', ['还在看机会吗']);
+  const intent = await harness.store.createSendIntent(approval.approvalId, '是的，仍在看机会。');
+
+  await harness.store.markSendUnknown(intent.intentId, 'untrusted raw detail');
+  let snapshot = await harness.store.getSnapshot();
+  let conversation = snapshot.managedConversations['conv-1'];
+  assert.equal(conversation.enabled, true);
+  assert.equal(conversation.state, 'VERIFYING_SEND');
+  assert.equal(conversation.pauseCode, '');
+  assert.equal(conversation.sendIntent.status, 'SEND_RESULT_UNKNOWN');
+
+  const reconciled = await harness.store.reconcileUnknownSend(intent.intentId, {
+    success: true,
+    targetConversationId: 'conv-1',
+    sentFingerprint: 'outgoing:verified-1',
+    observedAt: Date.parse('2026-07-24T08:00:10+08:00')
+  });
+  assert.equal(reconciled.status, 'SENT');
+
+  snapshot = await harness.store.getSnapshot();
+  conversation = snapshot.managedConversations['conv-1'];
+  assert.equal(conversation.state, 'WAITING_HR');
+  assert.equal(snapshot.pendingApprovals[approval.approvalId].status, 'RESOLVED');
+
+  await assert.rejects(
+    () => harness.store.reconcileUnknownSend(intent.intentId, {
+      success: true,
+      targetConversationId: 'conv-1',
+      sentFingerprint: 'outgoing:verified-1',
+      observedAt: Date.parse('2026-07-24T08:00:11+08:00')
+    }),
+    (error) => error.code === 'SEND_INTENT_ALREADY_TERMINAL'
+  );
+});
+
+test('bulk enable never reopens ended unmatched or unsafe conversations', async () => {
+  const harness = makeHarness();
+  await harness.store.registerConversation(reliableRef({
+    conversationId: 'conv-disabled',
+    jobId: 'job-disabled'
+  }));
+  await harness.store.registerConversation(reliableRef({
+    conversationId: 'conv-ended',
+    jobId: 'job-ended'
+  }));
+  await harness.store.registerConversation(reliableRef({
+    conversationId: 'conv-paused',
+    jobId: 'job-paused'
+  }));
+  await harness.store.setManaged('conv-ended', true);
+  await harness.store.beginMessage('conv-ended', 'fp-ended');
+  const close = await harness.store.createAutoCloseIntent(
+    'conv-ended',
+    'fp-ended',
+    '好的，感谢您的回复，祝工作顺利。'
+  );
+  await harness.store.completeSend(close.intentId, {
+    success: true,
+    targetConversationId: 'conv-ended',
+    sentFingerprint: 'outgoing:close',
+    observedAt: Date.parse('2026-07-24T08:00:01+08:00')
+  });
+  await harness.store.setManaged('conv-paused', true);
+  await harness.store.pauseConversation('conv-paused', 'TARGET_UNCERTAIN');
+
+  const result = await harness.store.setAllManaged(true);
+  assert.deepEqual(result, {
+    enabled: 1,
+    unchanged: 0,
+    skipped: 2,
+    failed: 0
+  });
+
+  const snapshot = await harness.store.getSnapshot();
+  assert.equal(snapshot.managedConversations['conv-disabled'].state, 'WAITING_HR');
+  assert.equal(snapshot.managedConversations['conv-ended'].state, 'ENDED_UNMATCHED');
+  assert.equal(snapshot.managedConversations['conv-ended'].enabled, false);
+  assert.equal(snapshot.managedConversations['conv-paused'].state, 'PAUSED');
 });
 
 test('does not recover a live SENDING operation in another store from the same worker', async () => {
@@ -617,8 +750,8 @@ test('recovers persisted SENDING only after a fresh module load simulates a new 
   );
 
   const recovered = await recoveredStore.getSnapshot();
-  assert.equal(recovered.managedConversations['conv-1'].state, 'PAUSED');
-  assert.equal(recovered.managedConversations['conv-1'].pauseCode, 'SEND_RESULT_UNKNOWN');
+  assert.equal(recovered.managedConversations['conv-1'].state, 'VERIFYING_SEND');
+  assert.equal(recovered.managedConversations['conv-1'].pauseCode, '');
   assert.equal(recovered.managedConversations['conv-1'].sendIntent.intentId, intent.intentId);
   assert.equal(recovered.managedConversations['conv-1'].sendIntent.status, 'SEND_RESULT_UNKNOWN');
 
@@ -647,8 +780,8 @@ test('retries interrupted-send recovery after a transient persistence failure', 
   );
 
   const recovered = await recoveredStore.getSnapshot();
-  assert.equal(recovered.managedConversations['conv-1'].state, 'PAUSED');
-  assert.equal(recovered.managedConversations['conv-1'].pauseCode, 'SEND_RESULT_UNKNOWN');
+  assert.equal(recovered.managedConversations['conv-1'].state, 'VERIFYING_SEND');
+  assert.equal(recovered.managedConversations['conv-1'].pauseCode, '');
   assert.equal(
     recovered.managedConversations['conv-1'].sendIntent.status,
     'SEND_RESULT_UNKNOWN'
@@ -1186,7 +1319,7 @@ test('AUTO_CLOSE uses the exact deferred draft and unknown send never consumes q
   await harness.store.markSendUnknown(intent.intentId, 'raw secret');
   const snapshot = await harness.store.getSnapshot();
   assert.equal(snapshot.conversationTrusteeship.autoReplyCount, 0);
-  assert.equal(snapshot.managedConversations['conv-1'].state, 'PAUSED');
+  assert.equal(snapshot.managedConversations['conv-1'].state, 'VERIFYING_SEND');
   assert.equal(
     snapshot.managedConversations['conv-1'].sendIntent.status,
     'SEND_RESULT_UNKNOWN'
@@ -1211,7 +1344,7 @@ test('fresh-worker AUTO_CLOSE recovery is terminal and quota-free', async () => 
   );
   const recovered = await recoveredStore.getSnapshot();
   assert.equal(recovered.conversationTrusteeship.autoReplyCount, 0);
-  assert.equal(recovered.managedConversations['conv-1'].state, 'PAUSED');
+  assert.equal(recovered.managedConversations['conv-1'].state, 'VERIFYING_SEND');
   assert.equal(
     recovered.managedConversations['conv-1'].sendIntent.intentId,
     intent.intentId
@@ -1741,10 +1874,12 @@ test('store exposes one notification transition API within the exact public meth
     'createOrMergeApproval',
     'createSendIntent',
     'deferAutoClose',
+    'deferAutoReply',
     'getSnapshot',
     'markConversationChecked',
     'markSendUnknown',
     'pauseConversation',
+    'reconcileUnknownSend',
     'recordNotificationAttempt',
     'recordReadFailure',
     'registerConversation',
@@ -1752,6 +1887,7 @@ test('store exposes one notification transition API within the exact public meth
     'resetConversation',
     'resolveApprovalWithoutSend',
     'saveSettings',
+    'setAllManaged',
     'setManaged'
   ]);
 });

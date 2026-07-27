@@ -25,6 +25,7 @@ const DEFAULT_DS = 'https://api.deepseek.com/v1/chat/completions';
 // deepseek-chat 已于 2026-07-24 退役；非思考模式对应 v4-flash
 const DS_MODEL = 'deepseek-v4-flash';
 const TRUSTEESHIP_ALARM = 'boss-ai-chat-monitor';
+const TRUSTEESHIP_DUE_ALARM = 'boss-ai-chat-due';
 
 let state = {
   phase: 'idle', paused: false, aborted: false, blocked: false,
@@ -97,7 +98,8 @@ chrome.runtime.onStartup.addListener(() => {
   reconcileTrusteeshipLifecycle().catch(() => {});
 });
 chrome.alarms.onAlarm.addListener((alarm) => {
-  if (!alarm || alarm.name !== TRUSTEESHIP_ALARM) return;
+  if (!alarm ||
+    (alarm.name !== TRUSTEESHIP_ALARM && alarm.name !== TRUSTEESHIP_DUE_ALARM)) return;
   workerReady
     .then(() => {
       if (workerInitializationFailed) return;

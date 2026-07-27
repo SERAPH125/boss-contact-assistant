@@ -813,7 +813,11 @@ test('alarm uses the internal scheduled entry and paused save clears the alarm',
     type: 'TRUSTEESHIP_SAVE_SETTINGS',
     settings: { enabled: false }
   }, h.trustedSender);
-  assert.deepEqual(h.calls.alarmsClear, ['boss-ai-chat-monitor']);
+  assert.deepEqual(h.calls.alarmsClear, [
+    'boss-ai-chat-due',
+    'boss-ai-chat-monitor',
+    'boss-ai-chat-due'
+  ]);
 });
 
 test('TEST_API succeeds only for an explicit nonempty ok protocol response', async () => {
@@ -1169,7 +1173,10 @@ test('API identity storage changes serialize controller invalidation and always 
 
     assert.equal(h.calls.controllerInvalidate, 1);
     assert.deepEqual(h.calls.alarmsCreate, []);
-    assert.deepEqual(h.calls.alarmsClear, ['boss-ai-chat-monitor']);
+    assert.deepEqual(h.calls.alarmsClear, [
+      'boss-ai-chat-monitor',
+      'boss-ai-chat-due'
+    ]);
     if (!apiPausePersistFailure) {
       assert.equal(h.snapshot.conversationTrusteeship.paused, true);
       assert.equal(h.snapshot.conversationTrusteeship.pauseCode, 'API_CONFIG_CHANGED');

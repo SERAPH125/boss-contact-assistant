@@ -89,6 +89,7 @@ async function makeHarness(options) {
   const calls = {
     read: [],
     send: [],
+    verifySend: [],
     classify: [],
     draft: [],
     notifyApproval: [],
@@ -112,6 +113,9 @@ async function makeHarness(options) {
   };
   const originalRead = reader.read.bind(reader);
   const originalSend = reader.send.bind(reader);
+  const originalVerifySend = typeof reader.verifySend === 'function'
+    ? reader.verifySend.bind(reader)
+    : null;
   reader.read = async function (conversation) {
     if (source.reader) calls.read.push(conversation.conversationId);
     return originalRead(conversation);
@@ -120,6 +124,12 @@ async function makeHarness(options) {
     if (source.reader) calls.send.push({ conversationId: conversation.conversationId, draft, intent });
     return originalSend(conversation, draft, intent);
   };
+  if (originalVerifySend) {
+    reader.verifySend = async function (conversation, intent) {
+      calls.verifySend.push({ conversationId: conversation.conversationId, intent });
+      return originalVerifySend(conversation, intent);
+    };
+  }
   const classifier = source.classifier || {
     async classify(input) {
       calls.classify.push(input);
@@ -151,8 +161,13 @@ async function makeHarness(options) {
     reader,
     classifier,
     notifier,
-    policy: source.policy || Policy,
+    policy: source.policy || Object.assign({}, Policy, {
+      replyDelayMs() {
+        return 0;
+      }
+    }),
     clock: () => now,
+    random: source.random || (() => 0),
     async getResumeFacts() {
       calls.getResumeFacts += 1;
       if (source.getResumeFacts) return source.getResumeFacts();
@@ -311,13 +326,15 @@ test('a stable monitor cursor handles one new incoming message exactly once acro
   );
 });
 
-test('confidence 0.85 with valid resume evidence sends once after a second policy check', async () => {
+test('confidence 0.85 persists a delayed reply and sends once when due', async () => {
   let reads = 0;
+  let messages = [incoming('m1', '您好，还在看机会吗？')];
   const harness = await makeHarness({
+    policy: Policy,
     reader: {
       async read(conversation) {
         reads += 1;
-        return readOk(conversation, [incoming('m1', '您好，还在看机会吗？')], 'id:m1');
+        return readOk(conversation, messages, 'id:m1');
       },
       async send(conversation, draft, intent) {
         return {
@@ -347,12 +364,28 @@ test('confidence 0.85 with valid resume evidence sends once after a second polic
   await harness.enableGlobal();
 
   const first = await harness.engine.runCycle();
-  const second = await harness.engine.runCycle();
-  const snapshot = await harness.store.getSnapshot();
+  let snapshot = await harness.store.getSnapshot();
+  assert.equal(first.autoSent, 0);
+  assert.equal(harness.calls.send.length, 0);
+  assert.equal(snapshot.managedConversations['conv-1'].state, 'WAITING_REPLY_DUE');
+  assert.equal(
+    snapshot.managedConversations['conv-1'].pendingReply.dueAt,
+    Date.parse('2026-07-24T09:00:30+08:00')
+  );
 
-  assert.equal(reads, 2);
-  assert.equal(first.autoSent, 1);
+  messages = [];
+  harness.setTime('2026-07-24T09:00:29+08:00');
+  const second = await harness.engine.runCycle();
   assert.equal(second.autoSent, 0);
+  assert.equal(harness.calls.send.length, 0);
+
+  harness.setTime('2026-07-24T09:00:30+08:00');
+  const third = await harness.engine.runCycle();
+  snapshot = await harness.store.getSnapshot();
+
+  assert.equal(reads, 3);
+  assert.equal(second.autoSent, 0);
+  assert.equal(third.autoSent, 1);
   assert.equal(harness.calls.send.length, 1);
   assert.equal(snapshot.conversationTrusteeship.autoReplyCount, 1);
   assert.equal(snapshot.managedConversations['conv-1'].sendIntent.mode, 'AUTO');
@@ -724,6 +757,9 @@ test('low confidence, hard risk, AI failure, non-text, and evidence mismatch bec
 
 test('an unexpected policy failure becomes confirmation and does not block a safe peer', async () => {
   const throwingPolicy = Object.assign({}, Policy, {
+    replyDelayMs() {
+      return 0;
+    },
     detectHardRisk(message) {
       if (message.text === '触发未知失败') throw new Error('raw policy failure');
       return Policy.detectHardRisk(message);
@@ -790,7 +826,7 @@ test('an existing approval merges later messages without AI or auto-send, and qu
   assert.equal(harness.calls.notifyApproval.length, 0);
 });
 
-test('quiet-hour messages remain one local approval and emit one merged notification after quiet hours', async () => {
+test('quiet-hour safe messages replace stale delayed drafts and send the latest once after quiet hours', async () => {
   let run = 0;
   const harness = await makeHarness({
     now: Date.parse('2026-07-24T23:00:00+08:00'),
@@ -810,8 +846,13 @@ test('quiet-hour messages remain one local approval and emit one merged notifica
         );
         return readOk(conversation, [], 'id:quiet-2');
       },
-      async send() {
-        throw new Error('must not send');
+      async send(conversation, draft, intent) {
+        return {
+          success: true,
+          targetConversationId: conversation.conversationId,
+          sentFingerprint: `sent:${intent.intentId}`,
+          observedAt: Date.now()
+        };
       }
     }
   });
@@ -823,21 +864,20 @@ test('quiet-hour messages remain one local approval and emit one merged notifica
   await harness.engine.runCycle();
   await harness.engine.runCycle();
   assert.equal(harness.calls.notifyApproval.length, 0);
+  let snapshot = await harness.store.getSnapshot();
+  assert.equal(snapshot.managedConversations['conv-1'].state, 'WAITING_REPLY_DUE');
+  assert.equal(
+    snapshot.managedConversations['conv-1'].pendingReply.fingerprint,
+    'id:quiet-2'
+  );
 
   harness.setTime('2026-07-25T09:00:00+08:00');
   await harness.engine.runCycle();
-  const approvals = Object.values((await harness.store.getSnapshot()).pendingApprovals);
-
-  assert.equal(approvals.length, 1);
-  assert.deepEqual(
-    approvals[0].messages,
-    ['第一条静默消息', '第二条静默消息']
-  );
-  assert.equal(harness.calls.notifyApproval.length, 1);
-  assert.equal(
-    harness.calls.notifyApproval[0].latestSummary,
-    'HR 有新消息，请在插件内查看完整上下文'
-  );
+  snapshot = await harness.store.getSnapshot();
+  assert.equal(Object.values(snapshot.pendingApprovals).length, 0);
+  assert.equal(harness.calls.send.length, 1);
+  assert.equal(harness.calls.notifyApproval.length, 0);
+  assert.equal(snapshot.managedConversations['conv-1'].state, 'WAITING_HR');
 });
 
 test('notifyPending sends a live drill approval once without reading or sending Boss', async () => {
@@ -1237,7 +1277,7 @@ test('a global pause discovered while reading suppresses pending notifications i
   assert.equal(harness.calls.notifyApproval.length, 0);
 });
 
-test('unknown auto-send result pauses with a terminal intent and is never resent', async () => {
+test('unknown auto-send result keeps read-only verification and is never resent', async () => {
   const harness = await makeHarness({
     reader: {
       async read(conversation) {
@@ -1254,11 +1294,50 @@ test('unknown auto-send result pauses with a terminal intent and is never resent
   const first = await harness.engine.runCycle();
   const second = await harness.engine.runCycle();
   const conversation = (await harness.store.getSnapshot()).managedConversations['conv-1'];
-  assert.equal(conversation.state, 'PAUSED');
+  assert.equal(conversation.state, 'VERIFYING_SEND');
   assert.equal(conversation.sendIntent.status, 'SEND_RESULT_UNKNOWN');
   assert.equal(harness.calls.send.length, 1);
   assert.equal(JSON.stringify(first).includes('must-not-leak'), false);
   assert.equal(second.autoSent, 0);
+});
+
+test('a later read-only receipt reconciles an unknown send and resumes multi-turn monitoring', async () => {
+  let reads = 0;
+  const harness = await makeHarness({
+    reader: {
+      async read(conversation) {
+        reads += 1;
+        return readOk(
+          conversation,
+          reads === 1 ? [incoming('m1', '您好')] : [],
+          reads === 1 ? 'id:m1' : conversation.lastIncomingFingerprint
+        );
+      },
+      async send() {
+        return { success: false, errorCode: 'SEND_RESULT_UNKNOWN' };
+      },
+      async verifySend(conversation, intent) {
+        return {
+          success: true,
+          targetConversationId: conversation.conversationId,
+          sentFingerprint: 'id:receipt-' + intent.intentId,
+          observedAt: Date.now()
+        };
+      }
+    }
+  });
+  await harness.register(['conv-1']);
+  await harness.enableGlobal();
+
+  await harness.engine.runCycle();
+  await harness.engine.runCycle();
+
+  const conversation = (await harness.store.getSnapshot()).managedConversations['conv-1'];
+  assert.equal(conversation.state, 'WAITING_HR');
+  assert.equal(conversation.enabled, true);
+  assert.equal(conversation.sendIntent.status, 'SENT');
+  assert.equal(harness.calls.send.length, 1);
+  assert.equal(harness.calls.verifySend.length, 1);
 });
 
 test('a proof rotation after AI work blocks auto and manual intent creation before send', async () => {
@@ -1543,7 +1622,11 @@ test('two engines and stores cannot exceed a limit-one AUTO reservation', async 
   const shared = {
     classifier: harness.deps.classifier,
     notifier: harness.deps.notifier,
-    policy: Policy,
+    policy: Object.assign({}, Policy, {
+      replyDelayMs() {
+        return 0;
+      }
+    }),
     clock: harness.deps.clock,
     getResumeFacts: harness.deps.getResumeFacts
   };
@@ -2208,7 +2291,7 @@ test('double terminal persistence failure recovers on the next read without rese
   assert.equal(harness.calls.send.length, 1);
 
   let snapshot = await harness.store.getSnapshot();
-  assert.equal(snapshot.managedConversations['conv-1'].state, 'PAUSED');
+  assert.equal(snapshot.managedConversations['conv-1'].state, 'VERIFYING_SEND');
   assert.equal(
     snapshot.managedConversations['conv-1'].sendIntent.status,
     'SEND_RESULT_UNKNOWN'

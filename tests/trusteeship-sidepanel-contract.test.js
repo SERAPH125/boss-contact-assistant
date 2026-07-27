@@ -7,6 +7,21 @@ const root = path.resolve(__dirname, '..');
 const html = fs.readFileSync(path.join(root, 'src/sidepanel.html'), 'utf8');
 const script = fs.readFileSync(path.join(root, 'src/sidepanel.js'), 'utf8');
 const css = fs.readFileSync(path.join(root, 'src/sidepanel.css'), 'utf8');
+const deliveryGuard = fs.readFileSync(path.join(root, 'src/delivery-guard.js'), 'utf8');
+
+test('uses 岗位筛选 consistently as the user-facing review-stage label', () => {
+  assert.match(html, /data-tab="review">岗位筛选<\/button>/);
+  assert.match(html, /完成后请到「岗位筛选」勾选/);
+  assert.match(html, /返回岗位筛选或配置/);
+  assert.match(html, /返回岗位筛选/);
+  assert.match(script, /完成后到「岗位筛选」勾选/);
+  assert.match(script, /review:\s*'待筛选'/);
+  assert.match(deliveryGuard, /返回岗位筛选并勾选岗位/);
+  assert.match(deliveryGuard, /返回岗位筛选或重新扫描/);
+  assert.doesNotMatch(html, /「审核」|返回审核|>审核<\/button>|审核勾选/);
+  assert.doesNotMatch(script, /「审核」|返回审核|待审核/);
+  assert.doesNotMatch(deliveryGuard, /返回审核/);
+});
 
 test('provides an accessible AI trusteeship settings pane', () => {
   for (const id of [
@@ -15,6 +30,8 @@ test('provides an accessible AI trusteeship settings pane', () => {
     'feishuWebhook', 'feishuSigningSecret', 'btnToggleFeishuWebhook',
     'btnToggleFeishuSecret', 'btnTestFeishu', 'btnSaveTrusteeship',
     'btnRunTrusteeshipNow', 'btnRegisterActiveConversation', 'registerActiveEnable',
+    'btnEnableAllManagedConversations', 'btnDisableAllManagedConversations',
+    'managedBulkStatus',
     'trusteeshipConfigMsg', 'trusteeshipStatus'
   ]) assert.match(html, new RegExp('id="' + id + '"'));
   assert.match(html, /data-setup="trusteeship"/);
@@ -46,7 +63,8 @@ test('uses trusteeship messages and DOM-safe approval rendering', () => {
     'TRUSTEESHIP_RUN_NOW', 'TRUSTEESHIP_LIST_APPROVALS',
     'TRUSTEESHIP_RESOLVE_APPROVAL', 'TRUSTEESHIP_OPEN_CONVERSATION',
     'TRUSTEESHIP_SET_CONVERSATION', 'TRUSTEESHIP_REMOVE_CONVERSATION',
-    'TRUSTEESHIP_ACK_UNKNOWN_SEND', 'TRUSTEESHIP_REGISTER_ACTIVE'
+    'TRUSTEESHIP_SET_ALL_CONVERSATIONS', 'TRUSTEESHIP_ACK_UNKNOWN_SEND',
+    'TRUSTEESHIP_REGISTER_ACTIVE'
   ]) assert.match(script, new RegExp(type));
   assert.match(script, /从当前 Boss 聊天页登记/);
   assert.match(html, /从当前 Boss 聊天页登记/);

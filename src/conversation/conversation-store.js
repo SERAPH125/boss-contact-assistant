@@ -19,7 +19,9 @@
     'DRAFTING_AUTO',
     'SENDING',
     'WAITING_CONFIRMATION',
+    'WAITING_REPLY_DUE',
     'WAITING_AUTO_CLOSE',
+    'VERIFYING_SEND',
     'ENDED_UNMATCHED',
     'PAUSED'
   ]);
@@ -287,6 +289,44 @@
     };
   }
 
+  function normalizePendingReply(input) {
+    if (!input || typeof input !== 'object') return undefined;
+    var fingerprint = safeString(input.fingerprint, 1000);
+    var draft = typeof input.draft === 'string' ? input.draft.trim() : '';
+    var createdAt = Number(input.createdAt);
+    var dueAt = Number(input.dueAt);
+    var sourceClassification = input.classification &&
+      typeof input.classification === 'object'
+      ? input.classification
+      : {};
+    var category = safeString(sourceClassification.category, 120);
+    var confidence = Number(sourceClassification.confidence);
+    if (!fingerprint ||
+      !draft ||
+      Array.from(draft).length > 45 ||
+      !Number.isSafeInteger(createdAt) ||
+      createdAt <= 0 ||
+      !Number.isSafeInteger(dueAt) ||
+      dueAt < createdAt ||
+      !category ||
+      !Number.isFinite(confidence) ||
+      confidence < 0 ||
+      confidence > 1) {
+      return undefined;
+    }
+    return {
+      fingerprint: fingerprint,
+      draft: draft,
+      evidenceIds: safeStringList(input.evidenceIds, RECENT_MESSAGE_LIMIT),
+      classification: {
+        category: category,
+        confidence: confidence
+      },
+      createdAt: createdAt,
+      dueAt: dueAt
+    };
+  }
+
   function normalizeConversation(id, input) {
     var source = input && typeof input === 'object' ? input : {};
     var state = STATES.has(source.state) ? source.state : 'DISABLED';
@@ -330,6 +370,9 @@
     var pendingAutoClose = state === 'WAITING_AUTO_CLOSE'
       ? normalizePendingAutoClose(source.pendingAutoClose)
       : undefined;
+    var pendingReply = state === 'WAITING_REPLY_DUE'
+      ? normalizePendingReply(source.pendingReply)
+      : undefined;
     if (pendingAutoClose &&
       (pendingAutoClose.fingerprint !== conversation.lastIncomingFingerprint ||
         conversation.processedFingerprints.indexOf(pendingAutoClose.fingerprint) === -1)) {
@@ -345,11 +388,29 @@
     }
     if (sendIntent) conversation.sendIntent = sendIntent;
     if (pendingAutoClose) conversation.pendingAutoClose = pendingAutoClose;
+    if (pendingReply &&
+      pendingReply.fingerprint === conversation.lastIncomingFingerprint &&
+      conversation.processedFingerprints.indexOf(pendingReply.fingerprint) !== -1) {
+      conversation.pendingReply = pendingReply;
+    }
+    if (conversation.state === 'WAITING_REPLY_DUE' && !conversation.pendingReply) {
+      conversation.state = conversation.enabled ? 'WAITING_HR' : 'DISABLED';
+    }
+    if (conversation.state === 'PAUSED' &&
+      conversation.enabled &&
+      conversation.pauseCode === 'SEND_RESULT_UNKNOWN' &&
+      conversation.sendIntent &&
+      conversation.sendIntent.status === 'SEND_RESULT_UNKNOWN') {
+      conversation.state = 'VERIFYING_SEND';
+      conversation.pauseCode = '';
+      conversation.pauseReason = '';
+    }
     if (conversation.state === 'ENDED_UNMATCHED') {
       conversation.enabled = false;
     } else if (!conversation.enabled && conversation.state !== 'DISABLED') {
       conversation.state = 'DISABLED';
       delete conversation.pendingAutoClose;
+      delete conversation.pendingReply;
     }
     return conversation;
   }
@@ -604,6 +665,10 @@
       delete conversation.pendingAutoClose;
     }
 
+    function clearPendingReply(conversation) {
+      delete conversation.pendingReply;
+    }
+
     function clearReadFailure(conversation) {
       conversation.readFailureCount = 0;
       conversation.lastReadErrorCode = '';
@@ -690,10 +755,11 @@
               approval.updatedAt = now;
             }
           }
-          conversation.state = 'PAUSED';
-          conversation.pauseCode = 'SEND_RESULT_UNKNOWN';
-          conversation.pauseReason = 'SEND_RESULT_UNKNOWN';
+          conversation.state = 'VERIFYING_SEND';
+          conversation.pauseCode = '';
+          conversation.pauseReason = '';
           clearPendingAutoClose(conversation);
+          clearPendingReply(conversation);
           clearClassificationRecovery(conversation);
           conversation.updatedAt = now;
           changed = true;
@@ -916,6 +982,7 @@
             conversation.enabled = true;
             conversation.state = 'WAITING_HR';
             clearPendingAutoClose(conversation);
+            clearPendingReply(conversation);
             clearClassificationRecovery(conversation);
             clearReadFailure(conversation);
             conversation.pauseCode = '';
@@ -927,6 +994,7 @@
           conversation.state = 'DISABLED';
           conversation.recentMessages = [];
           clearPendingAutoClose(conversation);
+          clearPendingReply(conversation);
           clearClassificationRecovery(conversation);
           clearReadFailure(conversation);
           conversation.pauseCode = '';
@@ -938,6 +1006,83 @@
       });
     }
 
+    function setAllManaged(enabled) {
+      return serialized(async function () {
+        var loaded = await load();
+        var snapshot = loaded.snapshot;
+        var result = { enabled: 0, unchanged: 0, skipped: 0, failed: 0 };
+        Object.keys(snapshot.managedConversations).forEach(function (conversationId) {
+          var conversation = snapshot.managedConversations[conversationId];
+          if (!conversation || conversation.conversationId !== conversationId) {
+            result.failed += 1;
+            return;
+          }
+          if (enabled === true) {
+            if (conversation.state === 'ENDED_UNMATCHED' ||
+              conversation.state === 'PAUSED' ||
+              conversation.state === 'WAITING_CONFIRMATION' ||
+              conversation.state === 'WAITING_REPLY_DUE' ||
+              conversation.state === 'WAITING_AUTO_CLOSE' ||
+              conversation.state === 'SENDING' ||
+              conversation.state === 'VERIFYING_SEND') {
+              result.skipped += 1;
+              return;
+            }
+            if (conversation.enabled) {
+              result.unchanged += 1;
+              return;
+            }
+            if (conversation.state !== 'DISABLED' ||
+              conversation.pendingApprovalId ||
+              conversation.pendingReply ||
+              conversation.pendingAutoClose ||
+              (conversation.sendIntent &&
+                (conversation.sendIntent.status === 'SENDING' ||
+                  conversation.sendIntent.status === 'SEND_RESULT_UNKNOWN'))) {
+              result.skipped += 1;
+              return;
+            }
+            conversation.enabled = true;
+            conversation.state = 'WAITING_HR';
+            conversation.pauseCode = '';
+            conversation.pauseReason = '';
+            clearReadFailure(conversation);
+            clearClassificationRecovery(conversation);
+            conversation.updatedAt = loaded.now;
+            result.enabled += 1;
+            return;
+          }
+          if (!conversation.enabled && conversation.state === 'DISABLED') {
+            result.unchanged += 1;
+            return;
+          }
+          if (conversation.state === 'ENDED_UNMATCHED') {
+            result.unchanged += 1;
+            return;
+          }
+          if (conversation.state === 'SENDING' ||
+            conversation.state === 'VERIFYING_SEND') {
+            result.skipped += 1;
+            return;
+          }
+          closeActiveApproval(snapshot, conversation, loaded.now);
+          conversation.enabled = false;
+          conversation.state = 'DISABLED';
+          conversation.recentMessages = [];
+          clearPendingAutoClose(conversation);
+          clearPendingReply(conversation);
+          clearClassificationRecovery(conversation);
+          clearReadFailure(conversation);
+          conversation.pauseCode = '';
+          conversation.pauseReason = '';
+          conversation.updatedAt = loaded.now;
+          result.enabled += 1;
+        });
+        await persist(snapshot);
+        return result;
+      });
+    }
+
     function beginMessage(conversationId, fingerprint) {
       return serialized(async function () {
         var loaded = await load();
@@ -945,7 +1090,9 @@
         var conversation = requireConversation(snapshot, conversationId);
         var normalizedFingerprint = safeString(fingerprint, 1000);
         if (!conversation.enabled ||
-          (conversation.state !== 'WAITING_HR' && conversation.state !== 'WAITING_CONFIRMATION')) {
+          (conversation.state !== 'WAITING_HR' &&
+            conversation.state !== 'WAITING_CONFIRMATION' &&
+            conversation.state !== 'WAITING_REPLY_DUE')) {
           throw storeError('INVALID_STATE_TRANSITION');
         }
         if (!normalizedFingerprint) throw storeError('INVALID_MESSAGE_FINGERPRINT');
@@ -961,6 +1108,7 @@
         conversation.activeFingerprint = normalizedFingerprint;
         conversation.state = 'CLASSIFYING';
         clearPendingAutoClose(conversation);
+        clearPendingReply(conversation);
         conversation.updatedAt = loaded.now;
         await persist(snapshot);
         return clone(conversation);
@@ -1149,6 +1297,70 @@
       });
     }
 
+    function deferAutoReply(
+      conversationId,
+      fingerprint,
+      draft,
+      evidenceIds,
+      classification,
+      dueAt
+    ) {
+      return serialized(async function () {
+        var loaded = await load();
+        var snapshot = loaded.snapshot;
+        var settings = snapshot.conversationTrusteeship;
+        var conversation = requireConversation(snapshot, conversationId);
+        var normalizedFingerprint = safeString(fingerprint, 1000);
+        var normalizedDraft = typeof draft === 'string' ? draft.trim() : '';
+        var sourceClassification = classification && typeof classification === 'object'
+          ? classification
+          : {};
+        var normalizedClassification = {
+          category: safeString(sourceClassification.category, 120),
+          confidence: Number(sourceClassification.confidence)
+        };
+        var normalizedDueAt = Number(dueAt);
+        if (!settings.enabled ||
+          settings.paused ||
+          !conversation.enabled ||
+          conversation.state !== 'CLASSIFYING' ||
+          conversation.activeFingerprint !== normalizedFingerprint ||
+          conversation.pendingApprovalId ||
+          hasActiveApprovalForConversation(snapshot, conversation.conversationId) ||
+          (conversation.sendIntent && conversation.sendIntent.status === 'SENDING')) {
+          throw storeError('INVALID_STATE_TRANSITION');
+        }
+        if (!normalizedDraft || Array.from(normalizedDraft).length > 45) {
+          throw storeError('INVALID_DRAFT');
+        }
+        if (!normalizedClassification.category ||
+          !Number.isFinite(normalizedClassification.confidence) ||
+          normalizedClassification.confidence < 0 ||
+          normalizedClassification.confidence > 1) {
+          throw storeError('INVALID_CLASSIFICATION');
+        }
+        if (!Number.isSafeInteger(normalizedDueAt) || normalizedDueAt < loaded.now) {
+          throw storeError('INVALID_DUE_AT');
+        }
+        conversation.pendingReply = {
+          fingerprint: normalizedFingerprint,
+          draft: normalizedDraft,
+          evidenceIds: safeStringList(evidenceIds, RECENT_MESSAGE_LIMIT),
+          classification: normalizedClassification,
+          createdAt: loaded.now,
+          dueAt: normalizedDueAt
+        };
+        conversation.state = 'WAITING_REPLY_DUE';
+        conversation.pauseCode = '';
+        conversation.pauseReason = '';
+        clearPendingAutoClose(conversation);
+        clearClassificationRecovery(conversation);
+        conversation.updatedAt = loaded.now;
+        await persist(snapshot);
+        return clone(conversation);
+      });
+    }
+
     function createAutoSendIntent(conversationId, fingerprint, draft) {
       return serialized(async function () {
         var loaded = await load();
@@ -1175,10 +1387,18 @@
         }
         var conversation = requireConversation(snapshot, conversationId);
         var normalizedFingerprint = safeString(fingerprint, 1000);
+        var immediate = conversation.state === 'CLASSIFYING' &&
+          conversation.activeFingerprint === normalizedFingerprint;
+        var delayed = conversation.state === 'WAITING_REPLY_DUE' &&
+          conversation.pendingReply &&
+          conversation.pendingReply.fingerprint === normalizedFingerprint &&
+          conversation.pendingReply.draft === (typeof draft === 'string' ? draft.trim() : '');
         if (!conversation.enabled ||
-          conversation.state !== 'CLASSIFYING' ||
-          conversation.activeFingerprint !== normalizedFingerprint) {
+          (!immediate && !delayed)) {
           throw storeError('INVALID_STATE_TRANSITION');
+        }
+        if (delayed && loaded.now < conversation.pendingReply.dueAt) {
+          throw storeError('AUTO_REPLY_NOT_DUE');
         }
         if (conversation.sendIntent && conversation.sendIntent.status === 'SENDING') {
           throw storeError('SEND_INTENT_ALREADY_EXISTS');
@@ -1200,6 +1420,7 @@
         conversation.sendIntent = intent;
         conversation.state = 'SENDING';
         clearPendingAutoClose(conversation);
+        clearPendingReply(conversation);
         clearClassificationRecovery(conversation);
         conversation.updatedAt = loaded.now;
         await persist(snapshot);
@@ -1389,10 +1610,11 @@
           approval.status = 'SEND_RESULT_UNKNOWN';
           approval.updatedAt = loaded.now;
         }
-        conversation.state = 'PAUSED';
-        conversation.pauseCode = 'SEND_RESULT_UNKNOWN';
-        conversation.pauseReason = 'SEND_RESULT_UNKNOWN';
+        conversation.state = 'VERIFYING_SEND';
+        conversation.pauseCode = '';
+        conversation.pauseReason = '';
         clearPendingAutoClose(conversation);
+        clearPendingReply(conversation);
         clearClassificationRecovery(conversation);
         conversation.updatedAt = loaded.now;
         try {
@@ -1401,6 +1623,51 @@
           storageState.recoveryInitialized = false;
           throw error;
         }
+        return clone(intent);
+      });
+    }
+
+    function reconcileUnknownSend(intentId, evidence) {
+      return serialized(async function () {
+        var loaded = await load();
+        var snapshot = loaded.snapshot;
+        var conversation = findConversationByIntent(snapshot, intentId);
+        if (!conversation) throw storeError('SEND_INTENT_NOT_FOUND');
+        var intent = conversation.sendIntent;
+        if (intent.status !== 'SEND_RESULT_UNKNOWN') {
+          throw storeError('SEND_INTENT_ALREADY_TERMINAL');
+        }
+        if (conversation.state !== 'VERIFYING_SEND') {
+          throw storeError('INVALID_STATE_TRANSITION');
+        }
+        var safeEvidence = normalizeEvidence(evidence, conversation.conversationId);
+        if (!safeEvidence) throw storeError('INVALID_SEND_EVIDENCE');
+        intent.status = 'SENT';
+        intent.evidence = safeEvidence;
+        intent.completedAt = loaded.now;
+        intent.updatedAt = loaded.now;
+        var approval = intent.approvalId && snapshot.pendingApprovals[intent.approvalId];
+        if (approval) {
+          approval.status = 'RESOLVED';
+          approval.updatedAt = loaded.now;
+        }
+        if (conversation.pendingApprovalId === intent.approvalId) {
+          delete conversation.pendingApprovalId;
+        }
+        if (intent.mode === 'AUTO_CLOSE') {
+          conversation.enabled = false;
+          conversation.state = 'ENDED_UNMATCHED';
+        } else {
+          conversation.state = conversation.enabled ? 'WAITING_HR' : 'DISABLED';
+        }
+        conversation.pauseCode = '';
+        conversation.pauseReason = '';
+        clearPendingAutoClose(conversation);
+        clearPendingReply(conversation);
+        clearClassificationRecovery(conversation);
+        clearReadFailure(conversation);
+        conversation.updatedAt = loaded.now;
+        await persist(snapshot);
         return clone(intent);
       });
     }
@@ -1414,16 +1681,21 @@
         var deferredCheckpoint = conversation.state === 'WAITING_AUTO_CLOSE' &&
           conversation.pendingAutoClose &&
           conversation.pendingAutoClose.fingerprint === source.baseline;
+        var replyCheckpoint = conversation.state === 'WAITING_REPLY_DUE' &&
+          conversation.pendingReply &&
+          conversation.pendingReply.fingerprint === source.baseline;
         if (typeof source.baseline !== 'string' ||
           source.baseline.length > 1000 ||
           !conversation.enabled ||
           (conversation.state !== 'WAITING_HR' &&
             conversation.state !== 'WAITING_CONFIRMATION' &&
-            !deferredCheckpoint)) {
+            !deferredCheckpoint &&
+            !replyCheckpoint)) {
           throw storeError('INVALID_CHECKPOINT');
         }
         conversation.lastIncomingFingerprint = source.baseline;
         if (!deferredCheckpoint) clearPendingAutoClose(conversation);
+        if (!replyCheckpoint) clearPendingReply(conversation);
         clearClassificationRecovery(conversation);
         clearReadFailure(conversation);
         conversation.lastCheckedAt = loaded.now;
@@ -1524,8 +1796,7 @@
         var intent = conversation.sendIntent;
         if (approval.status !== 'SEND_RESULT_UNKNOWN' ||
           conversation.pendingApprovalId !== approval.approvalId ||
-          conversation.state !== 'PAUSED' ||
-          conversation.pauseCode !== 'SEND_RESULT_UNKNOWN' ||
+          conversation.state !== 'VERIFYING_SEND' ||
           !intent ||
           intent.status !== 'SEND_RESULT_UNKNOWN' ||
           intent.approvalId !== approval.approvalId) {
@@ -1537,6 +1808,7 @@
         conversation.pauseCode = '';
         conversation.pauseReason = '';
         clearPendingAutoClose(conversation);
+        clearPendingReply(conversation);
         clearClassificationRecovery(conversation);
         clearReadFailure(conversation);
         conversation.updatedAt = loaded.now;
@@ -1670,16 +1942,19 @@
       saveSettings: saveSettings,
       registerConversation: registerConversation,
       setManaged: setManaged,
+      setAllManaged: setAllManaged,
       beginMessage: beginMessage,
       createOrMergeApproval: createOrMergeApproval,
       createLiveDrillApproval: createLiveDrillApproval,
       createSendIntent: createSendIntent,
+      deferAutoReply: deferAutoReply,
       createAutoSendIntent: createAutoSendIntent,
       deferAutoClose: deferAutoClose,
       cancelDeferredAutoClose: cancelDeferredAutoClose,
       createAutoCloseIntent: createAutoCloseIntent,
       completeSend: completeSend,
       markSendUnknown: markSendUnknown,
+      reconcileUnknownSend: reconcileUnknownSend,
       markConversationChecked: markConversationChecked,
       pauseConversation: pauseConversation,
       recordReadFailure: recordReadFailure,

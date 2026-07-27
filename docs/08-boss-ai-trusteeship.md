@@ -452,7 +452,7 @@ Task 10 必须分阶段且每阶段单独获授权：先做一个完整工作日
 | `不合适` | 演练报告 `AUTO_CLOSE / EXPLICIT_REJECTION_AUTO_CLOSE` 和拟结束语，但仍只创建人工待确认；真实监控非静默时才会单次自动结束 |
 | `经验可能不太匹配` | 含糊拒绝，只生成草稿并等待人工确认 |
 
-`src/conversation/trusteeship-live-drill.js` 先把目标会话、设置与当天计数复制到一次性内存 store，用合成 reader 运行真实 `MonitorEngine`、受保护 AI、简历事实和策略；隔离 sender 只捕获建议草稿和 intent 模式，不访问 Boss。若真实 engine 在隔离环境中产生 `AUTO_CLOSE` intent，演练结果会投影为 `AUTO_CLOSE / EXPLICIT_REJECTION_AUTO_CLOSE / wouldSend=true`；这只是“真实监控将如何决策”的报告。评估成功后，它仍只调用生产 store 的专用 `createLiveDrillApproval`：创建 `origin=LIVE_DRILL` 的本地 `PENDING`，并复用生产通知 reservation/租约发送飞书，绝不把隔离 intent 写入生产 store。该专用写入不得修改真实 `lastIncomingFingerprint`、`processedFingerprints`、`recentMessages`、monitor cursor、自动回复额度或真实读取时间。
+`src/conversation/trusteeship-live-drill.js` 先把目标会话、设置与当天计数复制到一次性内存 store，用合成 reader 运行真实 `MonitorEngine`、受保护 AI、简历事实和策略；隔离 sender 只捕获建议草稿和 intent 模式，不访问 Boss。若真实 engine 在隔离环境中产生 `AUTO_CLOSE` intent，演练结果会投影为 `AUTO_CLOSE / EXPLICIT_REJECTION_AUTO_CLOSE / wouldSend=true`；普通安全回复进入 `WAITING_REPLY_DUE` 时，演练也会读取已持久化的冻结草稿并投影为 `AUTO_REPLY / wouldSend=true`，无需真实等待 30–300 秒。这只是“真实监控将如何决策”的报告。评估成功后，它仍只调用生产 store 的专用 `createLiveDrillApproval`：创建 `origin=LIVE_DRILL` 的本地 `PENDING`，并复用生产通知 reservation/租约发送飞书，绝不把隔离 intent 写入生产 store。该专用写入不得修改真实 `lastIncomingFingerprint`、`processedFingerprints`、`recentMessages`、monitor cursor、自动回复额度或真实读取时间。
 
 演练待办和真实监控待办使用同一个插件确认发送入口。用户执行 `SEND_EDITED` 时，生产 engine 仍会冻结一次性意图、重新打开并读取目标会话、核对 canonical peer/alias、scoped identity 和发送后 outgoing 证据；演练入口本身绝不直接发送 Boss。已有活动待办、会话暂停/禁用、全局托管未运行、API 证明过期或目标不再处于 `WAITING_HR` 时均失败关闭，不允许演练覆盖真实待办或真实游标。
 
@@ -483,12 +483,41 @@ Task 10 必须分阶段且每阶段单独获授权：先做一个完整工作日
 
 历史记录（真实只读周期已于 2026-07-26 验收）：2026-07-25 反复暂停修复把只读路径与写路径彻底分级：只读复用用户已打开的 Boss 聊天标签并放宽可见性否决、`historyMsg` 解析不再以顶层 `type` 为判据且补 `time` 游标回退、可重试只读失败改为 3 次有界退避、侧栏投影 `readFailureCount / readRetryLimit / lastReadErrorCode` 并显示重试进度。新增回归覆盖复用标签只读、临时标签回退、发送仍只用临时标签、未知 body 类型、缺方向条目、空文本正文、无 `mid` 时的 `time` 回退、退避计数与清零、旧版遗留暂停自动恢复以及 DTO 投影；当时全量 `npm test` 为 376/376。
 
-## v0.3.7 审核页自动登记身份与会话打开修复
+## Task 11 持续多轮托管、延迟回复与批量管理
 
-审核页岗位卡是易失的展示层数据，不能成为 AI 托管的最终身份源。现网变更后，卡片公司选择器可能为空，联系人选择器还可能读到公司名；旧流程在一键联系成功后直接保存这些字段，同时丢弃聊天页好友列表已经解析出的 `name / brandName / jobName / peerUid`，因此出现“未知公司”、HR/公司错位。卡片显示 `WAITING_HR` 只证明本地开关已启用，不证明该引用能重新打开或读取。
+本阶段参考 [AWS Transactional Outbox Pattern](https://github.com/aws-samples/transactional-outbox-pattern) 的“先持久化意图、再执行副作用”、[Temporal](https://github.com/temporalio/temporal) 与 [LangGraph](https://github.com/langchain-ai/langgraph) 的可恢复等待状态，以及 [Plasmo](https://github.com/PlasmoHQ/plasmo) / [WXT](https://github.com/wxt-dev/wxt) 的扩展状态同步边界。只借鉴公开架构，不复制平台自动化代码，也没有新增运行时依赖。
 
-修复后的自动登记使用独立 `ConversationRegistration` 边界：聊天页返回的结构化公司、岗位、联系人和 canonical 会话引用优先，审核卡片只补齐空字段；`peerUid` 与 aliases 一并持久化，重复登记的空字符串不得擦除已有身份。用户点击“打开会话”时，content handler 先用 canonical peerId 从好友列表唯一恢复结构化身份，再以该身份定位唯一列表候选并完成 canonical/alias 与 scoped identity 双重确认；成功响应会由 runtime 原地重登记，以修复旧版错误卡片。好友列表不能唯一解析、候选不唯一或动作后身份不一致仍失败关闭，且整个打开/修复过程不发送消息。
+普通低风险回复不再在分类完成后立即发送。策略生成 30–300 秒随机延迟，store 持久化 `WAITING_REPLY_DUE + pendingReply`，runtime 为最早到期任务建立一次性 `boss-ai-chat-due` alarm；到期后 engine 必须重新读取同一会话。若 HR 已有新消息，旧草稿被取消，最新消息重新进入分类；若仍是同一消息，才创建唯一 AUTO intent 并发送。静默时段内的安全回复排到静默结束后再加随机延迟。发送成功进入 `WAITING_HR`，后续 HR 新消息继续走同一多轮流程，直到 AI 严格判断明确拒绝并成功发送一次结束语，或用户手动关闭。
+
+发送动作后的正证据分两层取得：
+
+1. content sender 在输入框清空或新气泡出现后，继续最多约 2 秒轮询同源历史接口；目标 scope 每轮都重新验证，找到且仅找到一个新 outgoing 才返回成功。
+2. 若动作已发生但仍无可靠回执，store 进入 `VERIFYING_SEND`，会话保持 enabled。后续周期先正常只读新来信，再通过 `VERIFY_MANAGED_SEND` 按 canonical peer、冻结草稿和意图创建时间查找唯一 outgoing；命中后以 `reconcileUnknownSend` 原子恢复 `WAITING_HR`，并在同一周期继续处理已经到达的 HR 新消息。核验期间永远不重放原 intent。
+
+批量管理使用单条严格消息 `TRUSTEESHIP_SET_ALL_CONVERSATIONS` 和一次 store 序列化写入。启用时只把安全的 `DISABLED` 会话改为 `WAITING_HR`；`ENDED_UNMATCHED`、`PAUSED`、待确认、延迟、发送中和核验中的会话全部跳过，因此一键托管不会重新联系已经明确拒绝的 HR。侧栏显示启用、保持、跳过和失败计数。单会话和批量变更都会重算周期 alarm 与最早 due alarm。
+
+岗位筛选页联系成功后的登记刷新以 `chrome.storage.onChanged` 为失效信号，而不是直接信任 change payload。侧栏对 `managedConversations / pendingApprovals / conversationTrusteeship / feishuNotification` 做 150ms 合并，然后重新调用 `TRUSTEESHIP_GET_STATE` 获取固定公共 DTO。自动刷新只更新岗位卡片、计数和待确认徽标；托管间隔、额度、静默时段、飞书配置和 HR 问答等用户正在编辑的表单保持不变。
+
+本地知识库引用：`技术复用/浏览器扩展-AI会话托管可靠性复盘.md` 的既有结论是“稳定会话身份、持久游标、外部副作用未知时不可盲目重放”。本阶段新增的项目结论是：未知发送不等于必须永久退出整个会话；可以把原 intent 保持不可重放，同时用独立只读核验状态继续观察并在取得正证据后恢复多轮托管。该结论已经由 store、engine、runtime、production content handler 和完整 sidepanel VM 的组合测试覆盖，真实站点仍需扩展重载后的新来信验收。
+
+## v0.3.7 岗位筛选页自动登记身份与会话打开修复
+
+岗位筛选页岗位卡是易失的展示层数据，不能成为 AI 托管的最终身份源。现网变更后，卡片公司选择器可能为空，联系人选择器还可能读到公司名；旧流程在一键联系成功后直接保存这些字段，同时丢弃聊天页好友列表已经解析出的 `name / brandName / jobName / peerUid`，因此出现“未知公司”、HR/公司错位。卡片显示 `WAITING_HR` 只证明本地开关已启用，不证明该引用能重新打开或读取。
+
+修复后的自动登记使用独立 `ConversationRegistration` 边界：聊天页返回的结构化公司、岗位、联系人和 canonical 会话引用优先，岗位筛选卡片只补齐空字段；`peerUid` 与 aliases 一并持久化，重复登记的空字符串不得擦除已有身份。用户点击“打开会话”时，content handler 先用 canonical peerId 从好友列表唯一恢复结构化身份，再以该身份定位唯一列表候选并完成 canonical/alias 与 scoped identity 双重确认；成功响应会由 runtime 原地重登记，以修复旧版错误卡片。好友列表不能唯一解析、候选不唯一或动作后身份不一致仍失败关闭，且整个打开/修复过程不发送消息。
+
+## 岗位筛选 UI 命名
+
+用户可见的 `review` 流程阶段统一显示为“岗位筛选”，包括底部导航、扫描完成提示、确认单返回按钮、停机恢复建议和“待筛选”阶段状态。内部 `review` 页面 ID、状态键和消息协议保持不变，避免纯文案调整影响既有流程。
 
 回归采用四个独立断点：`SEND_ACTIVE` 必须返回规范身份，自动登记必须优先使用它，`OPEN_MANAGED_CONVERSATION` 必须携带 `peerUid` 并能用规范身份修复错误期望，store 不得被空回退字段降级。聚焦组合测试为 205/205。此自动化证据覆盖绑定、打开和惰性修复，不替代扩展重载后的真实页面验收；旧记录只有在规范 ID 仍可唯一映射时才可修复，否则应移除后从正确会话重新登记。
 
 2026-07-27 ego-browser 无外发实号验收：先在隔离任务空间选择“刘梦瑶 / 江西琵琶网络科技”，再以旧版错误形态调用“打开会话”——canonical peerId 正确，但公司为空、联系人错写为“杭州双一”、`peerUid` 为空。精确重载该任务空间内的未打包扩展后，新 handler 成功切换到“罗榜伟 / 杭州双一 / 跨境电商运营”，返回同一 canonical peerId、数字 `peerUid=763614226`、`company=杭州双一`、`hrName=罗榜伟`，最新 `historyMsg` 的 `bossId` 也与 canonical peerId 一致。整个验收只切换会话并读取身份，没有填写编辑器、创建待确认、发送飞书或发送 Boss 消息。该证据证明旧错误登记的“打开 + 身份返回”链路可用；runtime 对旧卡片的原地回写由自动化测试覆盖，用户窗口仍需在重载扩展后点击一次“打开会话”才能触发惰性修复。
+
+## v0.3.7 Boss 历史消息顺序归一化
+
+2026-07-27 实号只读排查确认，`/wapi/zpchat/geek/historyMsg` 在当前账号返回的 7 条消息是旧到新排列。旧实现无条件 `reverse()`，把 16:00 的新 HR 消息排到 11:54 持久 baseline 之前；增量选择器只扫描 baseline 之后的元素，因此周期虽然在 16:07 成功执行并更新 `lastCheckedAt`，仍报告 `newMessages=0`，AI、策略和 sender 都没有收到该消息。存储证据中 baseline `id:368579649049092` 对应 11:54，漏读消息 `id:368640000692739` 对应 16:00。
+
+修复后不再信任接口的数组方向：当所有消息有可靠 `time` 时按时间升序，时间相同再按数字 `mid` 升序；时间不完整但全部 `mid` 为数字时按数字 ID 升序。这样接口无论返回旧到新还是新到旧，进入 `selectNewIncoming` 前都保持稳定的旧到新顺序。缺少可比较 int64 游标的兼容数据仍交给既有归一化与失败关闭规则，不能凭不可靠正文推进生产游标。
+
+回归测试使用本次实号消息 ID、方向与时间复现“旧来信 baseline → 我方回复 → 新 HR 来信”，并要求只返回最后一条新 incoming、把 baseline 推进到该消息。原测试夹具总是把历史数组预先倒序，恰好迎合旧实现的错误假设；新用例显式提供 `oldest-first` 响应，确保以后不能再靠测试夹具掩盖真实接口顺序变化。

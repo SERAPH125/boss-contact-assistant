@@ -10,7 +10,7 @@
   var GUIDANCE = {
     NO_SELECTION: {
       message: '尚未选择岗位',
-      nextAction: '返回审核并勾选岗位'
+      nextAction: '返回岗位筛选并勾选岗位'
     },
     STALE_REVIEW: {
       message: '岗位列表已变化，无法确认当前批次',
@@ -22,7 +22,7 @@
     },
     NO_AVAILABLE_JOBS: {
       message: '所选岗位都已联系过',
-      nextAction: '返回审核或重新扫描'
+      nextAction: '返回岗位筛选或重新扫描'
     },
     DAILY_LIMIT_REACHED: {
       message: '今日联系额度已用完',

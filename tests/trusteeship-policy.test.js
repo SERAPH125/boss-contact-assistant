@@ -294,9 +294,19 @@ test('fails closed when settings or conversation enablement is omitted', () => {
   });
 });
 
-test('requires confirmation for quiet hours, pending approval, AI failure, category misses, and daily limit', () => {
+test('defers safe replies during quiet hours and samples a bounded persistent delay', () => {
+  assert.deepEqual(Policy.decide(safeDecision({ quiet: true })), {
+    action: 'DEFER_AUTO_REPLY',
+    reasonCode: 'QUIET_HOURS_AUTO_REPLY'
+  });
+  assert.equal(Policy.replyDelayMs(() => 0), 30_000);
+  assert.equal(Policy.replyDelayMs(() => 0.5), 165_000);
+  assert.equal(Policy.replyDelayMs(() => 1), 300_000);
+  assert.equal(Policy.replyDelayMs(() => Number.NaN), 30_000);
+});
+
+test('requires confirmation for pending approval, AI failure, category misses, and daily limit', () => {
   const cases = [
-    [{ quiet: true }, 'QUIET_HOURS'],
     [{ hasPendingApproval: true }, 'PENDING_APPROVAL_EXISTS'],
     [{ ai: null }, 'AI_UNAVAILABLE'],
     [{ ai: { category: 'work_history', confidence: 1, evidenceIds: ['r1'] } }, 'CATEGORY_REQUIRES_CONFIRMATION'],

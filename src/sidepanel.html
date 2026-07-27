@@ -30,7 +30,7 @@
         </div>
 
         <div class="setup-pane" id="setup-platform">
-          <p class="hint" style="margin-top:0">同一时间只跑一个平台。切换会清空审核勾选。</p>
+          <p class="hint" style="margin-top:0">同一时间只跑一个平台。切换会清空岗位筛选勾选。</p>
           <div class="plat-cards" id="platCards">
             <button type="button" class="plat-card active" data-platform="boss">
               <strong>Boss</strong>
@@ -132,6 +132,11 @@
           <p class="hint" id="trusteeshipConfigMsg" aria-live="polite"></p>
           <h3 id="managedConversationsHeading">已登记岗位（0）</h3>
           <p class="hint">联系成功会自动登记；也可打开 Boss 聊天页中的目标会话后，从当前页登记并托管。</p>
+          <div class="managed-bulk-actions">
+            <button type="button" class="btn-ghost" id="btnEnableAllManagedConversations">一键托管全部可用岗位</button>
+            <button type="button" class="btn-ghost managed-stop-all" id="btnDisableAllManagedConversations">一键结束全部托管</button>
+          </div>
+          <p class="hint" id="managedBulkStatus" aria-live="polite"></p>
           <label class="check-row" for="registerActiveEnable"><input type="checkbox" id="registerActiveEnable" checked> 登记后立即托管此岗位</label>
           <button type="button" class="btn-ghost" id="btnRegisterActiveConversation">从当前 Boss 聊天页登记</button>
           <div id="managedConversations" class="managed-conversations"><p class="empty">暂无具有可靠会话标识的已登记岗位。</p></div>
@@ -245,7 +250,7 @@
           </section>
 
           <button type="button" class="btn-go" id="btnScan">保存并扫描</button>
-          <p class="hint" id="scanHint">将保存本页设置后开始扫描；扫描不会自动联系，完成后请到「审核」勾选。</p>
+          <p class="hint" id="scanHint">将保存本页设置后开始扫描；扫描不会自动联系，完成后请到「岗位筛选」勾选。</p>
         </div>
       </section>
 
@@ -282,7 +287,7 @@
           </div>
           <p id="recoveryReason">自动操作已停止。</p>
           <p><strong>下一步：</strong><span id="recoveryNextAction">核对招聘平台状态后重新扫描</span></p>
-          <button type="button" class="btn-ghost" id="btnRecovery">返回审核或配置</button>
+          <button type="button" class="btn-ghost" id="btnRecovery">返回岗位筛选或配置</button>
         </div>
         <div class="ctrl">
           <button type="button" id="btnPause" disabled>暂停</button>
@@ -299,7 +304,7 @@
 
     <nav class="tabs" role="tablist" aria-label="主导航">
       <button type="button" class="tab active" role="tab" aria-selected="true" data-tab="setup">配置</button>
-      <button type="button" class="tab" role="tab" aria-selected="false" data-tab="review">审核</button>
+      <button type="button" class="tab" role="tab" aria-selected="false" data-tab="review">岗位筛选</button>
       <button type="button" class="tab" role="tab" aria-selected="false" data-tab="run">执行</button>
       <button type="button" class="tab" role="tab" aria-selected="false" data-tab="approvals">待确认 <span class="approval-badge-inline" id="approvalTabBadge" aria-label="待确认 0 条">0</span></button>
     </nav>
@@ -328,7 +333,7 @@
       <ul class="delivery-jobs" id="deliveryJobs" aria-label="将联系的岗位"></ul>
       <p class="delivery-note">时间估算仅含联系间隔和批次休息，页面加载可能增加总时长。</p>
       <div class="modal-actions">
-        <button type="button" class="btn-ghost" id="btnCancelDelivery">返回审核</button>
+        <button type="button" class="btn-ghost" id="btnCancelDelivery">返回岗位筛选</button>
         <button type="button" class="btn-go" id="btnConfirmDelivery">确认联系</button>
       </div>
     </div>

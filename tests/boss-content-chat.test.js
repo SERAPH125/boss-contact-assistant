@@ -398,6 +398,7 @@ function createHarness(options = {}) {
       return { position: element.offsetParent === null ? 'static' : 'relative' };
     },
     setTimeout(callback) {
+      if (typeof options.onSleep === 'function') options.onSleep(state);
       if (state.pendingConversationSwitch) {
         state.pendingConversationSwitch.sleepsRemaining -= 1;
         if (state.pendingConversationSwitch.sleepsRemaining <= 0) {
@@ -455,7 +456,9 @@ function createHarness(options = {}) {
               code: 0,
               zpData: {
                 hasMore: false,
-                messages: state.historyMessages.slice().reverse()
+                messages: options.historyResponseOrder === 'oldest-first'
+                  ? state.historyMessages.slice()
+                  : state.historyMessages.slice().reverse()
               }
             };
           }
@@ -552,6 +555,46 @@ test('history direction follows peer from/to uid when received is true for both 
     [['HR 回复', 'incoming']]
   );
   assert.equal(read.baselineIncomingFingerprint, 'id:incoming-same-received');
+});
+
+test('READ detects a newer incoming message when Boss history is oldest-first', async () => {
+  const h = createHarness({
+    historyResponseOrder: 'oldest-first',
+    messages: [
+      {
+        id: '368579649049092',
+        direction: 'incoming',
+        text: '你好，之前有做过跨境电商平台的运营嘛',
+        historyTime: 1785124465881
+      },
+      {
+        id: '368613830124039',
+        direction: 'outgoing',
+        text: '之前有接触过亚马逊',
+        historyTime: 1785132810870
+      },
+      {
+        id: '368640000692739',
+        direction: 'incoming',
+        text: '好的，不好意思哈，我们目前需要有做过Tik Tok平台的',
+        historyTime: 1785139200170
+      }
+    ]
+  });
+
+  const read = await h.dispatch({
+    type: 'READ_ACTIVE_CONVERSATION',
+    expected: h.expected,
+    conversationRef: h.ref,
+    lastFingerprint: 'id:368579649049092'
+  });
+
+  assert.equal(read.success, true);
+  assert.deepEqual(
+    Array.from(read.messages, (message) => message.id),
+    ['368640000692739']
+  );
+  assert.equal(read.baselineIncomingFingerprint, 'id:368640000692739');
 });
 
 test('GET owns the only visible message container and ignores a hidden decoy', async () => {
@@ -1790,6 +1833,82 @@ test('SEND requires a new scoped outgoing bubble matching the draft', async () =
   assert.equal(result.targetConversationId, 'conv1');
   assert.equal(Number.isFinite(result.observedAt) && result.observedAt > 0, true);
   assert.equal(h.externalActions, 1);
+});
+
+test('SEND waits briefly for delayed history evidence after the input clears', async () => {
+  let actionStarted = false;
+  let sleepsAfterAction = 0;
+  let receiptAdded = false;
+  const h = createHarness({
+    messages: [{ id: 'old-outgoing', direction: 'outgoing', text: '旧消息' }],
+    onSleep(state) {
+      if (!actionStarted || receiptAdded) return;
+      sleepsAfterAction += 1;
+      if (sleepsAfterAction < 2) return;
+      receiptAdded = true;
+      state.historyMessages.push({
+        mid: 'history-arrived-later',
+        type: 3,
+        received: true,
+        body: { type: 1, text: '确认收到' },
+        from: { uid: 200, name: '我' },
+        to: { uid: 100, name: '示例HR' },
+        time: Date.now()
+      });
+    }
+  });
+  h.input._onDispatch = (event) => {
+    if (event.type !== 'keydown' || event.key !== 'Enter') return;
+    h.externalActions++;
+    actionStarted = true;
+    h.input.textContent = '';
+  };
+
+  const result = await h.dispatch({
+    type: 'SEND_MANAGED_REPLY',
+    expected: h.expected,
+    conversationRef: h.ref,
+    draft: '确认收到'
+  });
+
+  assert.equal(result.success, true, JSON.stringify(result));
+  assert.equal(result.sentFingerprint, 'id:history-arrived-later');
+  assert.equal(h.externalActions, 1);
+});
+
+test('VERIFY_MANAGED_SEND finds one later outgoing receipt without sending again', async () => {
+  const createdAt = Date.now() - 2000;
+  const h = createHarness({
+    messages: [
+      {
+        id: 'old-same-draft',
+        direction: 'outgoing',
+        text: '确认收到',
+        at: createdAt - 60_000,
+        historyTime: createdAt - 60_000
+      },
+      {
+        id: 'verified-later',
+        direction: 'outgoing',
+        text: '确认收到',
+        at: createdAt + 1000,
+        historyTime: createdAt + 1000
+      }
+    ]
+  });
+
+  const result = await h.dispatch({
+    type: 'VERIFY_MANAGED_SEND',
+    expected: h.expected,
+    conversationRef: h.ref,
+    draft: '确认收到',
+    createdAt
+  });
+
+  assert.equal(result.success, true);
+  assert.equal(result.sentFingerprint, 'id:verified-later');
+  assert.equal(result.targetConversationId, 'conv1');
+  assert.equal(h.externalActions, 0);
 });
 
 test('SEND finds controls in the nearest shared conversation ancestor', async () => {

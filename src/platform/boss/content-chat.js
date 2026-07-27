@@ -738,6 +738,38 @@
     return null;
   }
 
+  function compareDecimalStrings(left, right) {
+    const a = String(left || '').replace(/^0+(?=\d)/, '');
+    const b = String(right || '').replace(/^0+(?=\d)/, '');
+    if (a.length !== b.length) return a.length - b.length;
+    if (a === b) return 0;
+    return a < b ? -1 : 1;
+  }
+
+  function orderHistoryMessages(messages) {
+    const items = messages.slice(0, 200).map((message, index) => ({
+      message: message,
+      index: index,
+      at: safeHistoryTime(message && message.time),
+      id: safeHistoryMessageId(message && message.mid)
+    }));
+    const allHaveTime = items.every((item) => item.at !== null);
+    const allHaveNumericId = items.every((item) => /^[0-9]+$/.test(item.id));
+    if (!allHaveTime && !allHaveNumericId) {
+      // 兼容没有可靠 int64 游标的旧响应；后续归一化仍会对无法跟踪的消息失败关闭。
+      return items.reverse().map((item) => item.message);
+    }
+    items.sort((left, right) => {
+      if (allHaveTime && left.at !== right.at) return left.at - right.at;
+      if (allHaveNumericId) {
+        const byId = compareDecimalStrings(left.id, right.id);
+        if (byId !== 0) return byId;
+      }
+      return left.index - right.index;
+    });
+    return items.map((item) => item.message);
+  }
+
   function safeHistoryDiagnosticValue(value) {
     if (typeof value === 'number' && Number.isSafeInteger(value)) return String(value);
     if (typeof value === 'boolean') return String(value);
@@ -841,7 +873,7 @@
     // 由上层策略强制人工确认，而不是让整批读取失败关闭。
     let hasUntrackableMessage = false;
     let untrackableShape = '';
-    const rawItems = data.zpData.messages.slice(0, 200).reverse().map((message) => {
+    const rawItems = orderHistoryMessages(data.zpData.messages).map((message) => {
       if (!message || typeof message !== 'object') return null;
       if (message.type === 4) return null;
       const body = message.body && typeof message.body === 'object'
@@ -1602,21 +1634,29 @@
       return actionStarted ? unknownSendFailure() : (preActionFailure || unknownSendFailure());
     }
 
-    const postTarget = validateManagedTarget(msg.expected, peer.conversationRef);
-    if (!postTarget.success || !sameOwnedScope(active.scope, postTarget.scope)) {
-      return unknownSendFailure();
+    let postTarget = null;
+    let read = null;
+    let evidence = [];
+    for (let attempt = 0; attempt < 6; attempt += 1) {
+      postTarget = validateManagedTarget(msg.expected, peer.conversationRef);
+      if (!postTarget.success || !sameOwnedScope(active.scope, postTarget.scope)) {
+        return unknownSendFailure();
+      }
+      read = await readHistoryMessages(
+        postTarget.conversationRef.conversationId,
+        postTarget.conversationRef.peerUid
+      );
+      if (!read.success) return unknownSendFailure();
+      evidence = read.messages.filter((message) =>
+        message.direction === 'outgoing' &&
+        message.kind === 'text' &&
+        message.text === draft &&
+        !beforeOutgoing.has(message.fingerprint)
+      );
+      if (evidence.length === 1 && evidence[0].fingerprint) break;
+      if (evidence.length > 1) return unknownSendFailure();
+      if (attempt < 5) await sleep(400);
     }
-    const read = await readHistoryMessages(
-      postTarget.conversationRef.conversationId,
-      postTarget.conversationRef.peerUid
-    );
-    if (!read.success) return unknownSendFailure();
-    const evidence = read.messages.filter((message) =>
-      message.direction === 'outgoing' &&
-      message.kind === 'text' &&
-      message.text === draft &&
-      !beforeOutgoing.has(message.fingerprint)
-    );
     if (evidence.length !== 1 || !evidence[0].fingerprint) return unknownSendFailure();
     const finalTarget = validateManagedTarget(msg.expected, peer.conversationRef);
     if (!finalTarget.success || !sameOwnedScope(active.scope, finalTarget.scope)) {
@@ -1631,6 +1671,50 @@
       targetConversationId: finalTarget.conversationRef.conversationId,
       sentFingerprint: evidence[0].fingerprint,
       baselineIncomingFingerprint: lastIncomingFingerprint(read.messages),
+      observedAt: observedAt
+    };
+  }
+
+  async function verifyManagedSend(msg) {
+    const preflight = managedPreflight();
+    if (preflight) return preflight;
+    const draft = typeof msg.draft === 'string' ? msg.draft.trim() : '';
+    const createdAt = Number(msg.createdAt);
+    if (!draft ||
+      Array.from(draft).length > 300 ||
+      !Number.isSafeInteger(createdAt) ||
+      createdAt <= 0) {
+      return unknownSendFailure();
+    }
+    const metadata = await resolveStoredConversationMetadata(msg.conversationRef);
+    const peer = metadata.success
+      ? metadata
+      : await ensureStoredPeerUid(msg.conversationRef);
+    if (!peer.success) return peer;
+    const conversationRef = metadata.success
+      ? metadata.conversationRef
+      : peer.conversationRef;
+    const read = await readHistoryMessages(
+      conversationRef.conversationId,
+      conversationRef.peerUid
+    );
+    if (!read.success) return unknownSendFailure();
+    const candidates = read.messages.filter((message) =>
+      message.direction === 'outgoing' &&
+      message.kind === 'text' &&
+      message.text === draft &&
+      Number.isSafeInteger(message.at) &&
+      message.at >= createdAt - 5000
+    );
+    if (candidates.length !== 1 || !candidates[0].fingerprint) {
+      return unknownSendFailure();
+    }
+    const observedAt = Date.now();
+    if (!Number.isFinite(observedAt) || observedAt <= 0) return unknownSendFailure();
+    return {
+      success: true,
+      targetConversationId: conversationRef.conversationId,
+      sentFingerprint: candidates[0].fingerprint,
       observedAt: observedAt
     };
   }
@@ -1698,6 +1782,15 @@
         errorCode: 'SEND_RESULT_UNKNOWN',
         sendResultUnknown: true,
         error: '托管回复发送结果未知，请人工核对 Boss 会话'
+      }));
+      return true;
+    }
+    if (msg.type === 'VERIFY_MANAGED_SEND') {
+      verifyManagedSend(msg).then(r => sendResponse(r)).catch(() => sendResponse({
+        success: false,
+        errorCode: 'SEND_RESULT_UNKNOWN',
+        sendResultUnknown: true,
+        error: '托管回复发送结果仍无法确认'
       }));
       return true;
     }
