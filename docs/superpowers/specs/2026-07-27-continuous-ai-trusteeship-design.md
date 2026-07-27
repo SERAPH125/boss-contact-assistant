@@ -44,6 +44,8 @@
 6. 延迟期间出现更新的 HR 消息时，不发送过时草稿；重新以最新有界上下文决策。
 7. 明确拒绝只发送一次礼貌结束语，成功后结束会话。
 8. 用户始终可以手动结束单个会话托管。
+9. 用户可以一次启用全部符合条件的已登记岗位，不必逐张卡片勾选。
+10. 审核页联系成功并完成登记后，AI 托管列表自动刷新，不要求用户切换页面或重开侧栏。
 
 ## 状态模型
 
@@ -226,6 +228,70 @@ Chrome 对定时器精度不作实时保证，因此“30～300 秒”表示最�
 
 手动结束后的状态使用现有 `DISABLED`，重新勾选托管时回到 `WAITING_HR`，并以最新可靠 incoming 建立继续监控的基线。
 
+## 一键托管全部可用岗位
+
+AI 托管区域增加“一键托管全部可用岗位”按钮。它只启用可以安全恢复的已登记会话：
+
+- 已经处于启用状态的会话保持不变；
+- `DISABLED` 且不存在活动待确认、活动延迟任务或发送锁的会话可以恢复为 `WAITING_HR`；
+- `ENDED_UNMATCHED` 永远跳过，批量操作不能重新联系已经明确拒绝的 HR；
+- `PAUSED` 跳过，避免越过登录、目标身份、消息协议或平台阻止等人工核对边界；
+- `WAITING_CONFIRMATION`、`WAITING_REPLY_DUE`、`WAITING_AUTO_CLOSE`、`SENDING` 和 `VERIFYING_SEND` 保持当前状态，不重复创建工作项；
+- 损坏、缺少 canonical conversation ID 或无法归一化的记录计为失败，不选择相似记录替代。
+
+批量操作由 store 在同一串行读改写中处理，并返回有界统计：
+
+```js
+{
+  enabled: 4,
+  unchanged: 3,
+  skipped: 2,
+  failed: 0
+}
+```
+
+UI 显示“已启用 N 个、保持 N 个、跳过 N 个、失败 N 个”。按钮不得循环调用单会话 runtime 接口，以免中途 Worker 休眠后产生部分结果且无法解释；runtime 提供一个批量协议，store 对当前快照完成一次确定性迁移和一次持久化。
+
+同时提供“一键结束全部托管”，必须二次确认。它关闭所有尚未终结的会话、清理未产生外部写入的延迟任务和普通待确认项，但不得改变 `SENDING` / `VERIFYING_SEND` 意图的不可重放证据，也不删除 Boss 消息。`ENDED_UNMATCHED` 保持原终态。
+
+## 联系成功后的响应式刷新
+
+### 已确认根因
+
+审核页“联系已选”成功后，background 已通过 `conversationStore.registerConversation(...)` 写入 `managedConversations`。sidepanel 的 `chrome.storage.onChanged` 当前只监听 `byPlatform`，没有订阅托管相关 key，因此 AI 托管区域继续展示旧的 `trusteeshipSnapshot`。
+
+这属于视图同步缺陷，不是登记失败。修复不能在 UI 中根据联系结果伪造岗位卡片；持久 store 仍是唯一事实源。
+
+### 订阅与刷新
+
+sidepanel 监听以下 `chrome.storage.local` key：
+
+- `managedConversations`
+- `pendingApprovals`
+- `conversationTrusteeship`
+- `feishuNotification`
+
+命中任意 key 时：
+
+1. 使用一个 100～200 毫秒的合并刷新定时器吸收同一批或连续登记写入；
+2. 调用一次 `TRUSTEESHIP_GET_STATE` 获取安全 DTO；
+3. 更新顶部动态状态、待确认数量、已登记岗位列表、真实演练会话列表和批量按钮状态；
+4. 不直接信任 `StorageChange.newValue` 构建公开 UI；
+5. 不覆盖当前获得焦点或已变更但尚未保存的 API、求职设置、HR 问答、飞书和托管配置表单。
+
+`TRUSTEESHIP_GET_STATE` 是只读操作，不会再次写 storage，因此不会形成变更监听循环。sidepanel 关闭后由浏览器自动释放监听；页面初始化仍主动读取一次完整状态。
+
+### 联系流程反馈
+
+后台每成功登记一个会话都会触发持久 storage 变化，侧栏可在任务仍运行时逐步显示新卡片。联系完成时无需额外刷新消息作为正确性的唯一依赖，但运行日志可以显示“已登记并加入 AI 托管列表”。
+
+若联系成功但托管登记因元数据不可靠而失败：
+
+- 本次联系结果保持成功；
+- 不生成临时或未知身份的托管卡片；
+- 运行日志显示“联系成功，托管登记失败，可打开会话后手动登记”；
+- 后续 storage 订阅不会制造假登记。
+
 ## 错误处理
 
 | 情况 | 行为 |
@@ -251,6 +317,12 @@ Chrome 对定时器精度不作实时保证，因此“30～300 秒”表示最�
 - `WAITING_AUTO_CLOSE`：已识别拒绝 · 等待礼貌结束
 - `ENDED_UNMATCHED`：已结束－未匹配
 - `DISABLED`：已手动结束
+
+已登记岗位标题区域提供：
+
+- “一键托管全部可用岗位”；
+- “一键结束全部托管”；
+- 批量操作后的启用、保持、跳过和失败统计。
 
 顶部“正在托管 N 个岗位”包括 `WAITING_HR`、`WAITING_REPLY_DUE`、`CLASSIFYING`、`WAITING_CONFIRMATION`、`WAITING_AUTO_CLOSE`、`SENDING` 和 `VERIFYING_SEND`，不包括 `DISABLED`、`ENDED_UNMATCHED` 与 `PAUSED`。
 
@@ -295,6 +367,9 @@ Chrome 对定时器精度不作实时保证，因此“30～300 秒”表示最�
 - 周期 alarm 与 due alarm 共用 FIFO；
 - Worker 恢复重新建立最近到期 alarm；
 - global disabled/paused 清除两个 alarm。
+- 批量启用只调用一个 runtime 协议并返回确定性统计；
+- 批量启用跳过 `ENDED_UNMATCHED`、`PAUSED` 和全部活动工作状态；
+- 批量结束保留未知发送意图的不可重放终态。
 
 ### Content handler
 
@@ -309,6 +384,11 @@ Chrome 对定时器精度不作实时保证，因此“30～300 秒”表示最�
 - 提供打开会话、确认已发送和手动结束；
 - 活跃托管计数包含可恢复等待状态；
 - 延迟状态显示预计范围，不承诺精确秒级发送。
+- “一键托管全部可用岗位”不会重新开启 `ENDED_UNMATCHED`；
+- 批量结果显示启用、保持、跳过和失败数量；
+- background 连续登记多个岗位时，storage 变化被合并为有界刷新；
+- 登记刷新后列表出现新卡片，正在编辑的未保存配置不被覆盖；
+- storage 新值不能绕过 `TRUSTEESHIP_GET_STATE` 的安全 DTO 投影。
 
 ### 回归
 
@@ -327,4 +407,6 @@ Chrome 对定时器精度不作实时保证，因此“30～300 秒”表示最�
 5. HR 明确拒绝后只发送一次礼貌结束语并停止该会话。
 6. 用户手动结束后不再读取或发送该会话。
 7. 任意发送意图在未知状态下都不会被自动重放。
-8. 聚焦测试与全量 `npm test` 通过，README、`docs/08-boss-ai-trusteeship.md` 和 `docs/oss-notes.md` 同步更新。
+8. 一键托管只启用可安全恢复岗位，明确拒绝、暂停和活动工作状态全部跳过。
+9. 审核页每次联系成功登记后，AI 托管列表无需刷新页面即可自动出现新岗位。
+10. 聚焦测试与全量 `npm test` 通过，README、`docs/08-boss-ai-trusteeship.md` 和 `docs/oss-notes.md` 同步更新。
