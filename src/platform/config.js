@@ -31,7 +31,6 @@
           });
         }
         if (!byPlatform.zhilian) byPlatform.zhilian = g.defaultPlatformCfg('zhilian');
-        if (!byPlatform.liepin) byPlatform.liepin = g.defaultPlatformCfg('liepin');
 
         var patch = {
           configVersion: 2,

@@ -77,32 +77,6 @@
         var city = SearchFilters.resolveZhilianCity(cfg.city);
         return { name: city.name, found: !!city.name && city.found };
       }
-    },
-    liepin: {
-      id: 'liepin',
-      name: '猎聘',
-      short: '猎聘',
-      host: 'liepin.com',
-      loginHint: '尚未检测到猎聘登录态。请先在浏览器打开并登录 liepin.com，再扫描。',
-      actionWord: '立即沟通',
-      ready: false,
-      tabQuery: '*://*.liepin.com/*',
-      chatPathHint: '',
-      selectorsFile: 'src/platform/liepin/selectors.js',
-      searchScript: 'src/platform/liepin/content-search.js',
-      chatScript: 'src/platform/liepin/content-chat.js',
-      defaults: Object.assign({}, COMMON_DEFAULTS, {
-        salaryYearMin: '',
-        salaryYearMax: '',
-        preferUrgent: false
-      }),
-      buildSearchUrl: function (cfg) {
-        var q = encodeURIComponent(cfg.keyword || '');
-        return 'https://www.liepin.com/zhaopin/?key=' + q;
-      },
-      resolveCityLabel: function (cfg) {
-        return { name: cfg.city || '', found: !!(cfg.city || '').trim() };
-      }
     }
   };
 

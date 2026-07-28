@@ -22,6 +22,14 @@ test('declares bounded permissions for trusteeship scheduling and Feishu', () =>
   );
 });
 
+test('submits only implemented recruitment platforms', () => {
+  assert.equal(
+    manifest.host_permissions.some((pattern) => pattern.includes('liepin.com')),
+    false
+  );
+  assert.doesNotMatch(manifest.description, /猎聘|Liepin/i);
+});
+
 test('loads the single-send guard before every chat content script', () => {
   const chatEntries = manifest.content_scripts.filter((entry) =>
     entry.js.some((file) => /content-chat\.js$/.test(file))

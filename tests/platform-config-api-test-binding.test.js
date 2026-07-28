@@ -8,6 +8,10 @@ const source = fs.readFileSync(
   path.resolve(__dirname, '../src/platform/config.js'),
   'utf8'
 );
+const registrySource = fs.readFileSync(
+  path.resolve(__dirname, '../src/platform/registry.js'),
+  'utf8'
+);
 
 function createHarness(initial) {
   const data = structuredClone(initial || {});
@@ -61,6 +65,35 @@ test('loadFlat preserves the complete credential-bound API proof snapshot', asyn
   assert.equal(flat.apiLastTestVersion, 3);
   assert.equal(flat.apiLastTestOk, true);
   assert.equal(flat.apiLastTestAt, 123456);
+});
+
+test('migration initializes only implemented platform configurations', async () => {
+  const h = createHarness({});
+
+  const result = await h.PlatformConfig.ensureMigrated();
+
+  assert.deepEqual(Object.keys(result.byPlatform).sort(), ['boss', 'zhilian']);
+});
+
+test('registry exposes only implemented recruitment platforms', () => {
+  const context = {
+    SearchFilters: {
+      buildZhilianSearchUrl() {
+        return '';
+      },
+      resolveZhilianCity() {
+        return { name: '', found: false };
+      }
+    },
+    URLSearchParams
+  };
+  context.globalThis = context;
+
+  vm.runInNewContext(registrySource, context, {
+    filename: 'src/platform/registry.js'
+  });
+
+  assert.deepEqual(Object.keys(context.PLATFORMS).sort(), ['boss', 'zhilian']);
 });
 
 test('API connection proof is bound to provider, key and base URL credentials', async () => {

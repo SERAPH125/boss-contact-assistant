@@ -946,13 +946,12 @@ function refreshHeader() {
   if ($('filterPlatHint')) {
     const exclusive = {
       boss: '平台条件：活跃过滤、活跃天数。',
-      zhilian: '平台条件：工作经验、学历。投递前请设好默认简历。',
-      liepin: '平台条件：年薪区间、急聘优先。'
+      zhilian: '平台条件：工作经验、学历。投递前请设好默认简历。'
     };
     $('filterPlatHint').textContent =
       '求职意向、简历材料、招呼语与联系节奏均只作用于本平台。' + (exclusive[m.id] || '');
   }
-  ['boss', 'zhilian', 'liepin'].forEach((id) => {
+  ['boss', 'zhilian'].forEach((id) => {
     const box = $('fields-' + id);
     if (box) box.classList.toggle('hidden', id !== activePlatform);
   });
@@ -989,12 +988,11 @@ function fillFilterForm(plat) {
   ['keyword', 'city', 'includeKeywords', 'excludeKeywords', 'greetingTemplate', 'experience', 'education'].forEach((f) => {
     if ($(f) && p[f] !== undefined) $(f).value = p[f];
   });
-  ['count', 'dailyLimit', 'intervalMinSec', 'intervalMaxSec', 'batchSize', 'batchRestMinSec', 'batchRestMaxSec', 'salaryYearMin', 'salaryYearMax'].forEach((f) => {
+  ['count', 'dailyLimit', 'intervalMinSec', 'intervalMaxSec', 'batchSize', 'batchRestMinSec', 'batchRestMaxSec'].forEach((f) => {
     if ($(f) && p[f] !== undefined && p[f] !== '') $(f).value = p[f];
   });
   if ($('filterInactive')) $('filterInactive').checked = p.filterInactive !== false && p.filterInactive !== 'false';
   if ($('activityMaxDays') && p.activityMaxDays !== undefined) $('activityMaxDays').value = String(p.activityMaxDays);
-  if ($('preferUrgent')) $('preferUrgent').checked = !!p.preferUrgent;
 }
 
 function collectPlatformFields() {
@@ -1019,11 +1017,6 @@ function collectPlatformFields() {
   if (activePlatform === 'zhilian') {
     fields.experience = $('experience').value.trim();
     fields.education = $('education').value.trim();
-  }
-  if (activePlatform === 'liepin') {
-    fields.salaryYearMin = $('salaryYearMin').value;
-    fields.salaryYearMax = $('salaryYearMax').value;
-    fields.preferUrgent = $('preferUrgent').checked;
   }
   return fields;
 }

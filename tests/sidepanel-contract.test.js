@@ -55,6 +55,11 @@ test('saves API configuration only through the trusted background owner', () => 
   assert.doesNotMatch(script, /PlatformConfig\.saveApi\s*\(/);
 });
 
+test('does not render or configure an unfinished Liepin platform', () => {
+  assert.doesNotMatch(html, /data-platform="liepin"|fields-liepin|猎聘/);
+  assert.doesNotMatch(script, /activePlatform === 'liepin'|'liepin'/);
+});
+
 test('shows structured recovery guidance for a blocked run', () => {
   assert.match(html, /id="recoveryCard"[^>]*role="alert"/);
   assert.match(html, /id="recoveryCode"/);

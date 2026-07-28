@@ -50,11 +50,21 @@ Service Worker ──LOG / PHASE / PROGRESS / SCREENED / DONE──→ Sidepanel
 ## 多平台进展（v0.3）
 
 - 产品名：**求职联系助手**
-- `src/platform/registry.js`：Boss / 智联 / 猎聘注册表（JobsIn 式）
+- `src/platform/registry.js`：Boss / 智联注册表（JobsIn 式）
 - `src/platform/config.js`：`activePlatform` + `byPlatform` 分平台日限/招呼语
 - `src/platform/boss/*`：现网 Boss 脚本迁入
 - 智联：`ready: true`，MVP 已包含列表扫描和单岗位投递/沟通，仍需测试账号真机验收。
-- 猎聘：`ready: false`，UI 可选、扫描禁用，待 M4 真机适配。
+
+2026-07-28 的 Chrome 应用商店发布收敛移除了未实现的猎聘占位入口、注册表项和主机权限。商店包只声明并交付已有运行实现的 Boss 与智联；未来若重新增加平台，必须先完成适配器、自动化回归和真机验收，再恢复产品入口与权限。
+
+## v0.3.6 Chrome 应用商店发布参考
+
+- [GoogleChrome/chrome-extensions-samples](https://github.com/GoogleChrome/chrome-extensions-samples)：参考 Manifest V3 扩展的最小运行目录和官方 API 示例组织。
+- [SimGus/chrome-extension-v3-starter](https://github.com/SimGus/chrome-extension-v3-starter)：对照最小 MV3 工程根目录结构；没有复制其实现代码。
+- [Chrome Web Store: Prepare your extension](https://developer.chrome.com/docs/webstore/prepare)：确认上传 ZIP 的 `manifest.json` 必须位于包根目录。
+- [Chrome Web Store Program Policies](https://developer.chrome.com/docs/webstore/program-policies/policies)、[Manifest V3 requirements](https://developer.chrome.com/docs/webstore/program-policies/mv3-requirements)、[Permissions requirements](https://developer.chrome.com/docs/webstore/program-policies/permissions/) 和 [User Data FAQ](https://developer.chrome.com/docs/webstore/program-policies/user-data-faq)：用于确定权限最小化、隐私披露和审核材料边界。
+
+本仓库使用显式运行时白名单生成商店 ZIP，未知文件默认不入包。用户明确要求保留开启 AI 托管后的无人逐条确认自动外发；这一行为不在本轮改写，但必须在隐私政策和审核说明中如实披露其控制方式与审核风险。
 
 ## v0.3.5 安全收紧对照
 
