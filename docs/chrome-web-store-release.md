@@ -112,3 +112,22 @@ Chrome 应用商店对代表用户发送消息的能力审查严格。提交材�
 - 重要或不确定问题进入待确认。
 
 隐瞒该行为会增加拒审和后续下架风险。若审核方不接受，应由产品负责人决定是否另建商店合规发行通道，不能在本发布脚本中偷偷改写运行逻辑。
+
+## 2026-07-28 发布验证记录
+
+验证环境：macOS、Node.js、系统 `/usr/bin/zip` 与 `/usr/bin/unzip`。
+
+执行结果：
+
+- `node --check src/background.js`：通过；
+- `node --check src/sidepanel.js`：通过；
+- `npm test`：460/460 通过；
+- `npm run package:chrome`：连续两次成功；
+- ZIP：`boss-contact-assistant-0.3.6.zip`；
+- ZIP 文件数：37；
+- 两次构建 SHA-256：`e71d3e6d538bfefcd89c39d00a1a4748fcd45fc98215a84ce6b56a4e8e289981`；
+- `/usr/bin/unzip -t`：37 个文件全部通过；
+- 禁止项检查：无 `tests/`、`docs/`、`scripts/`、`package.json`、`.DS_Store`、`.env*`、猎聘入口或旧版兼容脚本；
+- Manifest：根目录可读取，只声明 BOSS、智联、DeepSeek、OpenAI 和飞书固定主机访问；自定义兼容 API 继续按具体来源请求可选权限。
+
+自动外发托管保持启用且未改动。本轮没有修改 `src/conversation/trusteeship-policy.js`、`src/conversation/monitor-engine.js`、`src/conversation/trusteeship-runtime.js`、`src/conversation/reply-ai.js` 或发送协议；相关既有回归包含在上述 460 项通过结果中。
