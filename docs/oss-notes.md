@@ -64,8 +64,12 @@ Service Worker ──LOG / PHASE / PROGRESS / SCREENED / DONE──→ Sidepanel
 - [Chrome Web Store: Prepare your extension](https://developer.chrome.com/docs/webstore/prepare)：确认上传 ZIP 的 `manifest.json` 必须位于包根目录。
 - [Chrome Web Store Program Policies](https://developer.chrome.com/docs/webstore/program-policies/policies)、[Manifest V3 requirements](https://developer.chrome.com/docs/webstore/program-policies/mv3-requirements)、[Permissions requirements](https://developer.chrome.com/docs/webstore/program-policies/permissions/) 和 [User Data FAQ](https://developer.chrome.com/docs/webstore/program-policies/user-data-faq)：用于确定权限最小化、隐私披露和审核材料边界。
 - [Chrome Web Store Best listing practices](https://developer.chrome.com/docs/webstore/best-listing)：用于准备单一用途、清晰功能描述、脱敏截图和审核可复现步骤。
+- [drivendataorg/repro-zipfile](https://github.com/drivendataorg/repro-zipfile)：对照其固定 ZIP 成员时间和权限的可复现归档原则；本仓库没有引入其 Python 依赖或复制其实现。
+- [archiverjs/node-archiver#383](https://github.com/archiverjs/node-archiver/issues/383)：对照确定性 ZIP 还需要固定日期和稳定成员顺序的实践记录。
 
 本仓库使用显式运行时白名单生成商店 ZIP，未知文件默认不入包。用户明确要求保留开启 AI 托管后的无人逐条确认自动外发；这一行为不在本轮改写，但必须在隐私政策和审核说明中如实披露其控制方式与审核风险。
+
+完成前校验发现原打包器的 `copyFile()` 会让暂存成员带上每次构建的当前时间；`zip -X` 只去除额外属性，不会消除 ZIP DOS 时间字段。间隔约三秒重建可稳定复现“37 个成员内容相同但 SHA-256 不同”。修复后，暂存文件统一为 `0644`、`1980-01-01 00:00:00 UTC`，压缩进程固定 `TZ=UTC`，成员仍按显式白名单顺序写入；自动化会跨越 ZIP 两秒时间粒度重建并比较完整 SHA-256。
 
 ## v0.3.5 安全收紧对照
 

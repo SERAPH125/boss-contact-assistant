@@ -42,7 +42,7 @@ npm run package:chrome
 dist/chrome-web-store/boss-contact-assistant-0.3.6.zip
 ```
 
-脚本会先创建全新暂存目录，校验每个白名单文件是普通文件且不是符号链接，复制文件后生成 ZIP，再读取 ZIP 清单并与白名单逐项比较。任一阶段失败都会删除该次不可信产物。
+脚本会先创建全新暂存目录，校验每个白名单文件是普通文件且不是符号链接，复制后把成员权限固定为 `0644`、时间固定为 ZIP 最早支持的 `1980-01-01 00:00:00 UTC`，再按白名单顺序生成 ZIP，并读取 ZIP 清单逐项比较。这样相同输入跨时间构建会得到相同二进制和 SHA-256。任一阶段失败都会删除该次不可信产物。
 
 ## 本地验证
 
@@ -122,10 +122,11 @@ Chrome 应用商店对代表用户发送消息的能力审查严格。提交材�
 - `node --check src/background.js`：通过；
 - `node --check src/sidepanel.js`：通过；
 - `npm test`：460/460 通过；
-- `npm run package:chrome`：连续两次成功；
+- `npm run package:chrome`：跨 ZIP 两秒时间粒度连续两次成功，二进制完全一致；
 - ZIP：`boss-contact-assistant-0.3.6.zip`；
 - ZIP 文件数：37；
-- 两次构建 SHA-256：`e71d3e6d538bfefcd89c39d00a1a4748fcd45fc98215a84ce6b56a4e8e289981`；
+- 两次构建 SHA-256：`1537017859dfcd42b1904935bf95f21316e4172c13db0e652caa2ded6bdb4190`；
+- ZIP 成员元数据：时间统一为 `1980-01-01 00:00 UTC`，文件权限统一为 `0644`；
 - `/usr/bin/unzip -t`：37 个文件全部通过；
 - 禁止项检查：无 `tests/`、`docs/`、`scripts/`、`package.json`、`.DS_Store`、`.env*`、猎聘入口或旧版兼容脚本；
 - Manifest：根目录可读取，只声明 BOSS、智联、DeepSeek、OpenAI 和飞书固定主机访问；自定义兼容 API 继续按具体来源请求可选权限。

@@ -1,10 +1,12 @@
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import {
+  chmod,
   copyFile,
   mkdir,
   readFile,
-  rm
+  rm,
+  utimes
 } from 'node:fs/promises';
 import { spawnSync } from 'node:child_process';
 import {
@@ -16,6 +18,7 @@ const scriptDir = path.dirname(fileURLToPath(import.meta.url));
 const root = path.resolve(scriptDir, '..');
 const outputDir = path.join(root, 'dist/chrome-web-store');
 const stagingDir = path.join(outputDir, 'staging');
+const reproducibleTimestamp = new Date('1980-01-01T00:00:00.000Z');
 let archivePath = '';
 
 function run(command, args, options = {}) {
@@ -74,10 +77,20 @@ async function build() {
     const destination = path.join(stagingDir, ...entry.split('/'));
     await mkdir(path.dirname(destination), { recursive: true });
     await copyFile(path.join(root, ...entry.split('/')), destination);
+    await chmod(destination, 0o644);
+    await utimes(
+      destination,
+      reproducibleTimestamp,
+      reproducibleTimestamp
+    );
   }
 
   run('/usr/bin/zip', ['-X', '-q', archivePath, ...CHROME_STORE_FILES], {
-    cwd: stagingDir
+    cwd: stagingDir,
+    env: {
+      ...process.env,
+      TZ: 'UTC'
+    }
   });
   const entries = normalizedListing(
     run('/usr/bin/unzip', ['-Z1', archivePath], { cwd: root })

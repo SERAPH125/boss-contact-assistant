@@ -4,6 +4,8 @@ const fs = require('node:fs');
 const path = require('node:path');
 const { pathToFileURL } = require('node:url');
 const { spawnSync } = require('node:child_process');
+const { createHash } = require('node:crypto');
+const { setTimeout: delay } = require('node:timers/promises');
 
 const root = path.resolve(__dirname, '..');
 const allowlistPath = path.join(root, 'scripts/chrome-store-files.mjs');
@@ -43,6 +45,10 @@ function manifestRuntimeFiles(manifest) {
     for (const dependency of localHtmlDependencies(html)) files.add(dependency);
   }
   return files;
+}
+
+function sha256(file) {
+  return createHash('sha256').update(fs.readFileSync(file)).digest('hex');
 }
 
 test('builds an exact allowlisted Chrome Web Store archive', async () => {
@@ -110,4 +116,17 @@ test('builds an exact allowlisted Chrome Web Store archive', async () => {
       `archive must exclude ${forbidden}`
     );
   }
+
+  const firstArchiveHash = sha256(archive);
+  await delay(2200);
+  const rebuild = spawnSync(process.execPath, [builderPath], {
+    cwd: root,
+    encoding: 'utf8'
+  });
+  assert.equal(rebuild.status, 0, rebuild.stderr || rebuild.stdout);
+  assert.equal(
+    sha256(archive),
+    firstArchiveHash,
+    'identical allowlisted inputs must produce a byte-for-byte reproducible ZIP'
+  );
 });
