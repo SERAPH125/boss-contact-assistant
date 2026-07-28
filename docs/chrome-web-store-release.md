@@ -78,6 +78,27 @@ dist/chrome-web-store/boss-contact-assistant-0.3.6.zip
 8. 再次核对数据披露和 AI 自动外发说明；
 9. 提交审核。
 
+公开隐私政策建议填写：
+
+```text
+https://github.com/SERAPH125/boss-contact-assistant/blob/main/docs/privacy-policy.md
+```
+
+该文件推送到公开仓库后，必须使用无登录浏览器窗口验证可访问，再填写到 Chrome Web Store。完整商店文案、权限理由、数据披露和审核步骤见 `docs/chrome-web-store-listing.md`。
+
+## 提交前清单
+
+- `npm test` 全量通过；
+- `npm run package:chrome` 成功；
+- `/usr/bin/unzip -t` 验证 ZIP 完整；
+- ZIP 根目录含 `manifest.json`；
+- Manifest 只声明当前支持的 BOSS/智联招聘平台；
+- 隐私政策 URL 公开可访问；
+- 数据披露包括招聘网站消息、AI 服务商、飞书和自动发送；
+- 商店截图使用测试或合成数据，不包含真实 HR 信息和任何凭据；
+- 审核测试账号、AI Key 和飞书 Webhook 只通过私密审核说明提供；
+- 已在提交说明中披露自动外发审核风险。
+
 ## 重要审核风险
 
 本项目按用户决定保留 AI 托管中的无人逐条确认自动外发。该行为不会因为商店打包而关闭或变成仅草稿模式。

@@ -55,7 +55,7 @@ Service Worker ──LOG / PHASE / PROGRESS / SCREENED / DONE──→ Sidepanel
 - `src/platform/boss/*`：现网 Boss 脚本迁入
 - 智联：`ready: true`，MVP 已包含列表扫描和单岗位投递/沟通，仍需测试账号真机验收。
 
-2026-07-28 的 Chrome 应用商店发布收敛移除了未实现的猎聘占位入口、注册表项和主机权限。商店包只声明并交付已有运行实现的 Boss 与智联；未来若重新增加平台，必须先完成适配器、自动化回归和真机验收，再恢复产品入口与权限。
+2026-07-28 的 Chrome 应用商店发布收敛移除了未实现的猎聘占位入口、注册表项和主机权限，也移除了界面未提供服务商入口的 DashScope 固定主机权限。商店包只声明并交付已有运行实现的 Boss 与智联；自定义 OpenAI 兼容服务继续按用户填写的具体来源申请可选权限。未来若重新增加平台或固定服务商，必须先完成实现、自动化回归和真机验收，再恢复产品入口与权限。
 
 ## v0.3.6 Chrome 应用商店发布参考
 
@@ -63,6 +63,7 @@ Service Worker ──LOG / PHASE / PROGRESS / SCREENED / DONE──→ Sidepanel
 - [SimGus/chrome-extension-v3-starter](https://github.com/SimGus/chrome-extension-v3-starter)：对照最小 MV3 工程根目录结构；没有复制其实现代码。
 - [Chrome Web Store: Prepare your extension](https://developer.chrome.com/docs/webstore/prepare)：确认上传 ZIP 的 `manifest.json` 必须位于包根目录。
 - [Chrome Web Store Program Policies](https://developer.chrome.com/docs/webstore/program-policies/policies)、[Manifest V3 requirements](https://developer.chrome.com/docs/webstore/program-policies/mv3-requirements)、[Permissions requirements](https://developer.chrome.com/docs/webstore/program-policies/permissions/) 和 [User Data FAQ](https://developer.chrome.com/docs/webstore/program-policies/user-data-faq)：用于确定权限最小化、隐私披露和审核材料边界。
+- [Chrome Web Store Best listing practices](https://developer.chrome.com/docs/webstore/best-listing)：用于准备单一用途、清晰功能描述、脱敏截图和审核可复现步骤。
 
 本仓库使用显式运行时白名单生成商店 ZIP，未知文件默认不入包。用户明确要求保留开启 AI 托管后的无人逐条确认自动外发；这一行为不在本轮改写，但必须在隐私政策和审核说明中如实披露其控制方式与审核风险。
 

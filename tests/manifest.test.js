@@ -30,6 +30,13 @@ test('submits only implemented recruitment platforms', () => {
   assert.doesNotMatch(manifest.description, /猎聘|Liepin/i);
 });
 
+test('does not request fixed access to an unlisted AI provider', () => {
+  assert.equal(
+    manifest.host_permissions.includes('https://dashscope.aliyuncs.com/*'),
+    false
+  );
+});
+
 test('loads the single-send guard before every chat content script', () => {
   const chatEntries = manifest.content_scripts.filter((entry) =>
     entry.js.some((file) => /content-chat\.js$/.test(file))

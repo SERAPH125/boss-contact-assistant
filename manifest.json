@@ -18,7 +18,6 @@
     "*://*.zhaopin.com/*",
     "https://api.deepseek.com/*",
     "https://api.openai.com/*",
-    "https://dashscope.aliyuncs.com/*",
     "https://open.feishu.cn/*"
   ],
   "background": { "service_worker": "src/background.js" },
