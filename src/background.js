@@ -1,6 +1,7 @@
 // ===== 求职联系助手 Service Worker：多平台适配 · 扫描→筛选→仅联系已选 =====
 importScripts(
   '/src/platform/search-filters.js',
+  '/src/platform/job-description.js',
   '/src/platform/registry.js',
   '/src/platform/config.js',
   '/src/platform/boss/selectors.js',
@@ -55,6 +56,29 @@ const conversationStore = ConversationStore.create(
     return kind + '-' + suffix;
   }
 );
+const CITY_CATALOG_CACHE_KEY = 'sw_city_catalogs_v1';
+let cityCatalogResolver = null;
+function getCityCatalogResolver() {
+  if (cityCatalogResolver) return cityCatalogResolver;
+  cityCatalogResolver = SearchFilters.createCityCatalogResolver({
+    fetchJson: async (url) => {
+      const response = await fetch(url, {
+        credentials: 'include',
+        cache: 'no-store'
+      });
+      if (!response.ok) throw new Error('城市目录 HTTP ' + response.status);
+      return response.json();
+    },
+    readCache: async () => {
+      const stored = await chrome.storage.local.get(CITY_CATALOG_CACHE_KEY);
+      return stored[CITY_CATALOG_CACHE_KEY] || null;
+    },
+    writeCache: async (cache) => {
+      await chrome.storage.local.set({ [CITY_CATALOG_CACHE_KEY]: cache });
+    }
+  });
+  return cityCatalogResolver;
+}
 const trusteeshipFeishuClient = FeishuNotifier.create({
   fetchFn: fetch,
   subtle: (typeof crypto !== 'undefined' && crypto.subtle) ? crypto.subtle : null,
@@ -256,7 +280,7 @@ function modelOf(cfg) {
 
 function resumeFull(cfg) { return (cfg.resumeText || '').trim(); }
 function jobInfo(j) {
-  return '岗位：' + (j.name || '') + '\n技能标签：' + ((j.tags || []).join('、')) + '\n薪资：' + (j.salary || '') + '\n公司：' + (j.company || '');
+  return JobDescription.promptText(j);
 }
 function findJob(id) {
   for (let i = 0; i < state.jobs.length; i++) if (state.jobs[i].id === id) return state.jobs[i];
@@ -383,12 +407,15 @@ function classifyApiTestFailure(error) {
 }
 
 function ruleScreen(cfg, job) {
-  const blob = ((job.name || '') + ' ' + (job.company || '') + ' ' + ((job.tags || []).join(' '))).toLowerCase();
+  const blob = JobDescription.screeningText(job);
   const excludes = splitWords(cfg.excludeKeywords).map((w) => w.toLowerCase());
   for (let i = 0; i < excludes.length; i++) {
     if (excludes[i] && blob.indexOf(excludes[i]) >= 0) {
       return { match: false, reason: '命中排除词：' + excludes[i], score: 20 };
     }
+  }
+  if (excludes.length && job.descriptionStatus === 'failed') {
+    return { match: false, reason: '职位描述读取失败，无法确认排除词', score: 20 };
   }
   // 活跃度二次过滤（扫描阶段已滤，此处兜底）
   const filterInactive = cfg.filterInactive !== false && cfg.filterInactive !== 'false';
@@ -399,7 +426,10 @@ function ruleScreen(cfg, job) {
   const includes = splitWords(cfg.includeKeywords).map((w) => w.toLowerCase());
   if (includes.length) {
     const hit = includes.filter((w) => blob.indexOf(w) >= 0);
-    if (!hit.length) return { match: false, reason: '未命中包含词', score: 35 };
+    if (!hit.length && job.descriptionStatus === 'failed') {
+      return { match: false, reason: '职位描述读取失败，无法确认包含词', score: 25 };
+    }
+    if (!hit.length) return { match: false, reason: '未命中包含词（已检查职位描述）', score: 35 };
     const score = Math.min(95, 55 + hit.length * 15);
     return { match: true, reason: '规则命中：' + hit.join('、'), score: score };
   }
@@ -410,6 +440,11 @@ async function screenJob(cfg, job) {
   const rule = ruleScreen(cfg, job);
   if (!apiKeyOf(cfg) || !resumeFull(cfg)) return rule;
   if (!rule.match) return rule; // 排除词硬拦，不再浪费 Token
+  if (job.descriptionStatus === 'failed') {
+    return Object.assign({}, rule, {
+      reason: rule.reason + '｜职位描述读取失败，未调用 AI'
+    });
+  }
 
   const sys = '你是资深求职助手。请完全依据【求职者简历】判断岗位是否值得沟通。\n保留(match=true)：方向相关且经验够得着。剔除(match=false)：明显无关或明显超纲。\n只输出JSON：{"match":true或false,"reason":"一句话","score":0到100整数}';
   const user = '求职者简历：\n' + resumeFull(cfg) + '\n\n待判断岗位：\n' + jobInfo(job) + '\n\n严格输出JSON。';
@@ -442,7 +477,9 @@ async function ensureInjected(tabId, file, selectorsFile) {
   if (ping && ping.ok && ping.page === want) return;
   try {
     const files = [];
-    if (want === 'search') files.push('src/platform/search-filters.js');
+    if (want === 'search') {
+      files.push('src/platform/search-filters.js', 'src/platform/job-description.js');
+    }
     files.push(selectorsFile || 'src/platform/boss/selectors.js', 'src/humanize.js');
     if (want === 'chat') files.push('src/message-send.js');
     files.push(file);
@@ -506,6 +543,14 @@ async function waitTabComplete(tabId, timeoutMs) {
 }
 function buildSearchUrl(cfg) {
   return platMeta(cfg).buildSearchUrl(cfg);
+}
+async function resolveSearchCity(cfg) {
+  const meta = platMeta(cfg);
+  const city = await getCityCatalogResolver().resolve(meta.id, cfg && cfg.city);
+  return {
+    city: city,
+    config: Object.assign({}, cfg, { resolvedCityCode: city.code })
+  };
 }
 async function ensureTab(url, tabQuery) {
   let tabs = await chrome.tabs.query({ url: tabQuery || '*://*.zhipin.com/*' });
@@ -574,7 +619,7 @@ function deliveryErrorResponse(error) {
   };
 }
 
-async function buildDeliveryPlan(selectedIds, expectedPlatformId) {
+async function buildDeliveryPlan(selectedIds, expectedPlatformId, deliveryMode) {
   const cfg = RunSafety.snapshotRunConfig(await PlatformConfig.loadFlat());
   const meta = platMeta(cfg);
   if (expectedPlatformId && meta.id !== expectedPlatformId) {
@@ -606,6 +651,7 @@ async function buildDeliveryPlan(selectedIds, expectedPlatformId) {
   const dailyLimit = Math.min(50, parseInt(cfg.dailyLimit, 10) || 20);
   const plan = DeliveryGuard.prepare({
     platformId: meta.id,
+    deliveryMode: deliveryMode,
     selectedIds: selectedIds,
     jobs: jobs,
     processed: state.processed,
@@ -621,11 +667,11 @@ async function buildDeliveryPlan(selectedIds, expectedPlatformId) {
   return { cfg: cfg, plan: plan };
 }
 
-async function prepareDelivery(jobIds) {
+async function prepareDelivery(jobIds, deliveryMode) {
   if (state.deliverLock || state.operationLock) {
     throw DeliveryGuard.runError('RUN_ACTIVE');
   }
-  const prepared = await buildDeliveryPlan(jobIds);
+  const prepared = await buildDeliveryPlan(jobIds, undefined, deliveryMode);
   const intent = await deliveryIntentStore.create(prepared.plan);
   return {
     ok: true,
@@ -644,10 +690,17 @@ async function confirmDelivery(intentId) {
   state.operationLock = true;
   try {
     const intent = await deliveryIntentStore.consume(intentId);
-    const prepared = await buildDeliveryPlan(intent.jobIds, intent.platformId);
+    const prepared = await buildDeliveryPlan(
+      intent.jobIds,
+      intent.platformId,
+      intent.deliveryMode
+    );
     const plan = prepared.plan;
     DeliveryGuard.assertIntentMatchesPlan(intent, plan);
-    runDeliver(intent.jobIds, { reserved: true })
+    runDeliver(intent.jobIds, {
+      reserved: true,
+      deliveryMode: intent.deliveryMode
+    })
       .catch((error) => log('启动联系失败：' + error.message, 'error'));
     return { ok: true, jobIds: intent.jobIds.slice() };
   } catch (error) {
@@ -685,14 +738,17 @@ async function runCollect() {
   if (!hasKey) log('未配置 API Key，将使用规则筛选（可勾选后联系）', 'warn');
   else if (!resumeFull(cfg)) log('未填简历文字：AI 筛选降级为规则分', 'warn');
 
-  const _c = meta.resolveCityLabel(cfg);
-  log('[' + meta.short + '] 打开搜索页：' + cfg.keyword + ' | 城市：' + (_c.found ? _c.name : '未指定/默认'));
-  if (cfg.city && !_c.found) {
+  const resolvedSearch = await resolveSearchCity(cfg);
+  checkpoint();
+  const city = resolvedSearch.city;
+  const runCfg = resolvedSearch.config;
+  log('[' + meta.short + '] 打开搜索页：' + cfg.keyword + ' | 城市：' + (city.name || '全国'));
+  if (cfg.city && !city.found) {
     log('城市“' + cfg.city + '”未识别，已停止扫描，避免误扫全国岗位', 'error');
     state.phase = 'idle'; pushPhase();
     return;
   }
-  const tab = await getSearchTab(cfg);
+  const tab = await getSearchTab(runCfg);
   checkpoint();
 
   log('扫描岗位中（目标 ' + count + ' 个）…');
@@ -705,9 +761,14 @@ async function runCollect() {
     state.phase = 'idle'; pushPhase();
     return;
   }
+  const includeDescription =
+    splitWords(cfg.includeKeywords).length > 0 ||
+    splitWords(cfg.excludeKeywords).length > 0 ||
+    (!!apiKeyOf(cfg) && !!resumeFull(cfg));
   const r = await sendToTab(tab.id, {
     type: 'SCRAPE',
     count: count,
+    includeDescription: includeDescription,
     filterInactive: cfg.filterInactive !== false && cfg.filterInactive !== 'false',
     activityMaxDays: parseInt(cfg.activityMaxDays, 10) || 7,
     city: cfg.city || '',
@@ -730,6 +791,13 @@ async function runCollect() {
     return;
   }
   state.jobs = (r.jobs || []).map((j) => Object.assign({}, j, { platform: meta.id }));
+  if (includeDescription) {
+    log(
+      '职位描述读取：成功 ' + Number(r.descriptionLoaded || 0) +
+      ' 个，失败 ' + Number(r.descriptionFailed || 0) + ' 个',
+      r.descriptionFailed ? 'warn' : 'info'
+    );
+  }
   if (r.skippedInactive) log('已过滤不活跃 ' + r.skippedInactive + ' 个（拟人化降风险）', 'info');
   if (r.skippedFilters) {
     const sf = r.skippedFilters;
@@ -814,6 +882,11 @@ async function runCollect() {
 
 async function runDeliver(jobIds, options) {
   const reserved = !!(options && options.reserved);
+  const deliveryMode = DeliveryGuard.normalizeDeliveryMode(
+    options && options.deliveryMode
+  );
+  const enableTrusteeship =
+    deliveryMode === DeliveryGuard.DELIVERY_MODES.CONTACT_AND_TRUSTEESHIP;
   if (state.deliverLock || (state.operationLock && !reserved)) {
     log('已有联系任务在执行，请勿重复点击（操作锁）', 'warn');
     return;
@@ -884,7 +957,13 @@ async function runDeliver(jobIds, options) {
 
     log('[' + meta.short + '] 拟人化：间隔 ' + minSec + '-' + maxSec + 's，每 ' + batchSize + ' 个后休息 ' + batchRestMin + '-' + batchRestMax + 's', 'info');
 
-    const searchUrl = buildSearchUrl(cfg);
+    const resolvedSearch = await resolveSearchCity(cfg);
+    checkpoint();
+    if (cfg.city && !resolvedSearch.city.found) {
+      blockRun('城市“' + cfg.city + '”未识别，已停止联系，避免误扫全国岗位', 'CITY_UNRESOLVED');
+      return;
+    }
+    const searchUrl = buildSearchUrl(resolvedSearch.config);
     let contactedThisRun = 0;
 
     for (let k = 0; k < ids.length; k++) {
@@ -1091,11 +1170,29 @@ async function runDeliver(jobIds, options) {
           if (r && r.success && r.conversationRef &&
               typeof r.baselineIncomingFingerprint === 'string') {
             try {
-              await conversationStore.registerConversation(
-                ConversationRegistration.fromSuccessfulContact(job, r)
+              const registered = await conversationStore.registerConversation(
+                ConversationRegistration.fromSuccessfulContact(job, r, {
+                  enableTrusteeship: enableTrusteeship
+                })
               );
-            } catch (_registrationFailure) {
+              if (enableTrusteeship) {
+                if (registered.enabled === true) {
+                  log('  ✓ 已登记并开启 AI 托管', 'success');
+                } else if (registered.state === 'ENDED_UNMATCHED') {
+                  log('  已联系；该会话此前已结束，不会重新开启 AI 托管', 'warn');
+                } else {
+                  log('  已联系；会话当前状态不允许开启 AI 托管', 'warn');
+                }
+              }
+            } catch (registrationFailure) {
               // 联系已明确成功；不可靠的托管元数据不能追溯改变本次结果。
+              if (enableTrusteeship) {
+                log(
+                  '  已联系，但 AI 托管登记失败：' +
+                    ((registrationFailure && registrationFailure.message) || '未知错误'),
+                  'warn'
+                );
+              }
             }
           }
           recordOk(job);
@@ -1515,7 +1612,7 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
   }
   if (msg.type === 'PREPARE_DELIVERY') {
     workerReady
-      .then(() => prepareDelivery(msg.jobIds || []))
+      .then(() => prepareDelivery(msg.jobIds || [], msg.deliveryMode))
       .then(sendResponse)
       .catch((error) => sendResponse(deliveryErrorResponse(error)));
     return true;

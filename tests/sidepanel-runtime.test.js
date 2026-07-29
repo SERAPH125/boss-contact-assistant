@@ -170,29 +170,62 @@ async function loadFullSidepanel(options) {
   const approvals = options.approvals;
   const sent = [];
   const storageChangedListeners = [];
+  const selectedInputs = (options.selectedIds || []).map((id) => {
+    const input = new FakeElement('input');
+    input.checked = true;
+    input.dataset.id = id;
+    return input;
+  });
   const chrome = {
     runtime: {
       lastError: null,
       sendMessage(message, callback) {
+        const done = typeof callback === 'function' ? callback : () => {};
         sent.push(message);
-        if (message.type === 'TRUSTEESHIP_GET_STATE') callback({ ok: true, ...state });
+        if (message.type === 'TRUSTEESHIP_GET_STATE') done({ ok: true, ...state });
         else if (message.type === 'TRUSTEESHIP_LIST_APPROVALS') {
-          if (options.listApprovals) options.listApprovals(message, callback);
-          else callback({ ok: true, approvals });
+          if (options.listApprovals) options.listApprovals(message, done);
+          else done({ ok: true, approvals });
         }
-        else if (message.type === 'TRUSTEESHIP_RESOLVE_APPROVAL') callback(options.resolve ? options.resolve(message) : { ok: true });
-        else if (message.type === 'TRUSTEESHIP_RUN_NOW') callback(options.runNow ? options.runNow(message) : { ok: true });
+        else if (message.type === 'PREPARE_DELIVERY') {
+          done(options.prepareDelivery ? options.prepareDelivery(message) : {
+            ok: true,
+            intentId: 'intent-test',
+            plan: {
+              platformId: options.activePlatform || 'boss',
+              deliveryMode: message.deliveryMode,
+              selectedCount: selectedInputs.length,
+              executableCount: selectedInputs.length,
+              skippedProcessedCount: 0,
+              usageCount: 0,
+              dailyLimit: 20,
+              remainingAfter: 20 - selectedInputs.length,
+              estimatedMinSec: 0,
+              estimatedMaxSec: 0,
+              sendsResumeImage: false,
+              jobs: selectedInputs.map((input) => ({
+                id: input.dataset.id,
+                name: '测试岗位',
+                company: '测试公司'
+              }))
+            }
+          });
+        }
+        else if (message.type === 'CANCEL_DELIVERY') done({ ok: true, cancelled: true });
+        else if (message.type === 'TRUSTEESHIP_RESOLVE_APPROVAL') done(options.resolve ? options.resolve(message) : { ok: true });
+        else if (message.type === 'TRUSTEESHIP_SAVE_SETTINGS') done(options.saveTrusteeship ? options.saveTrusteeship(message) : { ok: true });
+        else if (message.type === 'TRUSTEESHIP_RUN_NOW') done(options.runNow ? options.runNow(message) : { ok: true });
         else if (message.type === 'TRUSTEESHIP_STAGE_LIVE_DRILL') {
-          callback(options.liveDrill ? options.liveDrill(message) : { ok: false, code: 'TRUSTEESHIP_LIVE_DRILL_FAILED' });
+          done(options.liveDrill ? options.liveDrill(message) : { ok: false, code: 'TRUSTEESHIP_LIVE_DRILL_FAILED' });
         }
         else if (message.type === 'TRUSTEESHIP_SET_ALL_CONVERSATIONS') {
-          callback(options.setAll ? options.setAll(message) : {
+          done(options.setAll ? options.setAll(message) : {
             ok: true, enabled: 0, unchanged: 0, skipped: 0, failed: 0
           });
         }
-        else if (message.type === 'TRUSTEESHIP_SET_CONVERSATION') callback({ ok: false, code: 'CONVERSATION_NOT_REGISTERED' });
-        else if (message.type === 'GET_STATE') callback({ phase: 'idle' });
-        else callback({ ok: true });
+        else if (message.type === 'TRUSTEESHIP_SET_CONVERSATION') done({ ok: false, code: 'CONVERSATION_NOT_REGISTERED' });
+        else if (message.type === 'GET_STATE') done({ phase: 'idle' });
+        else done({ ok: true });
       }, onMessage: { addListener() {} }
     },
     storage: {
@@ -205,13 +238,39 @@ async function loadFullSidepanel(options) {
   };
   const context = {
     globalThis: null, document, window: { confirm: () => true }, chrome,
-    PlatformConfig: { ensureMigrated: async () => ({ activePlatform: 'boss', byPlatform: {} }), savePlatformFields: async () => {}, setActivePlatform: async () => {} },
+    PlatformConfig: {
+      ensureMigrated: async () => ({
+        activePlatform: options.activePlatform || 'boss',
+        byPlatform: {},
+        riskAccepted: options.riskAccepted === true
+      }),
+      savePlatformFields: async (platformId, fields) => {
+        if (options.onSavePlatform) options.onSavePlatform(platformId, fields);
+      },
+      setActivePlatform: async () => {}
+    },
     RunSafety: { canSwitchPlatform: () => true, canResetRun: () => true },
-    ApiPermissions: { ensure: async () => ({ ok: true }) }, DeliveryGuard: {},
-    getPlatform: () => ({ short: 'Boss', name: 'Boss', ready: true, tabQuery: [] }), defaultPlatformCfg: () => ({}),
+    ApiPermissions: { ensure: async () => ({ ok: true }) },
+    DeliveryGuard: {
+      DELIVERY_MODES: {
+        CONTACT_ONLY: 'CONTACT_ONLY',
+        CONTACT_AND_TRUSTEESHIP: 'CONTACT_AND_TRUSTEESHIP'
+      }
+    },
+    getPlatform: (platformId) => {
+      const id = platformId || options.activePlatform || 'boss';
+      return id === 'zhilian'
+        ? { id, short: '智联', name: '智联招聘', ready: true, tabQuery: [] }
+        : { id: 'boss', short: 'Boss', name: 'Boss 直聘', ready: true, tabQuery: [] };
+    },
+    defaultPlatformCfg: () => ({}),
     setTimeout, clearTimeout, FileReader: function () {}
   };
   context.globalThis = context;
+  const originalQuerySelectorAll = document.querySelectorAll.bind(document);
+  document.querySelectorAll = (selector) => selector === '.job-item:not(.skip) input:checked'
+    ? selectedInputs
+    : originalQuerySelectorAll(selector);
   vm.runInNewContext(script, context);
   await Promise.resolve(); await Promise.resolve();
   return {
@@ -226,6 +285,115 @@ async function loadFullSidepanel(options) {
     }
   };
 }
+
+test('Boss batch actions freeze one mode and stay mutually disabled until cancellation', async () => {
+  const h = await loadFullSidepanel({
+    activePlatform: 'boss',
+    riskAccepted: true,
+    selectedIds: ['job-1'],
+    state: { settings: { enabled: true, paused: false }, managedConversations: {}, pendingApprovalCount: 0 },
+    approvals: []
+  });
+  h.context.updateContactBtn();
+
+  assert.equal(h.ids.btnContact.disabled, false);
+  assert.equal(h.ids.btnContactAndTrusteeship.disabled, false);
+
+  await h.ids.btnContactAndTrusteeship.trigger('click');
+
+  const prepared = h.sent.find((message) => message.type === 'PREPARE_DELIVERY');
+  assert.equal(prepared.deliveryMode, 'CONTACT_AND_TRUSTEESHIP');
+  assert.equal(h.ids.btnContact.disabled, true);
+  assert.equal(h.ids.btnContactAndTrusteeship.disabled, true);
+  assert.match(h.ids.deliverySummary.innerHTML, /开启 AI 托管/);
+  assert.match(h.ids.btnConfirmDelivery.textContent, /联系并开启 AI 托管/);
+
+  await h.ids.btnCancelDelivery.trigger('click');
+  assert.equal(h.ids.btnContact.disabled, false);
+  assert.equal(h.ids.btnContactAndTrusteeship.disabled, false);
+});
+
+test('Zhili hides the unsupported contact-and-trusteeship batch action', async () => {
+  const h = await loadFullSidepanel({
+    activePlatform: 'zhilian',
+    riskAccepted: true,
+    selectedIds: ['job-1'],
+    state: { settings: { enabled: false, paused: false }, managedConversations: {}, pendingApprovalCount: 0 },
+    approvals: []
+  });
+
+  assert.equal(h.ids.btnContactAndTrusteeship.classList.contains('hidden'), true);
+});
+
+test('Boss 求职设置 saves before guiding to AI trusteeship without scanning', async () => {
+  const saved = [];
+  const h = await loadFullSidepanel({
+    riskAccepted: true,
+    state: { settings: { enabled: false, paused: false }, managedConversations: {}, pendingApprovalCount: 0 },
+    approvals: [],
+    onSavePlatform: (platformId, fields) => saved.push({ platformId, fields })
+  });
+  h.ids.keyword.value = '跨境电商运营';
+
+  await h.ids.btnToTrusteeship.trigger('click');
+
+  assert.equal(saved.length, 1);
+  assert.equal(saved[0].platformId, 'boss');
+  assert.equal(saved[0].fields.keyword, '跨境电商运营');
+  assert.ok(h.sent.some((message) => message.type === 'SAVE_API_CONFIG'));
+  assert.equal(h.sent.some((message) => message.type === 'START_COLLECT'), false);
+  assert.equal(h.ids['setup-trusteeship'].classList.contains('hidden'), false);
+  assert.match(h.ids.trusteeshipConfigMsg.textContent, /求职设置已保存/);
+});
+
+test('Boss final setup saves trusteeship before starting the existing scan flow', async () => {
+  const h = await loadFullSidepanel({
+    riskAccepted: true,
+    state: { settings: { enabled: false, paused: false }, managedConversations: {}, pendingApprovalCount: 0 },
+    approvals: []
+  });
+  h.ids.keyword.value = '跨境电商运营';
+  h.ids.trusteeshipEnabled.checked = true;
+
+  await h.ids.btnSaveTrusteeshipAndScan.trigger('click');
+
+  const types = h.sent.map((message) => message.type);
+  assert.ok(types.indexOf('TRUSTEESHIP_SAVE_SETTINGS') >= 0);
+  assert.ok(types.indexOf('START_COLLECT') > types.indexOf('TRUSTEESHIP_SAVE_SETTINGS'));
+});
+
+test('Boss final setup does not scan when trusteeship prerequisites fail', async () => {
+  const h = await loadFullSidepanel({
+    riskAccepted: true,
+    state: { settings: { enabled: false, paused: false }, managedConversations: {}, pendingApprovalCount: 0 },
+    approvals: [],
+    saveTrusteeship: () => ({
+      ok: false,
+      code: 'TRUSTEESHIP_PREREQUISITE_FAILED',
+      missing: ['feishuTest']
+    })
+  });
+  h.ids.keyword.value = '跨境电商运营';
+  h.ids.trusteeshipEnabled.checked = true;
+
+  await h.ids.btnSaveTrusteeshipAndScan.trigger('click');
+
+  assert.equal(h.sent.some((message) => message.type === 'START_COLLECT'), false);
+  assert.match(h.ids.trusteeshipConfigMsg.textContent, /飞书测试通知/);
+});
+
+test('智联 keeps direct scan and hides the unsupported AI trusteeship step', async () => {
+  const h = await loadFullSidepanel({
+    activePlatform: 'zhilian',
+    riskAccepted: true,
+    state: { settings: { enabled: false, paused: false }, managedConversations: {}, pendingApprovalCount: 0 },
+    approvals: []
+  });
+
+  assert.equal(h.ids.btnToTrusteeship.classList.contains('hidden'), true);
+  assert.equal(h.ids.btnSaveTrusteeshipAndScan.classList.contains('hidden'), true);
+  assert.equal(h.ids.btnScan.textContent, '保存并扫描智联岗位');
+});
 
 test('full sidepanel wiring keeps unknown outcomes visible and disables unsafe retries', async () => {
   const unknown = { approvalId: 'a-unknown', conversationId: 'conv-1', company: '甲'.repeat(40), position: '前端', hrName: '李', status: 'SEND_RESULT_UNKNOWN', stage: 'PAUSED', reasonCode: 'SEND_RESULT_UNKNOWN', messages: ['请核对发送结果'], fieldsNeeded: [], draft: '保留草稿' };

@@ -20,7 +20,23 @@ test('service worker requires a prepared one-time delivery intent', () => {
 test('confirmation consumes and revalidates the frozen intent job list', () => {
   assert.match(source, /deliveryIntentStore\.consume\(intentId\)/);
   assert.match(source, /DeliveryGuard\.assertIntentMatchesPlan\(intent, plan\)/);
-  assert.match(source, /runDeliver\(intent\.jobIds,\s*\{\s*reserved:\s*true\s*\}\)/);
+  assert.match(
+    source,
+    /runDeliver\(intent\.jobIds,\s*\{\s*reserved:\s*true,\s*deliveryMode:\s*intent\.deliveryMode\s*\}\)/
+  );
+});
+
+test('accepts delivery mode only when preparing and executes the frozen intent mode', () => {
+  assert.match(source, /prepareDelivery\(msg\.jobIds\s*\|\|\s*\[\],\s*msg\.deliveryMode\)/);
+  assert.match(source, /buildDeliveryPlan\(jobIds,\s*undefined,\s*deliveryMode\)/);
+  assert.match(
+    source,
+    /buildDeliveryPlan\(\s*intent\.jobIds,\s*intent\.platformId,\s*intent\.deliveryMode\s*\)/
+  );
+  assert.doesNotMatch(
+    source,
+    /CONFIRM_DELIVERY[\s\S]{0,250}msg\.deliveryMode/
+  );
 });
 
 test('publishes structured blocking metadata and stops on uncertain sends', () => {

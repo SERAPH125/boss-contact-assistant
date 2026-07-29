@@ -30,6 +30,93 @@ test('does not silently treat an unknown Zhilian city as nationwide', () => {
   );
 });
 
+test('parses small-city codes from the platforms official city catalogs', () => {
+  const bossCodes = SearchFilters.parseBossCityCatalog({
+    code: 0,
+    zpData: {
+      otherCitySites: [{ name: '金华', code: 101210900, url: '/jinhua/' }],
+      siteGroup: [],
+      siteList: []
+    }
+  });
+  const zhilianCodes = SearchFilters.parseZhilianCityCatalog({
+    code: 200,
+    data: {
+      allCity: [{
+        name: '浙江',
+        code: '540',
+        sublist: [{
+          name: '金华',
+          code: '659',
+          sublist: [{ name: '义乌市', code: '3376' }]
+        }]
+      }]
+    }
+  });
+
+  assert.equal(bossCodes['金华'], '101210900');
+  assert.equal(zhilianCodes['金华'], '659');
+  assert.equal(zhilianCodes['义乌'], undefined, 'districts must not shadow city names');
+});
+
+test('resolves uncached small cities from the official catalog and persists the result', async () => {
+  const writes = [];
+  const resolver = SearchFilters.createCityCatalogResolver({
+    now: () => 1_000,
+    readCache: async () => null,
+    writeCache: async (cache) => writes.push(cache),
+    fetchJson: async (url) => {
+      if (url.includes('zhipin.com')) {
+        return {
+          zpData: {
+            otherCitySites: [{ name: '测试城', code: 101999900 }],
+            siteGroup: [],
+            siteList: []
+          }
+        };
+      }
+      return {
+        data: {
+          allCity: [{
+            name: '浙江',
+            code: '540',
+            sublist: [{ name: '测试城', code: '999', sublist: [] }]
+          }]
+        }
+      };
+    }
+  });
+
+  assert.deepEqual(
+    await resolver.resolve('boss', '测试城市'),
+    { name: '测试城', code: '101999900', found: true, source: 'remote' }
+  );
+  assert.deepEqual(
+    await resolver.resolve('zhilian', '测试城'),
+    { name: '测试城', code: '999', found: true, source: 'remote' }
+  );
+  assert.equal(writes.length, 2);
+});
+
+test('keeps unknown cities fail-closed when the official catalog is unavailable', async () => {
+  const resolver = SearchFilters.createCityCatalogResolver({
+    readCache: async () => null,
+    writeCache: async () => {},
+    fetchJson: async () => {
+      throw new Error('offline');
+    }
+  });
+
+  assert.deepEqual(
+    await resolver.resolve('boss', '不存在市'),
+    { name: '不存在', code: '', found: false, source: 'unresolved' }
+  );
+  assert.deepEqual(
+    await resolver.resolve('zhilian', '不存在市'),
+    { name: '不存在', code: '', found: false, source: 'unresolved' }
+  );
+});
+
 test('matches Zhilian city, experience and education against parsed card fields', () => {
   const cfg = { city: '杭州', experience: '3-5年', education: '本科' };
   assert.deepEqual(

@@ -24,7 +24,7 @@
   "content_scripts": [
     {
       "matches": ["*://*.zhipin.com/web/geek/job*"],
-      "js": ["src/platform/boss/selectors.js", "src/humanize.js", "src/platform/boss/content-search.js"],
+      "js": ["src/platform/job-description.js", "src/platform/boss/selectors.js", "src/humanize.js", "src/platform/boss/content-search.js"],
       "run_at": "document_idle"
     },
     {
@@ -34,7 +34,7 @@
     },
     {
       "matches": ["*://*.zhaopin.com/sou*", "*://www.zhaopin.com/sou*", "*://*.zhaopin.com/jobdetail/*"],
-      "js": ["src/platform/search-filters.js", "src/platform/zhilian/selectors.js", "src/humanize.js", "src/platform/zhilian/content-search.js"],
+      "js": ["src/platform/search-filters.js", "src/platform/job-description.js", "src/platform/zhilian/selectors.js", "src/humanize.js", "src/platform/zhilian/content-search.js"],
       "run_at": "document_idle"
     },
     {

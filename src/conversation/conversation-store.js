@@ -960,6 +960,21 @@
         conversation.peerSource = ref.peerSource === 'encryptUid'
           ? 'encryptUid'
           : normalizePeerSource(conversation.peerSource || ref.peerSource);
+        if (ref.enabled === true &&
+          conversation.state === 'DISABLED' &&
+          !conversation.pendingApprovalId &&
+          !conversation.pendingReply &&
+          !conversation.pendingAutoClose &&
+          (!conversation.sendIntent ||
+            (conversation.sendIntent.status !== 'SENDING' &&
+              conversation.sendIntent.status !== 'SEND_RESULT_UNKNOWN'))) {
+          conversation.enabled = true;
+          conversation.state = 'WAITING_HR';
+          conversation.pauseCode = '';
+          conversation.pauseReason = '';
+          clearReadFailure(conversation);
+          clearClassificationRecovery(conversation);
+        }
         conversation.updatedAt = loaded.now;
         snapshot.managedConversations[id] = conversation;
         await persist(snapshot);

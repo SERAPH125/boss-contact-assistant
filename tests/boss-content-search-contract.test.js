@@ -18,6 +18,7 @@ test('Boss job page content script order stays search-ready', () => {
   );
   assert.ok(entry);
   assert.deepEqual(entry.js, [
+    'src/platform/job-description.js',
     'src/platform/boss/selectors.js',
     'src/humanize.js',
     'src/platform/boss/content-search.js'

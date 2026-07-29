@@ -307,3 +307,30 @@ ego-lite 对徐海霞会话的精确单次发送排查得到三组现场证据�
 - [get_jobs](https://github.com/loks666/get_jobs) 以 AI 匹配和岗位筛选组织求职流程。
 
 当前 UI 因此把用户可见的“审核”统一改为“岗位筛选”，同时保留内部 `review` 状态键，避免纯产品文案调整扩大为状态机迁移。
+
+## v0.3.6 小城市目录与职位描述筛选修复
+
+本轮先对照了 [GeekGeekRun](https://github.com/geekgeekrun/geekgeekrun) 的岗位匹配维度和 [boss-agent-cli](https://github.com/can4hou6joeng4/boss-agent-cli) 的岗位详情按需读取边界。前者把地点、岗位类型、职位描述和活跃度共同作为匹配输入；后者在卡片标签不足以判断时再读取完整岗位详情。项目没有复制其源码，也没有新增运行时依赖，仅复用“平台适配层归一化字段、需要完整语义时才读取详情”的架构原则。
+
+旧实现把 BOSS 和智联的城市代码写成少量静态常用城市：BOSS 未识别城市会错误回落到全国，智联则直接停止，因此“金华”等平台已经支持的城市无法正常搜索。修复后，Service Worker 分别读取 BOSS 官方城市目录 `city/site.json` 与智联官方搜索基础数据 `search/base/data`，统一解析为城市名→平台代码，并在 `chrome.storage.local` 缓存七天。实站只读核验确认金华在 BOSS 的代码为 `101210900`、在智联的代码为 `659`。空城市仍表示全国；非空城市若官方目录、有效缓存和内置回退均无法确认，则失败关闭，不再默默搜索全国。
+
+旧扫描只保存职位卡片字段，包含词、排除词和 AI 岗位判断都看不到职位描述；智联 `OPEN_JD` 甚至只是重新拼接卡片文本。修复新增共享的只读 `job-description` 适配层：只有设置包含词、排除词，或同时具备 API Key 与简历要点时，才以最多 3 个并发请求读取岗位详情。BOSS 只提取 `.job-detail-section .job-sec-text`，智联只提取 `.describtion-card__detail-content`，每个正文最多保留 6000 字，避免把公司介绍或整页噪声交给筛选器。关键词匹配和 AI 提示均使用归一化正文；读取失败会保存明确状态并在筛选理由中展示，不把失败伪装成空描述。
+
+自动化回归覆盖：两个官方目录的金华代码解析、远程目录持久缓存、未知城市失败关闭、两平台精确职位描述节点、并发与长度上限、读取失败状态、关键词文本和 AI 提示接线、Manifest 加载顺序及两平台内容脚本只读请求。实站证据只验证城市路由和详情正文读取，没有联系岗位或发送消息。
+
+## AI 托管飞书配置前置展示
+
+- [fent/chrome-options](https://github.com/fent/chrome-options) 使用结构化配置区块组织扩展设置，并让配置项的 DOM 顺序与用户操作顺序一致。
+- [n8n Webhook](https://github.com/n8n-io/n8n/blob/master/packages/nodes-base/nodes/Webhook/Webhook.node.ts) 在自动化启用前明确展示 Webhook 的测试与激活反馈。
+
+本项目据此把完整“飞书通知（Phase 1）”区块移动到 AI 托管说明之后、托管开关和 HR 常用问答之前，使用户先完成必需的通知配置。实现只改变 `src/sidepanel.html` 的原生 DOM 顺序，所有字段 ID、敏感值保存、测试通知、托管前置校验和发送逻辑均保持不变；没有复制开源代码，也没有新增依赖或权限。该调整同时沿用本地知识库 `技术复用/浏览器扩展-AI会话托管可靠性复盘.md` 的既有结论：飞书测试是托管运行的前置证明，UI 应优先呈现会阻止运行的必要配置。
+
+## 配置引导至岗位扫描
+
+- [Automa](https://github.com/AutomaApp/automa) 把自动化组成、配置与执行入口拆成明确步骤，同时保留用户直接控制执行的能力。
+- [Activepieces](https://github.com/activepieces/activepieces) 把连接配置、必填校验和 Human-in-the-loop 作为自动化运行前的显式组成部分。
+- [n8n credentials setup](https://github.com/n8n-io/n8n-docs/blob/main/docs/integrations/builtin/credentials/google/oauth-single-service.md) 使用连续步骤引导用户先完成凭据配置，再进入依赖凭据的后续功能。
+
+本项目据此把 BOSS 首次配置串联为“平台 → API → 求职设置 → AI 托管 → 扫描”，但保留“跳过 AI 托管，直接扫描 Boss 岗位”的次级入口；智联因不支持 AI 托管，仍从求职设置直接扫描。实现抽取了求职设置保存和唯一扫描函数，AI 托管最终入口只有在既有托管控制器保存成功后才调用 `START_COLLECT`，缺少 API 测试、回复依据、飞书测试或风险确认时继续使用原有缺项定位且不扫描。没有复制开源源码，也没有新增权限、接口或依赖。
+
+本地知识库 `技术复用/浏览器扩展-AI会话托管可靠性复盘.md` 的既有结论是：运行前置条件必须显式展示，失败需要精确指向缺项。本轮新增的产品结论是：首次使用应按依赖顺序引导，但不能剥夺只使用扫描与人工联系的轻量路径。

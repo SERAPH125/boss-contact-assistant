@@ -932,12 +932,31 @@ function refreshHeader() {
       '<div class="job-sub">主操作：' + m.actionWord + '</div>';
   }
   if ($('btnScan')) {
-    $('btnScan').textContent = m.ready ? ('保存并扫描' + m.short) : (m.short + '即将支持');
+    $('btnScan').textContent = !m.ready
+      ? (m.short + '即将支持')
+      : m.id === 'boss'
+        ? '跳过 AI 托管，直接扫描 Boss 岗位'
+        : '保存并扫描智联岗位';
     $('btnScan').disabled = runActive || !m.ready;
+    $('btnScan').classList.toggle('btn-go', m.id !== 'boss');
+    $('btnScan').classList.toggle('btn-ghost', m.id === 'boss');
+  }
+  if ($('btnToTrusteeship')) {
+    $('btnToTrusteeship').classList.toggle('hidden', m.id !== 'boss');
+    $('btnToTrusteeship').disabled = runActive || !m.ready;
+  }
+  if ($('btnSaveTrusteeshipAndScan')) {
+    $('btnSaveTrusteeshipAndScan').classList.toggle('hidden', m.id !== 'boss');
+    $('btnSaveTrusteeshipAndScan').disabled = runActive || !m.ready;
+  }
+  if ($('btnContactAndTrusteeship')) {
+    $('btnContactAndTrusteeship').classList.toggle('hidden', m.id !== 'boss');
   }
   if ($('scanHint')) {
     $('scanHint').textContent = m.ready
-      ? '保存本页后开始扫描；不会自动联系。完成后到「岗位筛选」勾选。意向与节奏按平台独立存储。'
+      ? m.id === 'boss'
+        ? '建议先完成 AI 托管配置；也可跳过托管直接扫描。扫描不会自动联系，完成后到「岗位筛选」勾选。'
+        : '保存本页后开始扫描智联岗位；不会自动联系。完成后到「岗位筛选」勾选。'
       : (m.short + ' 架构已预留，适配器尚未上线。请先用 Boss 或等待后续版本。');
   }
   if ($('filterPlatTitle')) {
@@ -1098,10 +1117,9 @@ if ($('hrFaqPresets') && !$('hrFaqPresets').querySelector('.hr-faq-preset')) {
   renderHrFaq([]);
 }
 
-$('btnSaveTrusteeship').addEventListener('click', async () => {
-  const button = $('btnSaveTrusteeship');
+async function saveTrusteeshipSettings(button) {
   const previousEnabled = (trusteeshipSnapshot.settings || {}).enabled === true;
-  button.disabled = true;
+  if (button) button.disabled = true;
   setTrusteeshipMessage('正在保存…');
   const controller = TrusteeshipSidepanel.createController({
     send: sendRuntimeMessage,
@@ -1115,12 +1133,18 @@ $('btnSaveTrusteeship').addEventListener('click', async () => {
       setTrusteeshipMessage('托管设置已保存。');
       await refreshTrusteeshipState();
     }
+    return response || { ok: false };
   } catch (_) {
     $('trusteeshipEnabled').checked = previousEnabled;
     setTrusteeshipMessage('保存失败：' + stableTrusteeshipError('SERVICE_WORKER_INTERRUPTED'));
+    return { ok: false, code: 'SERVICE_WORKER_INTERRUPTED' };
   } finally {
-    button.disabled = false;
+    if (button) button.disabled = false;
   }
+}
+
+$('btnSaveTrusteeship').addEventListener('click', async () => {
+  await saveTrusteeshipSettings($('btnSaveTrusteeship'));
 });
 
 $('btnTestFeishu').addEventListener('click', async () => {
@@ -1450,6 +1474,45 @@ async function saveFilter() {
   refreshUsage();
 }
 
+async function saveJobSetup() {
+  await saveApi();
+  await saveFilter();
+  const fields = collectPlatformFields();
+  if (!fields.keyword) {
+    showTab('setup');
+    showSetup('filter');
+    if ($('keyword')) $('keyword').focus();
+    throw new Error('请先填写目标岗位 / 关键词');
+  }
+  return fields;
+}
+
+async function startScan() {
+  if (!riskAccepted) {
+    $('riskModal').classList.remove('hidden');
+    addLog('请先确认使用须知', 'warn');
+    return false;
+  }
+  if (!meta().ready) {
+    addLog(meta().short + ' 尚未就绪', 'warn');
+    return false;
+  }
+  try {
+    await saveJobSetup();
+  } catch (e) {
+    if ($('scanHint')) $('scanHint').textContent = '无法开始扫描：' + e.message;
+    addLog('配置保存失败：' + e.message, 'error');
+    return false;
+  }
+  setLoginBanner(false);
+  hideRecovery();
+  showTab('run');
+  setRunning(true);
+  addLog('[' + meta().short + '] 开始扫描（不会自动联系）', 'info');
+  chrome.runtime.sendMessage({ type: 'START_COLLECT' });
+  return true;
+}
+
 if ($('provider')) {
   $('provider').addEventListener('change', () => {
     syncBaseUrlVisibility();
@@ -1510,28 +1573,25 @@ $('btnTestApi').addEventListener('click', async () => {
   });
 });
 
-$('btnScan').addEventListener('click', async () => {
-  if (!riskAccepted) {
-    $('riskModal').classList.remove('hidden');
-    return addLog('请先确认使用须知', 'warn');
-  }
-  if (!meta().ready) {
-    return addLog(meta().short + ' 尚未就绪', 'warn');
-  }
+$('btnToTrusteeship').addEventListener('click', async () => {
   try {
-    await saveApi();
+    await saveJobSetup();
   } catch (e) {
-    return addLog('API 配置保存失败：' + e.message, 'error');
+    if ($('scanHint')) $('scanHint').textContent = '保存失败：' + e.message;
+    return;
   }
-  await saveFilter();
-  const fields = collectPlatformFields();
-  if (!fields.keyword) return addLog('请先填岗位关键词', 'error');
-  setLoginBanner(false);
-  hideRecovery();
-  showTab('run');
-  setRunning(true);
-  addLog('[' + meta().short + '] 开始扫描（不会自动联系）', 'info');
-  chrome.runtime.sendMessage({ type: 'START_COLLECT' });
+  showSetup('trusteeship');
+  setTrusteeshipMessage('求职设置已保存，请继续完成 AI 托管配置。');
+});
+
+$('btnScan').addEventListener('click', async () => {
+  await startScan();
+});
+
+$('btnSaveTrusteeshipAndScan').addEventListener('click', async () => {
+  const response = await saveTrusteeshipSettings($('btnSaveTrusteeshipAndScan'));
+  if (!response || response.ok !== true) return;
+  await startScan();
 });
 
 function selectedIds() {
@@ -1551,9 +1611,14 @@ function formatDurationRange(minSec, maxSec) {
 function renderDeliveryPlan(plan) {
   const platform = getPlatform(plan.platformId || activePlatform);
   const resumeText = plan.sendsResumeImage ? '将尝试发送' : '未配置';
+  const enableTrusteeship =
+    plan.deliveryMode === DeliveryGuard.DELIVERY_MODES.CONTACT_AND_TRUSTEESHIP;
   $('deliverySummary').innerHTML =
     '<dl>' +
       '<div><dt>平台</dt><dd>' + esc(platform.short) + '</dd></div>' +
+      '<div><dt>后续处理</dt><dd>' +
+        (enableTrusteeship ? '联系成功后开启 AI 托管' : '仅联系，不开启 AI 托管') +
+      '</dd></div>' +
       '<div><dt>选择 / 实际联系</dt><dd>' + plan.selectedCount + ' / ' + plan.executableCount + '</dd></div>' +
       '<div><dt>已联系排除</dt><dd>' + plan.skippedProcessedCount + '</dd></div>' +
       '<div><dt>今日额度</dt><dd>' + plan.usageCount + ' / ' + plan.dailyLimit + '，完成后剩 ' + plan.remainingAfter + '</dd></div>' +
@@ -1564,7 +1629,9 @@ function renderDeliveryPlan(plan) {
   $('deliveryJobs').innerHTML = (plan.jobs || []).map((job) =>
     '<li><strong>' + esc(job.name) + '</strong><span>' + esc(job.company) + '</span></li>'
   ).join('');
-  $('btnConfirmDelivery').textContent = '确认联系这 ' + plan.executableCount + ' 个岗位';
+  $('btnConfirmDelivery').textContent = enableTrusteeship
+    ? '确认联系并开启 AI 托管（' + plan.executableCount + '）'
+    : '确认联系这 ' + plan.executableCount + ' 个岗位';
 }
 
 function openDeliveryModal(intentId, plan) {
@@ -1575,6 +1642,7 @@ function openDeliveryModal(intentId, plan) {
   $('deliveryModal').classList.remove('hidden');
   $('btnConfirmDelivery').disabled = false;
   $('btnCancelDelivery').disabled = false;
+  updateContactBtn();
   $('btnConfirmDelivery').focus();
 }
 
@@ -1588,6 +1656,7 @@ function hideDeliveryModal() {
     deliveryModalReturnFocus.focus();
   }
   deliveryModalReturnFocus = null;
+  updateContactBtn();
 }
 
 async function cancelDeliveryConfirmation() {
@@ -1605,27 +1674,41 @@ async function cancelDeliveryConfirmation() {
 
 function updateContactBtn() {
   const n = selectedIds().length;
-  const btn = $('btnContact');
+  const contact = $('btnContact');
+  const contactAndTrusteeship = $('btnContactAndTrusteeship');
+  const locked = runActive || !!pendingDeliveryIntentId || deliveryConfirmationSubmitting;
   if (n === 0) {
-    btn.disabled = true;
-    btn.textContent = '请先勾选岗位';
+    contact.disabled = true;
+    contact.textContent = '请先勾选岗位';
+    if (contactAndTrusteeship) {
+      contactAndTrusteeship.disabled = true;
+      contactAndTrusteeship.textContent = '联系已选并开启 AI 托管';
+    }
   } else {
-    btn.disabled = false;
-    btn.textContent = '联系已选 (' + n + ')';
+    contact.disabled = locked;
+    contact.textContent = '联系已选 (' + n + ')';
+    if (contactAndTrusteeship) {
+      contactAndTrusteeship.disabled = locked || activePlatform !== 'boss';
+      contactAndTrusteeship.textContent = '联系已选并开启 AI 托管 (' + n + ')';
+    }
   }
 }
 
-$('btnContact').addEventListener('click', async () => {
+async function prepareSelectedDelivery(deliveryMode, sourceButton) {
   if (!riskAccepted) {
     $('riskModal').classList.remove('hidden');
     return addLog('请先确认使用须知', 'warn');
   }
   const ids = selectedIds();
   if (!ids.length) return;
-  $('btnContact').disabled = true;
-  $('btnContact').textContent = '正在生成确认单…';
+  sourceButton.disabled = true;
+  sourceButton.textContent = '正在生成确认单…';
   try {
-    const response = await sendRuntimeMessage({ type: 'PREPARE_DELIVERY', jobIds: ids });
+    const response = await sendRuntimeMessage({
+      type: 'PREPARE_DELIVERY',
+      jobIds: ids,
+      deliveryMode: deliveryMode
+    });
     if (!response.ok) {
       addLog((response.error || '无法生成确认单') + '；' + (response.nextAction || '请重新扫描'), 'error');
       return;
@@ -1636,6 +1719,20 @@ $('btnContact').addEventListener('click', async () => {
   } finally {
     updateContactBtn();
   }
+}
+
+$('btnContact').addEventListener('click', async () => {
+  await prepareSelectedDelivery(
+    DeliveryGuard.DELIVERY_MODES.CONTACT_ONLY,
+    $('btnContact')
+  );
+});
+
+$('btnContactAndTrusteeship').addEventListener('click', async () => {
+  await prepareSelectedDelivery(
+    DeliveryGuard.DELIVERY_MODES.CONTACT_AND_TRUSTEESHIP,
+    $('btnContactAndTrusteeship')
+  );
 });
 
 $('btnCancelDelivery').addEventListener('click', () => {
@@ -1754,7 +1851,13 @@ $('clearLog').addEventListener('click', () => { $('log').innerHTML = ''; });
 function setRunning(running) {
   runActive = !!running;
   $('btnScan').disabled = running || !meta().ready;
+  if ($('btnToTrusteeship')) $('btnToTrusteeship').disabled = running || !meta().ready;
+  if ($('btnSaveTrusteeshipAndScan')) $('btnSaveTrusteeshipAndScan').disabled = running || !meta().ready;
   $('btnContact').disabled = running || selectedIds().length === 0;
+  if ($('btnContactAndTrusteeship')) {
+    $('btnContactAndTrusteeship').disabled =
+      running || selectedIds().length === 0 || activePlatform !== 'boss';
+  }
   $('btnPause').disabled = !running;
   $('btnStop').disabled = !running;
   $('btnReset').disabled = !!running;

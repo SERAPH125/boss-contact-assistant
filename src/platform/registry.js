@@ -40,15 +40,27 @@
         activityMaxDays: '7'
       }),
       buildSearchUrl: function (cfg) {
-        var firstCity = (cfg.city || '').split(/[\/、,，\s]+/)[0].replace(/[市省]$/, '') || '';
-        var code = (typeof CITY_MAP !== 'undefined' && CITY_MAP[firstCity]) || '100010000';
+        var city = cfg && cfg.resolvedCityCode
+          ? {
+              name: SearchFilters.firstCity(cfg.city),
+              code: String(cfg.resolvedCityCode),
+              found: true
+            }
+          : SearchFilters.resolveBossCity(cfg && cfg.city);
+        if (!city.found) throw new Error('Boss 暂无法识别城市“' + city.name + '”');
+        var code = city.code;
         var params = new URLSearchParams({ query: cfg.keyword || '', city: code });
         return 'https://www.zhipin.com/web/geek/jobs?' + params.toString();
       },
       resolveCityLabel: function (cfg) {
-        var firstCity = (cfg.city || '').split(/[\/、,，\s]+/)[0].replace(/[市省]$/, '') || '';
-        var code = (typeof CITY_MAP !== 'undefined' && CITY_MAP[firstCity]) || '100010000';
-        return { name: firstCity, found: code !== '100010000' || firstCity === '全国' };
+        var city = cfg && cfg.resolvedCityCode
+          ? {
+              name: SearchFilters.firstCity(cfg.city),
+              code: String(cfg.resolvedCityCode),
+              found: true
+            }
+          : SearchFilters.resolveBossCity(cfg && cfg.city);
+        return { name: city.name, code: city.code, found: city.found };
       }
     },
     zhilian: {
@@ -74,8 +86,14 @@
         return SearchFilters.buildZhilianSearchUrl(cfg);
       },
       resolveCityLabel: function (cfg) {
-        var city = SearchFilters.resolveZhilianCity(cfg.city);
-        return { name: city.name, found: !!city.name && city.found };
+        var city = cfg && cfg.resolvedCityCode
+          ? {
+              name: SearchFilters.firstCity(cfg.city),
+              code: String(cfg.resolvedCityCode),
+              found: true
+            }
+          : SearchFilters.resolveZhilianCity(cfg && cfg.city);
+        return { name: city.name, code: city.code, found: city.found };
       }
     }
   };

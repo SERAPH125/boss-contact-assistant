@@ -6,6 +6,10 @@
 })(typeof globalThis !== 'undefined' ? globalThis : self, function () {
   var INTENT_KEY = 'sw_pending_delivery';
   var INTENT_TTL_MS = 120000;
+  var DELIVERY_MODES = {
+    CONTACT_ONLY: 'CONTACT_ONLY',
+    CONTACT_AND_TRUSTEESHIP: 'CONTACT_AND_TRUSTEESHIP'
+  };
 
   var GUIDANCE = {
     NO_SELECTION: {
@@ -19,6 +23,14 @@
     PLATFORM_MISMATCH: {
       message: '岗位与当前平台不一致',
       nextAction: '重新扫描当前平台'
+    },
+    DELIVERY_MODE_INVALID: {
+      message: '批次联系模式无效',
+      nextAction: '返回岗位筛选并重新选择联系方式'
+    },
+    TRUSTEESHIP_PLATFORM_UNSUPPORTED: {
+      message: '当前平台暂不支持 AI 托管',
+      nextAction: '使用“联系已选”，或切换到 Boss'
     },
     NO_AVAILABLE_JOBS: {
       message: '所选岗位都已联系过',
@@ -103,6 +115,17 @@
     return result;
   }
 
+  function normalizeDeliveryMode(value) {
+    if (value === undefined || value === null || value === '') {
+      return DELIVERY_MODES.CONTACT_ONLY;
+    }
+    if (value === DELIVERY_MODES.CONTACT_ONLY ||
+      value === DELIVERY_MODES.CONTACT_AND_TRUSTEESHIP) {
+      return value;
+    }
+    throw runError('DELIVERY_MODE_INVALID');
+  }
+
   function boundedInt(value, fallback, min) {
     var parsed = parseInt(value, 10);
     if (!Number.isFinite(parsed)) parsed = fallback;
@@ -144,6 +167,11 @@
   function prepare(input) {
     var data = input || {};
     var platformId = data.platformId || '';
+    var deliveryMode = normalizeDeliveryMode(data.deliveryMode);
+    if (deliveryMode === DELIVERY_MODES.CONTACT_AND_TRUSTEESHIP &&
+      platformId !== 'boss') {
+      throw runError('TRUSTEESHIP_PLATFORM_UNSUPPORTED');
+    }
     var selectedIds = normalizeIds(data.selectedIds);
     if (!selectedIds.length) throw runError('NO_SELECTION');
 
@@ -180,6 +208,7 @@
     var wait = estimateWaitSeconds(executableIds.length, data);
     return {
       platformId: platformId,
+      deliveryMode: deliveryMode,
       selectedIds: selectedIds,
       executableIds: executableIds,
       selectedCount: selectedIds.length,
@@ -206,6 +235,10 @@
   function assertIntentMatchesPlan(intent, plan) {
     if (!intent || intent.platformId !== (plan && plan.platformId)) {
       throw runError('PLATFORM_MISMATCH');
+    }
+    if (normalizeDeliveryMode(intent.deliveryMode) !==
+      normalizeDeliveryMode(plan && plan.deliveryMode)) {
+      throw runError('STALE_REVIEW');
     }
     var frozenIds = normalizeIds(intent.jobIds);
     var currentIds = normalizeIds(plan && plan.executableIds);
@@ -241,6 +274,7 @@
         var intent = {
           id: makeId(),
           platformId: safePlan.platformId || '',
+          deliveryMode: normalizeDeliveryMode(safePlan.deliveryMode),
           jobIds: normalizeIds(safePlan.executableIds),
           createdAt: timestamp,
           expiresAt: timestamp + INTENT_TTL_MS,
@@ -312,10 +346,12 @@
   return {
     INTENT_KEY: INTENT_KEY,
     INTENT_TTL_MS: INTENT_TTL_MS,
+    DELIVERY_MODES: DELIVERY_MODES,
     assertIntentMatchesPlan: assertIntentMatchesPlan,
     createIntentStore: createIntentStore,
     estimateWaitSeconds: estimateWaitSeconds,
     guidanceFor: guidanceFor,
+    normalizeDeliveryMode: normalizeDeliveryMode,
     normalizeIds: normalizeIds,
     prepare: prepare,
     runError: runError

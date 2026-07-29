@@ -125,6 +125,38 @@ test('registers a contact disabled and refuses unreliable references', async () 
   assert.equal(snapshot.managedConversations['conv-1'].company, '甲公司');
 });
 
+test('registration can enable a fresh contact but never reopens ended unmatched', async () => {
+  const fresh = makeHarness();
+  const enabled = await fresh.store.registerConversation(reliableRef({
+    enabled: true
+  }));
+  assert.equal(enabled.enabled, true);
+  assert.equal(enabled.state, 'WAITING_HR');
+
+  const ended = makeHarness();
+  await registerAndEnable(ended);
+  await ended.store.beginMessage('conv-1', 'fp-ended-registration');
+  const close = await ended.store.createAutoCloseIntent(
+    'conv-1',
+    'fp-ended-registration',
+    '好的，感谢您的回复，祝工作顺利。'
+  );
+  await ended.store.completeSend(close.intentId, {
+    success: true,
+    targetConversationId: 'conv-1',
+    sentFingerprint: 'outgoing:ended-registration',
+    observedAt: Date.parse('2026-07-24T08:00:01+08:00')
+  });
+
+  const unchanged = await ended.store.registerConversation(reliableRef({
+    enabled: true,
+    company: '甲公司更新'
+  }));
+  assert.equal(unchanged.enabled, false);
+  assert.equal(unchanged.state, 'ENDED_UNMATCHED');
+  assert.equal(unchanged.company, '甲公司更新');
+});
+
 test('migrates a legacy DOM conversation key onto encryptUid peer id with aliases', async () => {
   const harness = makeHarness();
   await harness.store.registerConversation(reliableRef({

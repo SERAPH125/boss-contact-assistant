@@ -9,9 +9,10 @@
     return typeof fallback === 'string' ? fallback.trim() : '';
   }
 
-  function fromSuccessfulContact(job, result) {
+  function fromSuccessfulContact(job, result, options) {
     var sourceJob = job && typeof job === 'object' ? job : {};
     var sourceResult = result && typeof result === 'object' ? result : {};
+    var config = options && typeof options === 'object' ? options : {};
     var conversationRef = sourceResult.conversationRef &&
       typeof sourceResult.conversationRef === 'object'
       ? sourceResult.conversationRef
@@ -31,6 +32,7 @@
         ? conversationRef.peerUid
         : '',
       peerSource: 'encryptUid',
+      enabled: config.enableTrusteeship === true,
       initialIncomingFingerprint:
         typeof sourceResult.baselineIncomingFingerprint === 'string'
           ? sourceResult.baselineIncomingFingerprint

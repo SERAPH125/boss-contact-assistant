@@ -45,6 +45,32 @@ test('provides an accessible AI trusteeship settings pane', () => {
   assert.match(html, /风控\/封号/);
 });
 
+test('places Feishu setup before other AI trusteeship controls', () => {
+  const paneIdx = html.indexOf('id="setup-trusteeship"');
+  const feishuIdx = html.indexOf('id="feishuEnabled"');
+  const settingsIdx = html.indexOf('id="trusteeshipEnabled"');
+  const faqIdx = html.indexOf('id="secHrFaq"');
+  assert.ok(paneIdx >= 0);
+  assert.ok(feishuIdx > paneIdx && feishuIdx < settingsIdx);
+  assert.ok(feishuIdx < faqIdx);
+});
+
+test('guides Boss setup through AI trusteeship before the final scan', () => {
+  for (const id of [
+    'btnToTrusteeship',
+    'btnScan',
+    'btnSaveTrusteeshipAndScan'
+  ]) {
+    assert.match(html, new RegExp('id="' + id + '"'));
+  }
+  assert.match(html, /保存并下一步：AI 托管/);
+  assert.match(html, /跳过 AI 托管，直接扫描 Boss 岗位/);
+  assert.match(html, /保存全部配置并扫描 Boss 岗位/);
+  assert.match(script, /showSetup\('trusteeship'\)/);
+  assert.match(script, /TRUSTEESHIP_SAVE_SETTINGS/);
+  assert.match(script, /START_COLLECT/);
+});
+
 test('provides an approval workbench without regressing the delivery dialog', () => {
   for (const id of ['page-approvals', 'approvalBadge', 'approvalList', 'approvalEmpty', 'approvalStatus']) {
     assert.match(html, new RegExp('id="' + id + '"'));

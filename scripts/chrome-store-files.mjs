@@ -29,6 +29,7 @@ export const CHROME_STORE_FILES = Object.freeze([
   'src/conversation/trusteeship-policy.js',
   'src/conversation/trusteeship-runtime.js',
   'src/platform/config.js',
+  'src/platform/job-description.js',
   'src/platform/registry.js',
   'src/platform/search-filters.js',
   'src/platform/boss/content-chat.js',

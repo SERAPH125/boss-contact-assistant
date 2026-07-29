@@ -70,6 +70,15 @@
         <div class="setup-pane hidden" id="setup-trusteeship">
           <h2 class="pane-title">AI 对话托管</h2>
           <p class="hint">全局默认开启；每个已登记岗位仍需单独开启才会被低频检查。未完成 API / 回复依据 / 飞书测试前不会真正监控。</p>
+          <h3>飞书通知（Phase 1）</h3>
+          <label class="check-row" for="feishuEnabled"><input type="checkbox" id="feishuEnabled"> 启用飞书待确认通知</label>
+          <label for="feishuWebhook">飞书 Webhook 地址</label>
+          <div class="sensitive-row"><input type="password" id="feishuWebhook" autocomplete="off"><button type="button" class="btn-mini" id="btnToggleFeishuWebhook" aria-pressed="false" aria-controls="feishuWebhook" aria-label="暂时显示飞书 Webhook" data-sensitive-name="飞书 Webhook">暂时显示</button></div>
+          <label for="feishuSigningSecret">签名密钥（可选）</label>
+          <div class="sensitive-row"><input type="password" id="feishuSigningSecret" autocomplete="off"><button type="button" class="btn-mini" id="btnToggleFeishuSecret" aria-pressed="false" aria-controls="feishuSigningSecret" aria-label="暂时显示签名密钥" data-sensitive-name="签名密钥">暂时显示</button></div>
+          <p class="risk-note">Webhook、签名密钥和 API Key 只保存在浏览器本地，不是系统钥匙链。自动化仍可能触发平台风控/封号；飞书 Phase 1 只通知，确认仍在插件内完成。</p>
+          <button type="button" class="btn-ghost" id="btnTestFeishu">发送飞书测试通知</button>
+          <hr class="form-divider">
           <label class="check-row" for="trusteeshipEnabled"><input type="checkbox" id="trusteeshipEnabled" checked> 开启 AI 对话托管</label>
           <div class="row">
             <div class="col">
@@ -100,15 +109,8 @@
             <button type="button" class="btn-ghost" id="btnAddHrFaq">添加自定义问答</button>
           </section>
           <hr class="form-divider">
-          <h3>飞书通知（Phase 1）</h3>
-          <label class="check-row" for="feishuEnabled"><input type="checkbox" id="feishuEnabled"> 启用飞书待确认通知</label>
-          <label for="feishuWebhook">飞书 Webhook 地址</label>
-          <div class="sensitive-row"><input type="password" id="feishuWebhook" autocomplete="off"><button type="button" class="btn-mini" id="btnToggleFeishuWebhook" aria-pressed="false" aria-controls="feishuWebhook" aria-label="暂时显示飞书 Webhook" data-sensitive-name="飞书 Webhook">暂时显示</button></div>
-          <label for="feishuSigningSecret">签名密钥（可选）</label>
-          <div class="sensitive-row"><input type="password" id="feishuSigningSecret" autocomplete="off"><button type="button" class="btn-mini" id="btnToggleFeishuSecret" aria-pressed="false" aria-controls="feishuSigningSecret" aria-label="暂时显示签名密钥" data-sensitive-name="签名密钥">暂时显示</button></div>
-          <p class="risk-note">Webhook、签名密钥和 API Key 只保存在浏览器本地，不是系统钥匙链。自动化仍可能触发平台风控/封号；飞书 Phase 1 只通知，确认仍在插件内完成。</p>
-          <button type="button" class="btn-ghost" id="btnTestFeishu">发送飞书测试通知</button>
           <button type="button" class="btn-primary" id="btnSaveTrusteeship">保存托管设置</button>
+          <button type="button" class="btn-go" id="btnSaveTrusteeshipAndScan">保存全部配置并扫描 Boss 岗位</button>
           <button type="button" class="btn-go" id="btnRunTrusteeshipNow">立即检查已登记岗位</button>
           <details class="trusteeship-live-drill" id="trusteeshipLiveDrill">
             <summary>真实外发演练</summary>
@@ -237,8 +239,11 @@
             <input type="number" id="batchRestMaxSec" value="90" min="20" max="900">
           </section>
 
-          <button type="button" class="btn-go" id="btnScan">保存并扫描</button>
-          <p class="hint" id="scanHint">将保存本页设置后开始扫描；扫描不会自动联系，完成后请到「岗位筛选」勾选。</p>
+          <div class="setup-next-actions">
+            <button type="button" class="btn-primary" id="btnToTrusteeship">保存并下一步：AI 托管 →</button>
+            <button type="button" class="btn-ghost" id="btnScan">跳过 AI 托管，直接扫描 Boss 岗位</button>
+          </div>
+          <p class="hint" id="scanHint" aria-live="polite">建议先完成 AI 托管配置；也可跳过托管直接扫描。扫描不会自动联系，完成后请到「岗位筛选」勾选。</p>
         </div>
       </section>
 
@@ -252,7 +257,10 @@
         </div>
         <p class="hint review-hint">点职位名可在站点打开详情；点其余区域勾选。仅显示当前平台结果。</p>
         <div id="reviewList" class="review-list"><div class="empty">先到「配置 → 求职设置」填写意向并扫描岗位</div></div>
-        <button type="button" class="btn-go" id="btnContact" disabled>请先勾选岗位</button>
+        <div class="delivery-actions" id="deliveryActions" aria-label="已选岗位联系动作">
+          <button type="button" class="btn-ghost" id="btnContact" disabled>请先勾选岗位</button>
+          <button type="button" class="btn-go" id="btnContactAndTrusteeship" disabled>联系已选并开启 AI 托管</button>
+        </div>
       </section>
 
       <section class="page hidden" id="page-approvals" data-page="approvals">

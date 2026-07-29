@@ -181,7 +181,7 @@ input[type=file] { width: 100%; font-size: 12px; }
 .btn-primary:hover { background: #095a7d; }
 .btn-go { background: #c45c06; color: #fff; }
 .btn-go:hover { background: #a34c05; }
-.btn-go:disabled, .btn-primary:disabled {
+.btn-go:disabled, .btn-primary:disabled, .btn-ghost:disabled {
   background: #d1d5db; color: #6b7280; cursor: not-allowed; opacity: 0.9;
 }
 .btn-ghost {
@@ -195,6 +195,8 @@ input[type=file] { width: 100%; font-size: 12px; }
 .review-head { display: flex; justify-content: space-between; align-items: center; gap: 8px; margin-bottom: 4px; }
 .review-actions { display: flex; gap: 6px; }
 .review-hint { margin: 0 0 8px; }
+.delivery-actions { display: grid; gap: 8px; margin-top: 10px; }
+.delivery-actions .btn-go, .delivery-actions .btn-ghost { margin-top: 0; }
 .review-list { max-height: calc(100vh - 220px); overflow-y: auto; background: #fff; border: 1px solid #e5e8eb; border-radius: 8px; }
 .empty { padding: 24px 12px; text-align: center; color: #999; }
 .job-item {

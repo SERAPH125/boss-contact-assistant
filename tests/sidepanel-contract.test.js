@@ -26,6 +26,20 @@ test('uses prepare, confirm, and cancel messages without the legacy start entry'
   assert.doesNotMatch(script, /type:\s*'START_DELIVER'/);
 });
 
+test('renders two mutually exclusive Boss batch actions and freezes their mode in preparation', () => {
+  assert.match(html, /id="deliveryActions"/);
+  assert.match(html, /id="btnContact"[^>]*>请先勾选岗位/);
+  assert.match(html, /id="btnContactAndTrusteeship"[^>]*>联系已选并开启 AI 托管/);
+  assert.match(script, /DeliveryGuard\.DELIVERY_MODES\.CONTACT_ONLY/);
+  assert.match(script, /DeliveryGuard\.DELIVERY_MODES\.CONTACT_AND_TRUSTEESHIP/);
+  assert.match(
+    script,
+    /type:\s*'PREPARE_DELIVERY',\s*jobIds:\s*ids,\s*deliveryMode:\s*deliveryMode/
+  );
+  assert.match(script, /plan\.deliveryMode/);
+  assert.match(css, /\.delivery-actions/);
+});
+
 test('provides keyboard and assistive-technology semantics', () => {
   assert.match(html, /id="log"[^>]*role="log"[^>]*aria-live="polite"/);
   assert.match(script, /event\.key === 'Escape'/);

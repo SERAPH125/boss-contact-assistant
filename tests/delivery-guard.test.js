@@ -47,6 +47,40 @@ test('prepares one batch while excluding previously contacted jobs', () => {
   assert.equal(plan.skippedProcessedCount, 1);
   assert.equal(plan.remainingAfter, 16);
   assert.equal(plan.sendsResumeImage, true);
+  assert.equal(plan.deliveryMode, 'CONTACT_ONLY');
+});
+
+test('accepts only the two explicit mutually exclusive delivery modes', () => {
+  const trusteeshipPlan = DeliveryGuard.prepare({
+    platformId: 'boss',
+    deliveryMode: 'CONTACT_AND_TRUSTEESHIP',
+    selectedIds: ['a'],
+    jobs,
+    processed: {},
+    usageCount: 0,
+    dailyLimit: 20
+  });
+
+  assert.equal(trusteeshipPlan.deliveryMode, 'CONTACT_AND_TRUSTEESHIP');
+  assert.throws(() => DeliveryGuard.prepare({
+    platformId: 'boss',
+    deliveryMode: 'CONTACT_AND_SOMETHING_ELSE',
+    selectedIds: ['a'],
+    jobs,
+    processed: {},
+    usageCount: 0,
+    dailyLimit: 20
+  }), (error) => error.code === 'DELIVERY_MODE_INVALID');
+
+  assert.throws(() => DeliveryGuard.prepare({
+    platformId: 'zhilian',
+    deliveryMode: 'CONTACT_AND_TRUSTEESHIP',
+    selectedIds: ['z'],
+    jobs,
+    processed: {},
+    usageCount: 0,
+    dailyLimit: 20
+  }), (error) => error.code === 'TRUSTEESHIP_PLATFORM_UNSUPPORTED');
 });
 
 test('rejects empty, stale, and cross-platform selections', () => {
@@ -142,6 +176,7 @@ test('creates a two-minute intent that freezes the executable job list', async (
 
   const created = await store.create({
     platformId: 'boss',
+    deliveryMode: 'CONTACT_AND_TRUSTEESHIP',
     executableIds: ['a', 'b'],
     selectedCount: 2,
     executableCount: 2,
@@ -151,8 +186,10 @@ test('creates a two-minute intent that freezes the executable job list', async (
   assert.equal(created.id, 'intent-1');
   assert.equal(created.expiresAt, 121000);
   assert.deepEqual(created.jobIds, ['a', 'b']);
+  assert.equal(created.deliveryMode, 'CONTACT_AND_TRUSTEESHIP');
   assert.equal(created.status, 'pending');
   assert.deepEqual(storage.data.sw_pending_delivery.jobIds, ['a', 'b']);
+  assert.equal(storage.data.sw_pending_delivery.deliveryMode, 'CONTACT_AND_TRUSTEESHIP');
 });
 
 test('consumes one intent exactly once even when two consumers race', async () => {
@@ -232,20 +269,33 @@ test('a new intent invalidates the previously pending confirmation', async () =>
   );
 });
 
-test('requires the consumed intent to match the freshly rebuilt plan', () => {
-  const intent = { platformId: 'boss', jobIds: ['a', 'b'] };
+test('requires the consumed intent and its mutually exclusive mode to match the rebuilt plan', () => {
+  const intent = {
+    platformId: 'boss',
+    deliveryMode: 'CONTACT_AND_TRUSTEESHIP',
+    jobIds: ['a', 'b']
+  };
   DeliveryGuard.assertIntentMatchesPlan(intent, {
     platformId: 'boss',
+    deliveryMode: 'CONTACT_AND_TRUSTEESHIP',
     executableIds: ['a', 'b']
   });
 
   assert.throws(() => DeliveryGuard.assertIntentMatchesPlan(intent, {
     platformId: 'boss',
+    deliveryMode: 'CONTACT_AND_TRUSTEESHIP',
     executableIds: ['a']
   }), (error) => error.code === 'STALE_REVIEW');
 
   assert.throws(() => DeliveryGuard.assertIntentMatchesPlan(intent, {
     platformId: 'zhilian',
+    deliveryMode: 'CONTACT_AND_TRUSTEESHIP',
     executableIds: ['a', 'b']
   }), (error) => error.code === 'PLATFORM_MISMATCH');
+
+  assert.throws(() => DeliveryGuard.assertIntentMatchesPlan(intent, {
+    platformId: 'boss',
+    deliveryMode: 'CONTACT_ONLY',
+    executableIds: ['a', 'b']
+  }), (error) => error.code === 'STALE_REVIEW');
 });

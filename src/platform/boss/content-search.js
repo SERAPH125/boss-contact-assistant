@@ -158,6 +158,21 @@
     };
   }
 
+  async function enrichDescriptions(jobs) {
+    return JobDescription.enrichJobs('boss', jobs, {
+      concurrency: 3,
+      maxChars: 6000,
+      fetchHtml: async (link) => {
+        const response = await fetch(link, {
+          credentials: 'include',
+          cache: 'no-store'
+        });
+        if (!response.ok) throw new Error('职位详情 HTTP ' + response.status);
+        return response.text();
+      }
+    });
+  }
+
   async function scrape(count, opts) {
     opts = opts || {};
     await dismissCommonDialogs();
@@ -219,10 +234,16 @@
           : '未扫到岗位卡片。请确认已登录且在职位列表页，或刷新后重试'
       };
     }
+    let output = jobs.slice(0, count);
+    if (opts.includeDescription) {
+      output = await enrichDescriptions(output);
+    }
     return {
       success: true,
-      jobs: jobs.slice(0, count),
-      skippedInactive: skippedInactive.length
+      jobs: output,
+      skippedInactive: skippedInactive.length,
+      descriptionLoaded: output.filter((job) => job.descriptionStatus === 'loaded').length,
+      descriptionFailed: output.filter((job) => job.descriptionStatus === 'failed').length
     };
   }
 
@@ -265,22 +286,18 @@
     if (dlg0.blocked) return dlg0.blocked;
     const blocked = detectBlock();
     if (blocked) return blocked;
-    const card = findCardByJob(job);
-    if (!card) return { success: false, staleReview: true, error: '未找到岗位卡片' };
-    card.scrollIntoView({ block: 'center' });
-    await sleep(400);
-    if (typeof Humanize !== 'undefined') await Humanize.humanClick(card);
-    else card.click();
-    await sleep(1600);
-    await dismissCommonDialogs();
-    let jd = '';
-    const det = document.querySelector('.job-detail-box, [class*="job-detail"], .detail-content, .job-detail');
-    if (det) jd = (det.innerText || '').trim();
-    if (!jd) {
-      const secs = document.querySelectorAll('.job-sec-text, [class*="job-sec"], [class*="job-desc"]');
-      jd = Array.from(secs).map(s => (s.innerText || '').trim()).filter(Boolean).join('\n');
+    if (job && job.descriptionStatus === 'loaded' && job.description) {
+      return { success: true, jd: job.description.slice(0, 1800) };
     }
-    return { success: true, jd: jd.slice(0, 1800) };
+    const enriched = await enrichDescriptions([job]);
+    const detail = enriched[0];
+    if (!detail || detail.descriptionStatus !== 'loaded') {
+      return {
+        success: false,
+        error: (detail && detail.descriptionError) || '职位描述读取失败'
+      };
+    }
+    return { success: true, jd: detail.description.slice(0, 1800) };
   }
 
   async function goChat(job) {
@@ -355,12 +372,19 @@
     if (msg.type === 'SCRAPE') {
       scrape(msg.count || 20, {
         filterInactive: msg.filterInactive,
-        activityMaxDays: msg.activityMaxDays
+        activityMaxDays: msg.activityMaxDays,
+        includeDescription: msg.includeDescription === true
       }).then((r) => {
         if (r.needLogin) sendResponse({ success: false, needLogin: true, error: r.error });
         else if (r.blocked) sendResponse({ success: false, blocked: true, reason: r.reason, error: r.reason });
         else if (r.success === false) sendResponse(r);
-        else if (r.jobs) sendResponse({ success: true, jobs: r.jobs, skippedInactive: r.skippedInactive || 0 });
+        else if (r.jobs) sendResponse({
+          success: true,
+          jobs: r.jobs,
+          skippedInactive: r.skippedInactive || 0,
+          descriptionLoaded: r.descriptionLoaded || 0,
+          descriptionFailed: r.descriptionFailed || 0
+        });
         else sendResponse({ success: false, error: '未知扫描结果' });
       }).catch(e => sendResponse({ success: false, error: e.message }));
       return true;
