@@ -167,3 +167,38 @@ test('does not cancel an ordinary HTTPS link default action', async () => {
   assert.equal(clickEvent.defaultPrevented, false);
   assert.equal(fixture.href, 'https://www.zhipin.com/job_detail/example.html');
 });
+
+test('aborts before dispatch when the caller revalidation guard fails', async () => {
+  const fixture = clickableFixture('https://www.zhipin.com/job_detail/example.html', false);
+
+  const clicked = await loadHumanize().humanClick(fixture.target, {
+    beforeDispatch() {
+      return false;
+    }
+  });
+
+  assert.equal(clicked, false);
+  assert.equal(fixture.listenerRuns, 0);
+  assert.equal(fixture.events.some((event) => event.type === 'mousedown'), false);
+  assert.equal(fixture.events.some((event) => event.type === 'click'), false);
+});
+
+test('revalidates after mousedown and aborts before mouseup when the target changes', async () => {
+  const fixture = clickableFixture('https://www.zhipin.com/job_detail/example.html', false);
+  let guardCalls = 0;
+  const stages = [];
+
+  const clicked = await loadHumanize().humanClick(fixture.target, {
+    beforeDispatch(_element, stage) {
+      guardCalls += 1;
+      stages.push(stage);
+      return guardCalls < 3;
+    }
+  });
+
+  assert.equal(clicked, false);
+  assert.deepEqual(stages, ['mouseover', 'mousedown', 'mouseup']);
+  assert.equal(fixture.events.some((event) => event.type === 'mousedown'), true);
+  assert.equal(fixture.events.some((event) => event.type === 'mouseup'), false);
+  assert.equal(fixture.events.some((event) => event.type === 'click'), false);
+});

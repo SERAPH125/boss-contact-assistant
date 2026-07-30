@@ -57,6 +57,33 @@
     });
   }
 
+  /**
+   * 初次外发必须提供至少两个独立身份字段，且所有已提供字段都要命中。
+   * 尤其不能用“公司 + 岗位”掩盖 HR 不一致，否则同公司同岗位的另一位
+   * 招聘者可能被误当成目标会话。
+   */
+  function matchesExpectedConversationStrict(currentText, expected) {
+    var current = normalize(currentText);
+    if (!current) return false;
+    var data = expected || {};
+    var fields = [
+      data.hrName,
+      data.company,
+      data.name || data.position
+    ].filter(function (value) {
+      return identityCandidates(value).length > 0;
+    });
+    if (fields.length < 2) return false;
+    return fields.every(function (value) {
+      return identityCandidates(value).some(function (token) {
+        if (current.indexOf(token) >= 0) return true;
+        return current.length >= 2 &&
+          current.length <= 24 &&
+          token.indexOf(current) >= 0;
+      });
+    });
+  }
+
   async function waitForEvidence(options, beforeCount) {
     var attempts = Math.max(1, Number(options.attempts) || 12);
     var wait = options.wait;
@@ -79,17 +106,19 @@
       return { ok: true, via: 'enter' };
     }
 
-    if (typeof options.clickSend !== 'function' || options.clickSend() === false) {
-      return { ok: false, error: '发送未确认，且没有可用发送按钮' };
-    }
-    if (await waitForEvidence(options, beforeCount)) {
-      return { ok: true, via: 'button' };
-    }
-    return { ok: false, error: '发送未确认（输入框未清空、未见新气泡）' };
+    // Enter 已经是一次可能产生外部副作用的动作。证据迟到时点击发送按钮
+    // 可能重复发送，因此结果必须收束为未知，交给上层只读核验或人工处理。
+    return {
+      ok: false,
+      unknown: true,
+      attempted: true,
+      error: '发送结果未知（输入框未清空、未见新气泡），未执行第二次发送'
+    };
   }
 
   return {
     matchesExpectedConversation: matchesExpectedConversation,
+    matchesExpectedConversationStrict: matchesExpectedConversationStrict,
     identityCandidates: identityCandidates,
     sendExactlyOnce: sendExactlyOnce
   };

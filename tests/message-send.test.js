@@ -3,6 +3,7 @@ const assert = require('node:assert/strict');
 
 const {
   matchesExpectedConversation,
+  matchesExpectedConversationStrict,
   sendExactlyOnce
 } = require('../src/message-send.js');
 
@@ -46,6 +47,42 @@ test('does not treat short fragments like 运营 as identity matches', () => {
   }), false);
 });
 
+test('strict initial-send identity requires two independent expected fields', () => {
+  assert.equal(matchesExpectedConversationStrict(
+    '罗榜伟 杭州双一科技有限公司 跨境电商运营',
+    {
+      name: '跨境电商运营',
+      company: '杭州双一科技有限公司',
+      hrName: '罗榜伟'
+    }
+  ), true);
+  assert.equal(matchesExpectedConversationStrict(
+    '另一家公司 另一岗位 罗榜伟',
+    {
+      name: '跨境电商运营',
+      company: '杭州双一科技有限公司',
+      hrName: '罗榜伟'
+    }
+  ), false);
+  assert.equal(matchesExpectedConversationStrict(
+    '杭州双一科技有限公司',
+    {
+      company: '杭州双一科技有限公司'
+    }
+  ), false);
+});
+
+test('strict initial-send identity rejects the same company and job when HR differs', () => {
+  assert.equal(matchesExpectedConversationStrict(
+    '李女士 杭州双一科技有限公司 跨境电商运营',
+    {
+      name: '跨境电商运营',
+      company: '杭州双一科技有限公司',
+      hrName: '张女士'
+    }
+  ), false);
+});
+
 test('does not click the send button when Enter already sent the message', async () => {
   let input = '您好';
   let sentCount = 0;
@@ -72,7 +109,7 @@ test('does not click the send button when Enter already sent the message', async
   assert.equal(sentCount, 1);
 });
 
-test('clicks the send button once only after Enter has no delivery evidence', async () => {
+test('does not issue a second external action when Enter has no delivery evidence', async () => {
   let input = '您好';
   let sentCount = 0;
   let buttonClicks = 0;
@@ -90,13 +127,14 @@ test('clicks the send button once only after Enter has no delivery evidence', as
     attempts: 2
   });
 
-  assert.equal(result.ok, true);
-  assert.equal(result.via, 'button');
-  assert.equal(buttonClicks, 1);
-  assert.equal(sentCount, 1);
+  assert.equal(result.ok, false);
+  assert.equal(result.unknown, true);
+  assert.equal(result.attempted, true);
+  assert.equal(buttonClicks, 0);
+  assert.equal(sentCount, 0);
 });
 
-test('returns failure when neither Enter nor the button produces delivery evidence', async () => {
+test('returns an unknown attempted result without clicking fallback controls', async () => {
   let buttonClicks = 0;
   const result = await sendExactlyOnce({
     readInput: () => '仍在输入框',
@@ -108,6 +146,8 @@ test('returns failure when neither Enter nor the button produces delivery eviden
   });
 
   assert.equal(result.ok, false);
-  assert.match(result.error, /未确认/);
-  assert.equal(buttonClicks, 1);
+  assert.match(result.error, /结果未知|未执行第二次发送/);
+  assert.equal(result.unknown, true);
+  assert.equal(result.attempted, true);
+  assert.equal(buttonClicks, 0);
 });

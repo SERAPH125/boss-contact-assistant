@@ -39,12 +39,48 @@ test('accepts delivery mode only when preparing and executes the frozen intent m
   );
 });
 
+test('contact-and-trusteeship preflights prerequisites and reports registration degradation', () => {
+  assert.match(
+    source,
+    /deliveryMode === DeliveryGuard\.DELIVERY_MODES\.CONTACT_AND_TRUSTEESHIP[\s\S]{0,500}trusteeshipRuntime\.checkPrerequisites\(\)/
+  );
+  assert.match(source, /error\.missing/);
+  assert.match(source, /ConversationRegistration\.checkReadiness\(r\)/);
+  assert.match(source, /resultDetails\.trusteeshipOk\s*=\s*false/);
+  assert.match(
+    source,
+    /for \(let k = 0; k < ids\.length; k\+\+\)[\s\S]{0,900}enableTrusteeship[\s\S]{0,300}trusteeshipRuntime\.checkPrerequisites\(\)/
+  );
+});
+
+test('rechecks trusteeship prerequisites after the final delay and before GO_CHAT', () => {
+  const goChatAt = source.indexOf("type: 'GO_CHAT'");
+  const finalDelayAt = source.lastIndexOf(
+    'await humanWait(500, 1400)',
+    goChatAt
+  );
+  const finalPreflightAt = source.lastIndexOf(
+    'await trusteeshipRuntime.checkPrerequisites()',
+    goChatAt
+  );
+  assert.ok(goChatAt > 0, 'GO_CHAT dispatch must exist');
+  assert.ok(finalDelayAt > 0, 'final human delay must exist');
+  assert.ok(
+    finalPreflightAt > finalDelayAt,
+    'trusteeship prerequisites must be rechecked immediately before GO_CHAT'
+  );
+});
+
 test('publishes structured blocking metadata and stops on uncertain sends', () => {
   assert.match(source, /function blockRun\(reason,\s*code\)/);
   assert.match(source, /type:\s*'BLOCKED'/);
   assert.match(source, /blockCode:\s*state\.blockCode/);
   assert.match(source, /SEND_RESULT_UNKNOWN/);
   assert.match(source, /chatR\.sendResultUnknown/);
+  assert.match(
+    source,
+    /if \(r && \(r\.unknown \|\| r\.sendResultUnknown\)\)/
+  );
   assert.match(source, /TARGET_UNCERTAIN/);
   assert.match(source, /SELECTOR_UNAVAILABLE/);
   assert.match(source, /SERVICE_WORKER_INTERRUPTED/);

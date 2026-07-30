@@ -99,8 +99,20 @@
    * 2) 捕获阶段 preventDefault 双保险
    * 3) 绝不回退到会跑 javascript: 的 el.click()
    */
-  async function humanClick(el) {
+  async function humanClick(el, options) {
     if (!el) return false;
+    options = options || {};
+    var beforeDispatch = typeof options.beforeDispatch === 'function'
+      ? options.beforeDispatch
+      : null;
+    function dispatchAllowed(stage) {
+      if (!beforeDispatch) return true;
+      try {
+        return beforeDispatch(el, stage) === true;
+      } catch (e0) {
+        return false;
+      }
+    }
     var anchor = resolveAnchor(el);
     var href = anchor && typeof anchor.getAttribute === 'function'
       ? (anchor.getAttribute('href') || '')
@@ -137,12 +149,16 @@
       var x = rect.left + rect.width * randFloat(0.3, 0.7);
       var y = rect.top + rect.height * randFloat(0.3, 0.7);
       var opts = { bubbles: true, cancelable: true, view: window, clientX: x, clientY: y };
+      if (!dispatchAllowed('mouseover')) return false;
       el.dispatchEvent(new MouseEvent('mouseover', opts));
       el.dispatchEvent(new MouseEvent('mouseenter', opts));
       await humanDelay(60, 180);
+      if (!dispatchAllowed('mousedown')) return false;
       el.dispatchEvent(new MouseEvent('mousedown', opts));
       await humanDelay(40, 120);
+      if (!dispatchAllowed('mouseup')) return false;
       el.dispatchEvent(new MouseEvent('mouseup', opts));
+      if (!dispatchAllowed('click')) return false;
       var clickEvent = new MouseEvent('click', opts);
       if (blocksJavascriptUrl) {
         try { clickEvent.preventDefault(); } catch (e6) {}
@@ -151,6 +167,7 @@
     } catch (e) {
       // javascript: 链接禁止回退原生 click()，否则必触 CSP
       if (blocksJavascriptUrl) return false;
+      if (!dispatchAllowed('click-fallback')) return false;
       try { el.click(); } catch (e2) { return false; }
     } finally {
       if (guard) {

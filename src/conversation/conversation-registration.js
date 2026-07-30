@@ -9,6 +9,25 @@
     return typeof fallback === 'string' ? fallback.trim() : '';
   }
 
+  function checkReadiness(result) {
+    var source = result && typeof result === 'object' ? result : {};
+    var ref = source.conversationRef &&
+      typeof source.conversationRef === 'object'
+      ? source.conversationRef
+      : {};
+    var ready = typeof ref.conversationId === 'string' &&
+      ref.conversationId.trim() !== '' &&
+      typeof ref.url === 'string' &&
+      ref.url.trim() !== '' &&
+      typeof source.baselineIncomingFingerprint === 'string';
+    if (ready) return { ok: true };
+    return {
+      ok: false,
+      code: 'TRUSTEESHIP_METADATA_UNAVAILABLE',
+      error: '联系成功，但无法取得可靠会话标识，AI 托管未开启'
+    };
+  }
+
   function fromSuccessfulContact(job, result, options) {
     var sourceJob = job && typeof job === 'object' ? job : {};
     var sourceResult = result && typeof result === 'object' ? result : {};
@@ -41,6 +60,7 @@
   }
 
   return {
+    checkReadiness: checkReadiness,
     fromSuccessfulContact: fromSuccessfulContact
   };
 });

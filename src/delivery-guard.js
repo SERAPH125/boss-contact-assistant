@@ -32,6 +32,14 @@
       message: '当前平台暂不支持 AI 托管',
       nextAction: '使用“联系已选”，或切换到 Boss'
     },
+    TRUSTEESHIP_PREREQUISITE_FAILED: {
+      message: 'AI 托管配置尚未完成',
+      nextAction: '完成 API、回复依据、飞书测试和风险确认后重试'
+    },
+    TRUSTEESHIP_NOT_RUNNING: {
+      message: 'AI 托管尚未开启',
+      nextAction: '先在 AI 托管页开启并保存设置'
+    },
     NO_AVAILABLE_JOBS: {
       message: '所选岗位都已联系过',
       nextAction: '返回岗位筛选或重新扫描'

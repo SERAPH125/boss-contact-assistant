@@ -313,6 +313,65 @@ test('Boss batch actions freeze one mode and stay mutually disabled until cancel
   assert.equal(h.ids.btnContactAndTrusteeship.disabled, false);
 });
 
+test('review-required description failures stay manually selectable and are counted separately', async () => {
+  const h = await loadFullSidepanel({
+    activePlatform: 'boss',
+    riskAccepted: true,
+    selectedIds: [],
+    state: {
+      settings: { enabled: true, paused: false },
+      managedConversations: {},
+      pendingApprovalCount: 0
+    },
+    approvals: []
+  });
+
+  h.context.renderReview([
+    {
+      id: 'suggested-1',
+      name: '推荐岗位',
+      company: '甲公司',
+      salary: '10-15K',
+      match: true,
+      reviewRequired: false,
+      reason: '规则命中',
+      score: 85
+    },
+    {
+      id: 'review-1',
+      name: '待核对岗位',
+      company: '乙公司',
+      salary: '8-12K',
+      match: false,
+      reviewRequired: true,
+      reason: '职位描述暂时读取失败，待核对',
+      score: 0
+    },
+    {
+      id: 'rejected-1',
+      name: '不推荐岗位',
+      company: '丙公司',
+      salary: '6-8K',
+      match: false,
+      reviewRequired: false,
+      reason: '命中排除词',
+      score: 20
+    }
+  ]);
+
+  assert.match(h.ids.reviewCount.textContent, /建议 1 · 待核对 1 · 共 3/);
+  assert.match(h.ids.reviewList.innerHTML, /job-item review-required/);
+  assert.match(h.ids.reviewList.innerHTML, /⚠ 职位描述暂时读取失败，待核对/);
+  assert.match(
+    h.ids.reviewList.innerHTML,
+    /class="job-item review-required"[\s\S]*?<input type="checkbox" data-id="review-1">/
+  );
+  assert.match(
+    h.ids.reviewList.innerHTML,
+    /class="job-item skip"[\s\S]*?<input type="checkbox" disabled data-id="rejected-1">/
+  );
+});
+
 test('Zhili hides the unsupported contact-and-trusteeship batch action', async () => {
   const h = await loadFullSidepanel({
     activePlatform: 'zhilian',

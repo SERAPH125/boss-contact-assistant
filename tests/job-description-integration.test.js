@@ -23,17 +23,29 @@ test('service worker resolves platform cities before opening a search page', () 
 
 test('service worker requests descriptions when keywords or AI screening need them', () => {
   assert.match(background, /includeDescription/);
-  assert.match(background, /JobDescription\.screeningText\(job\)/);
+  assert.match(background, /JobDescription\.keywordScreen\(job/);
   assert.match(background, /JobDescription\.promptText\(j\)/);
-  assert.match(background, /职位描述读取失败/);
+  assert.match(background, /reviewRequired/);
 });
 
-test('both platform scanners enrich jobs from read-only detail fetches', () => {
-  for (const source of [bossSearch, zhilianSearch]) {
-    assert.match(source, /JobDescription\.enrichJobs/);
-    assert.match(source, /credentials:\s*'include'/);
-    assert.match(source, /includeDescription/);
-  }
+test('Boss reads its shared SPA detail panel sequentially while Zhilian keeps detail fetches', () => {
+  assert.match(bossSearch, /JobDescription\.enrichJobsWithReader/);
+  assert.match(bossSearch, /extractFromDocument\(\s*'boss-search'/);
+  assert.match(bossSearch, /job-detail-header \.job-name/);
+  assert.match(bossSearch, /\.more-job-btn\[href\*="\/job_detail\/"\]/);
+  assert.match(bossSearch, /JobDescription\.bossDetailMatches/);
+  assert.match(bossSearch, /await safeClick\(/);
+  assert.match(
+    bossSearch,
+    /const discovered[\s\S]+await enrichDescriptions\(discovered\)[\s\S]+humanScrollStep/
+  );
+  assert.match(bossSearch, /shouldRethrow/);
+  assert.match(bossSearch, /error\.code === 'BLOCKED'/);
+  assert.doesNotMatch(bossSearch, /concurrency:\s*3/);
+
+  assert.match(zhilianSearch, /JobDescription\.enrichJobs/);
+  assert.match(zhilianSearch, /credentials:\s*'include'/);
+  assert.match(zhilianSearch, /includeDescription/);
 });
 
 test('job-description helper loads before both search adapters', () => {
@@ -54,4 +66,8 @@ test('job-description helper loads before both search adapters', () => {
     zhilian.js.indexOf('src/platform/job-description.js') <
       zhilian.js.indexOf('src/platform/zhilian/content-search.js')
   );
+});
+
+test('AI screening downgrades an unavailable description to manual review', () => {
+  assert.match(background, /JobDescription\.requireDescriptionForAi\(rule,\s*job\)/);
 });

@@ -407,44 +407,32 @@ function classifyApiTestFailure(error) {
 }
 
 function ruleScreen(cfg, job) {
-  const blob = JobDescription.screeningText(job);
-  const excludes = splitWords(cfg.excludeKeywords).map((w) => w.toLowerCase());
-  for (let i = 0; i < excludes.length; i++) {
-    if (excludes[i] && blob.indexOf(excludes[i]) >= 0) {
-      return { match: false, reason: '命中排除词：' + excludes[i], score: 20 };
-    }
-  }
-  if (excludes.length && job.descriptionStatus === 'failed') {
-    return { match: false, reason: '职位描述读取失败，无法确认排除词', score: 20 };
+  const keywordResult = JobDescription.keywordScreen(job, {
+    includeKeywords: cfg.includeKeywords,
+    excludeKeywords: cfg.excludeKeywords
+  });
+  if (!keywordResult.match && !keywordResult.reviewRequired) {
+    return keywordResult;
   }
   // 活跃度二次过滤（扫描阶段已滤，此处兜底）
   const filterInactive = cfg.filterInactive !== false && cfg.filterInactive !== 'false';
   const maxDays = parseInt(cfg.activityMaxDays, 10);
   if (filterInactive && maxDays > 0 && typeof Humanize !== 'undefined' && !Humanize.activityOk(job.activeText, maxDays)) {
-    return { match: false, reason: 'Boss 不够活跃：' + (job.activeText || '未知'), score: 15 };
+    return {
+      match: false,
+      reviewRequired: false,
+      reason: 'Boss 不够活跃：' + (job.activeText || '未知'),
+      score: 15
+    };
   }
-  const includes = splitWords(cfg.includeKeywords).map((w) => w.toLowerCase());
-  if (includes.length) {
-    const hit = includes.filter((w) => blob.indexOf(w) >= 0);
-    if (!hit.length && job.descriptionStatus === 'failed') {
-      return { match: false, reason: '职位描述读取失败，无法确认包含词', score: 25 };
-    }
-    if (!hit.length) return { match: false, reason: '未命中包含词（已检查职位描述）', score: 35 };
-    const score = Math.min(95, 55 + hit.length * 15);
-    return { match: true, reason: '规则命中：' + hit.join('、'), score: score };
-  }
-  return { match: true, reason: '规则通过（无包含词过滤）', score: 60 };
+  return keywordResult;
 }
 
 async function screenJob(cfg, job) {
   const rule = ruleScreen(cfg, job);
   if (!apiKeyOf(cfg) || !resumeFull(cfg)) return rule;
-  if (!rule.match) return rule; // 排除词硬拦，不再浪费 Token
-  if (job.descriptionStatus === 'failed') {
-    return Object.assign({}, rule, {
-      reason: rule.reason + '｜职位描述读取失败，未调用 AI'
-    });
-  }
+  const aiReadyRule = JobDescription.requireDescriptionForAi(rule, job);
+  if (!aiReadyRule.match) return aiReadyRule;
 
   const sys = '你是资深求职助手。请完全依据【求职者简历】判断岗位是否值得沟通。\n保留(match=true)：方向相关且经验够得着。剔除(match=false)：明显无关或明显超纲。\n只输出JSON：{"match":true或false,"reason":"一句话","score":0到100整数}';
   const user = '求职者简历：\n' + resumeFull(cfg) + '\n\n待判断岗位：\n' + jobInfo(job) + '\n\n严格输出JSON。';
@@ -455,11 +443,11 @@ async function screenJob(cfg, job) {
       const m = raw && raw.match(/\{[\s\S]*\}/);
       if (m) { try { p = JSON.parse(m[0]); } catch (e2) {} }
     }
-    if (!p) return Object.assign({}, rule, { reason: rule.reason + '｜AI解析失败，保留规则结果' });
+    if (!p) return Object.assign({}, aiReadyRule, { reason: aiReadyRule.reason + '｜AI解析失败，保留规则结果' });
     const score = typeof p.score === 'number' ? p.score : (p.match === true ? 80 : 35);
-    return { match: p.match === true, reason: p.reason || rule.reason, score: score };
+    return { match: p.match === true, reason: p.reason || aiReadyRule.reason, score: score };
   } catch (e) {
-    return Object.assign({}, rule, { reason: rule.reason + '｜AI失败降级：' + e.message });
+    return Object.assign({}, aiReadyRule, { reason: aiReadyRule.reason + '｜AI失败降级：' + e.message });
   }
 }
 
@@ -611,15 +599,32 @@ function blockRun(reason, code) {
 function deliveryErrorResponse(error) {
   const code = (error && error.code) || 'RUN_BLOCKED';
   const guidance = DeliveryGuard.guidanceFor(code);
-  return {
+  const response = {
     ok: false,
     code: code,
     error: (error && error.message) || guidance.message,
     nextAction: (error && error.nextAction) || guidance.nextAction
   };
+  if (error && Array.isArray(error.missing)) {
+    response.missing = error.missing
+      .filter((item) => typeof item === 'string')
+      .slice(0, 8);
+  }
+  return response;
 }
 
 async function buildDeliveryPlan(selectedIds, expectedPlatformId, deliveryMode) {
+  if (deliveryMode === DeliveryGuard.DELIVERY_MODES.CONTACT_AND_TRUSTEESHIP) {
+    const preflight = await trusteeshipRuntime.checkPrerequisites();
+    if (!preflight || preflight.ok !== true) {
+      const code = (preflight && preflight.code) || 'TRUSTEESHIP_PREREQUISITE_FAILED';
+      const failure = DeliveryGuard.runError(code);
+      if (preflight && Array.isArray(preflight.missing)) {
+        failure.missing = preflight.missing.slice();
+      }
+      throw failure;
+    }
+  }
   const cfg = RunSafety.snapshotRunConfig(await PlatformConfig.loadFlat());
   const meta = platMeta(cfg);
   if (expectedPlatformId && meta.id !== expectedPlatformId) {
@@ -830,7 +835,12 @@ async function runCollect() {
     await Promise.all(batch.map(async (job) => {
       const res = await screenJob(cfg, job);
       checkpoint();
-      state.screened.push(Object.assign({}, job, { match: res.match, reason: res.reason, score: res.score }));
+      state.screened.push(Object.assign({}, job, {
+        match: res.match,
+        reviewRequired: res.reviewRequired === true,
+        reason: res.reason,
+        score: res.score
+      }));
       done++;
       progress(done, total, '筛选');
     }));
@@ -840,7 +850,12 @@ async function runCollect() {
   }
   checkpoint();
   const matched = state.screened.filter((j) => j.match).length;
-  log('筛选完成：建议 ' + matched + ' / ' + total + '（默认不勾选，请人工确认）', 'success');
+  const reviewRequired = state.screened.filter((j) => j.reviewRequired).length;
+  log(
+    '筛选完成：建议 ' + matched + '，待核对 ' + reviewRequired +
+    ' / 共 ' + total + '（默认不勾选，请人工确认）',
+    'success'
+  );
   await chrome.storage.local.set({
     sw_jobs: state.jobs,
     sw_greetings: state.greetings,
@@ -970,6 +985,23 @@ async function runDeliver(jobIds, options) {
       runCursor = k;
       if (state.aborted) break;
       await waitIfPaused();
+      if (enableTrusteeship) {
+        const trusteeshipPreflight =
+          await trusteeshipRuntime.checkPrerequisites();
+        checkpoint();
+        if (!trusteeshipPreflight || trusteeshipPreflight.ok !== true) {
+          const preflightCode = trusteeshipPreflight &&
+            trusteeshipPreflight.code ||
+            'TRUSTEESHIP_PREREQUISITE_FAILED';
+          const guidance = DeliveryGuard.guidanceFor(preflightCode);
+          blockRun(
+            (trusteeshipPreflight && trusteeshipPreflight.error) ||
+              guidance.message,
+            preflightCode
+          );
+          break;
+        }
+      }
 
       const usageCfg = await PlatformConfig.loadFlatFor(runPlatformId);
       checkpoint();
@@ -1031,6 +1063,27 @@ async function runDeliver(jobIds, options) {
 
       await humanWait(500, 1400);
       checkpoint();
+      // 用户可能在读取详情或拟人延时期间暂停托管、清空配置。
+      // 紧邻首次外部动作再检查一次，避免用已经失效的托管意图联系 HR。
+      if (enableTrusteeship) {
+        const finalTrusteeshipPreflight =
+          await trusteeshipRuntime.checkPrerequisites();
+        checkpoint();
+        if (!finalTrusteeshipPreflight ||
+            finalTrusteeshipPreflight.ok !== true) {
+          const preflightCode = finalTrusteeshipPreflight &&
+            finalTrusteeshipPreflight.code ||
+            'TRUSTEESHIP_PREREQUISITE_FAILED';
+          const guidance = DeliveryGuard.guidanceFor(preflightCode);
+          blockRun(
+            (finalTrusteeshipPreflight &&
+              finalTrusteeshipPreflight.error) ||
+              guidance.message,
+            preflightCode
+          );
+          break;
+        }
+      }
       log('  发起沟通（' + meta.actionWord + '）…');
       checkpoint();
       const chatR = await sendToTab(tab.id, { type: 'GO_CHAT', job: job });
@@ -1148,7 +1201,7 @@ async function runDeliver(jobIds, options) {
           blockRun(r.reason || '发送时触发风控', r.code || 'RUN_BLOCKED');
           break;
         }
-        if (r && r.unknown) {
+        if (r && (r.unknown || r.sendResultUnknown)) {
           recordFail(job, '已建联；' + r.error);
           blockRun(r.error, 'SEND_RESULT_UNKNOWN');
           progress(k + 1, ids.length, '联系');
@@ -1167,8 +1220,9 @@ async function runDeliver(jobIds, options) {
           break;
         }
         if (r && r.success) {
-          if (r && r.success && r.conversationRef &&
-              typeof r.baselineIncomingFingerprint === 'string') {
+          const resultDetails = {};
+          const registrationReadiness = ConversationRegistration.checkReadiness(r);
+          if (registrationReadiness.ok) {
             try {
               const registered = await conversationStore.registerConversation(
                 ConversationRegistration.fromSuccessfulContact(job, r, {
@@ -1176,17 +1230,23 @@ async function runDeliver(jobIds, options) {
                 })
               );
               if (enableTrusteeship) {
-                if (registered.enabled === true) {
+                if (registered && registered.enabled === true) {
+                  resultDetails.trusteeshipOk = true;
                   log('  ✓ 已登记并开启 AI 托管', 'success');
-                } else if (registered.state === 'ENDED_UNMATCHED') {
-                  log('  已联系；该会话此前已结束，不会重新开启 AI 托管', 'warn');
                 } else {
-                  log('  已联系；会话当前状态不允许开启 AI 托管', 'warn');
+                  resultDetails.trusteeshipOk = false;
+                  resultDetails.warning = registered &&
+                    registered.state === 'ENDED_UNMATCHED'
+                    ? '该会话此前已结束，不会重新开启 AI 托管'
+                    : '会话当前状态不允许开启 AI 托管';
+                  log('  已联系；' + resultDetails.warning, 'warn');
                 }
               }
             } catch (registrationFailure) {
               // 联系已明确成功；不可靠的托管元数据不能追溯改变本次结果。
               if (enableTrusteeship) {
+                resultDetails.trusteeshipOk = false;
+                resultDetails.warning = 'AI 托管登记失败';
                 log(
                   '  已联系，但 AI 托管登记失败：' +
                     ((registrationFailure && registrationFailure.message) || '未知错误'),
@@ -1194,8 +1254,12 @@ async function runDeliver(jobIds, options) {
                 );
               }
             }
+          } else if (enableTrusteeship) {
+            resultDetails.trusteeshipOk = false;
+            resultDetails.warning = registrationReadiness.error;
+            log('  ' + registrationReadiness.error, 'warn');
           }
-          recordOk(job);
+          recordOk(job, resultDetails);
           log('  ✓ 已联系（' + meta.short + ' 今日 ' + contactUsage.count + '/' + dailyLimit + '）', 'success');
         } else {
           recordFail(job, '已建联；招呼语失败：' + ((r && r.error) || '发送失败'));
@@ -1244,7 +1308,12 @@ async function runDeliver(jobIds, options) {
   }
 }
 
-function recordOk(job) { state.results.push({ id: job.id, name: job.name, ok: true }); }
+function recordOk(job, details) {
+  state.results.push(Object.assign(
+    { id: job.id, name: job.name, ok: true },
+    details || {}
+  ));
+}
 function recordFail(job, msg) { state.results.push({ id: job.id, name: job.name, ok: false, msg: msg }); }
 function finishDeliver() {
   const ok = state.results.filter((r) => r.ok).length;

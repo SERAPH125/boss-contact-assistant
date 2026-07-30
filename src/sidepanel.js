@@ -1907,8 +1907,11 @@ function openJobOnBoss(url) {
 function renderReview(screened) {
   screenedCache = screened || [];
   const matched = screenedCache.filter((j) => j.match);
-  const skipped = screenedCache.filter((j) => !j.match);
-  $('reviewCount').textContent = meta().short + ' · 建议 ' + matched.length + ' / 共 ' + screenedCache.length + '（默认不选）';
+  const reviewRequired = screenedCache.filter((j) => !j.match && j.reviewRequired);
+  const skipped = screenedCache.filter((j) => !j.match && !j.reviewRequired);
+  $('reviewCount').textContent = meta().short + ' · 建议 ' + matched.length +
+    ' · 待核对 ' + reviewRequired.length + ' · 共 ' + screenedCache.length +
+    '（默认不选）';
   let html = '';
   matched.forEach((j) => {
     const score = j.score != null ? j.score : (j.match ? 80 : 40);
@@ -1919,6 +1922,14 @@ function renderReview(screened) {
       + (j.activeText ? (' · ' + esc(j.activeText)) : '') + '</div>'
       + '<div class="job-score">分 ' + score + '</div>'
       + '<div class="job-reason m">✓ ' + esc(j.reason) + '</div></div></div>';
+  });
+  reviewRequired.forEach((j) => {
+    html += '<div class="job-item review-required" data-score="0" data-suggested="0">'
+      + '<input type="checkbox" data-id="' + esc(j.id) + '">'
+      + '<div class="job-main">' + jobTitleHtml(j)
+      + '<div class="job-sub">' + esc(j.company) + ' · ' + esc(j.salary)
+      + (j.activeText ? (' · ' + esc(j.activeText)) : '') + '</div>'
+      + '<div class="job-reason review">⚠ ' + esc(j.reason) + '</div></div></div>';
   });
   skipped.forEach((j) => {
     html += '<div class="job-item skip" data-score="0">'

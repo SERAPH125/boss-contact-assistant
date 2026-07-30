@@ -1133,6 +1133,23 @@
       return prerequisiteFailureUnsafe(current.missing, false);
     }
 
+    async function checkDeliveryPrerequisitesUnsafe() {
+      var current = await readCurrentPrerequisites();
+      if (current.missing.length > 0) {
+        return {
+          ok: false,
+          code: 'TRUSTEESHIP_PREREQUISITE_FAILED',
+          missing: current.missing.slice()
+        };
+      }
+      var snapshot = await store.getSnapshot();
+      var settings = snapshot.conversationTrusteeship || {};
+      if (settings.enabled !== true || settings.paused === true) {
+        return safeError('TRUSTEESHIP_NOT_RUNNING');
+      }
+      return { ok: true };
+    }
+
     async function checkRunningStateUnsafe() {
       var snapshot = await store.getSnapshot();
       var settings = snapshot.conversationTrusteeship || {};
@@ -1699,6 +1716,9 @@
           await pauseAndClearUnsafe('API_CONFIG_CHANGED', false);
           return safeError('API_CONFIG_CHANGED');
         });
+      },
+      checkPrerequisites: function () {
+        return serialized(checkDeliveryPrerequisitesUnsafe);
       },
       saveApiConfig: function (message) {
         if (!validateApiConfigMessage(message)) {

@@ -83,6 +83,16 @@ test('accepts only the two explicit mutually exclusive delivery modes', () => {
   }), (error) => error.code === 'TRUSTEESHIP_PLATFORM_UNSUPPORTED');
 });
 
+test('provides actionable guidance when trusteeship preflight is incomplete', () => {
+  assert.deepEqual(
+    DeliveryGuard.guidanceFor('TRUSTEESHIP_PREREQUISITE_FAILED'),
+    {
+      message: 'AI 托管配置尚未完成',
+      nextAction: '完成 API、回复依据、飞书测试和风险确认后重试'
+    }
+  );
+});
+
 test('rejects empty, stale, and cross-platform selections', () => {
   assert.throws(() => DeliveryGuard.prepare({
     platformId: 'boss',

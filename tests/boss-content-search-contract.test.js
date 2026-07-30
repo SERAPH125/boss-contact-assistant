@@ -49,6 +49,34 @@ test('Boss search classifies unsafe contact outcomes without silent success', ()
   assert.match(search, /立即沟通|继续沟通/);
 });
 
+test('Boss search keeps stable detail identity and fatal page gates distinct', () => {
+  assert.match(search, /function fatalReadError\(/);
+  assert.match(search, /code === 'BLOCKED'/);
+  assert.match(search, /code === 'LOGIN_REQUIRED'/);
+  assert.match(search, /\.more-job-btn\[href\*="\/job_detail\/"\]/);
+  assert.match(search, /JobDescription\.bossDetailMatches/);
+});
+
+test('Boss contact reactivates and verifies the target before any external action', () => {
+  const openStart = search.indexOf('async function openJD');
+  const openEnd = search.indexOf('\n  async function goChat', openStart);
+  const goStart = openEnd;
+  const goEnd = search.indexOf('\n  chrome.runtime.onMessage', goStart);
+  assert.ok(openStart >= 0 && openEnd > openStart && goEnd > goStart);
+
+  const openJd = search.slice(openStart, openEnd);
+  const goChat = search.slice(goStart, goEnd);
+  assert.match(search, /async function activateBossJob\(/);
+  assert.match(openJd, /await activateBossJob\(job/);
+  assert.doesNotMatch(
+    openJd,
+    /descriptionStatus === 'loaded'[\s\S]{0,120}return/
+  );
+  assert.match(goChat, /await activateBossJob\(job/);
+  assert.match(search, /function isCurrentBossTarget\(job\)/);
+  assert.match(goChat, /externalActionPossible:\s*false/);
+});
+
 test('Boss search dismisses dialogs via safeClick instead of raw click on javascript URLs', () => {
   assert.match(search, /async function safeClick\(/);
   assert.match(search, /Humanize\.humanClick/);

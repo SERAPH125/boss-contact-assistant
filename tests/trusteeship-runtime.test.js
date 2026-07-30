@@ -661,6 +661,57 @@ test('alarm reconcile keeps global default on from creating monitors before prer
   ]);
 });
 
+test('delivery preflight can inspect trusteeship prerequisites without mutating settings', async () => {
+  const storage = memoryStorage({
+    apiKey: '',
+    resumeText: '',
+    hrFaq: {},
+    riskAccepted: false,
+    apiLastTestOk: false,
+    apiLastTestAt: 0,
+    feishuNotification: {
+      enabled: false,
+      webhook: '',
+      signingSecret: '',
+      lastTestOk: false,
+      lastTestAt: 0
+    }
+  });
+  const h = controllerHarness({ storage });
+  const before = structuredClone(h.snapshot.conversationTrusteeship);
+
+  const result = await h.controller.checkPrerequisites();
+
+  assert.deepEqual(result, {
+    ok: false,
+    code: 'TRUSTEESHIP_PREREQUISITE_FAILED',
+    missing: ['api', 'replyEvidence', 'feishuTest', 'riskAccepted']
+  });
+  assert.deepEqual(h.snapshot.conversationTrusteeship, before);
+});
+
+test('delivery preflight requires the global trusteeship monitor to be running', async () => {
+  const disabled = controllerHarness();
+  assert.deepEqual(
+    await disabled.controller.checkPrerequisites(),
+    { ok: false, code: 'TRUSTEESHIP_NOT_RUNNING' }
+  );
+
+  const enabled = controllerHarness({
+    snapshot: {
+      conversationTrusteeship: {
+        enabled: true,
+        paused: false,
+        intervalMinutes: 10
+      },
+      feishuNotification: {},
+      managedConversations: {},
+      pendingApprovals: {}
+    }
+  });
+  assert.deepEqual(await enabled.controller.checkPrerequisites(), { ok: true });
+});
+
 test('saving enabled settings rejects invalid intervals and reports every missing prerequisite', async () => {
   const storage = memoryStorage({
     apiKey: '',

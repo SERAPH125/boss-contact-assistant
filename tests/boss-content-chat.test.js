@@ -774,8 +774,8 @@ test('CAPTURE registers the owned active conversation without expected identity'
 
 test('SEND_ACTIVE returns canonical friend-list identity for auto registration', async () => {
   const h = createHarness({
-    activeText: '审核卡片公司 跨境电商运营',
-    headerText: '审核卡片公司 跨境电商运营',
+    activeText: '罗榜伟 杭州双一科技有限公司 跨境电商运营',
+    headerText: '罗榜伟 杭州双一科技有限公司 跨境电商运营',
     peerId: 'peer~~canonical-1',
     friends: [{
       encryptUid: 'peer~~canonical-1',
@@ -803,7 +803,7 @@ test('SEND_ACTIVE returns canonical friend-list identity for auto registration',
     image: '',
     greeting: '您好，我对岗位很感兴趣',
     expected: {
-      company: '审核卡片公司',
+      company: '杭州双一科技有限公司',
       name: '跨境电商运营',
       hrName: ''
     }
@@ -815,6 +815,137 @@ test('SEND_ACTIVE returns canonical friend-list identity for auto registration',
   assert.equal(result.company, '杭州双一科技有限公司');
   assert.equal(result.position, '跨境电商运营');
   assert.equal(result.hrName, '罗榜伟');
+});
+
+test('SEND_ACTIVE revalidates the canonical peer after a same-text conversation switch', async () => {
+  let switched = false;
+  const h = createHarness({
+    activeText: '罗榜伟 杭州双一科技有限公司 跨境电商运营',
+    headerText: '罗榜伟 杭州双一科技有限公司 跨境电商运营',
+    peerId: 'peer~~canonical-guard',
+    friends: [{
+      encryptUid: 'peer~~canonical-guard',
+      uid: 100,
+      conversationId: 'conv1',
+      name: '罗榜伟',
+      brandName: '杭州双一科技有限公司',
+      jobName: '跨境电商运营'
+    }],
+    onSleep(state) {
+      if (switched) return;
+      switched = true;
+      state.switchConversation('conv-other');
+    }
+  });
+  h.input._selectors.add('div#chat-input');
+  h.input._onDispatch = (event) => {
+    if (event.type === 'keydown' && event.key === 'Enter') {
+      h.externalActions += 1;
+    }
+  };
+
+  const result = await h.dispatch({
+    type: 'SEND_ACTIVE',
+    image: '',
+    greeting: '您好，我对岗位很感兴趣',
+    expected: {
+      company: '杭州双一科技有限公司',
+      name: '跨境电商运营',
+      hrName: '罗榜伟'
+    }
+  });
+
+  assert.equal(result.success, false);
+  assert.equal(result.targetUncertain, true);
+  assert.equal(h.externalActions, 0);
+});
+
+test('SEND_ACTIVE rejects another HR at the same company and job before any send', async () => {
+  const h = createHarness({
+    activeText: '李女士 杭州双一科技有限公司 跨境电商运营',
+    headerText: '李女士 杭州双一科技有限公司 跨境电商运营',
+    peerId: 'peer~~wrong-hr',
+    friends: [{
+      encryptUid: 'peer~~wrong-hr',
+      uid: 101,
+      conversationId: 'conv1',
+      name: '李女士',
+      brandName: '杭州双一科技有限公司',
+      jobName: '跨境电商运营'
+    }]
+  });
+  h.input._selectors.add('div#chat-input');
+  h.input._onDispatch = (event) => {
+    if (event.type === 'keydown' && event.key === 'Enter') {
+      h.externalActions += 1;
+      h.input.textContent = '';
+    }
+  };
+
+  const result = await h.dispatch({
+    type: 'SEND_ACTIVE',
+    image: '',
+    greeting: '您好，我对岗位很感兴趣',
+    expected: {
+      company: '杭州双一科技有限公司',
+      name: '跨境电商运营',
+      hrName: '张女士'
+    }
+  });
+
+  assert.equal(result.success, false);
+  assert.equal(result.targetUncertain, true);
+  assert.equal(h.externalActions, 0);
+});
+
+test('SEND_ACTIVE never confirms a residual continue-chat dialog', async () => {
+  const h = createHarness({
+    activeText: '罗榜伟 杭州双一科技有限公司 跨境电商运营',
+    headerText: '罗榜伟 杭州双一科技有限公司 跨境电商运营',
+    peerId: 'peer~~canonical-dialog',
+    friends: [{
+      encryptUid: 'peer~~canonical-dialog',
+      uid: 100,
+      conversationId: 'conv1',
+      name: '罗榜伟',
+      brandName: '杭州双一科技有限公司',
+      jobName: '跨境电商运营'
+    }]
+  });
+  let dialogClicks = 0;
+  const continueDialog = h.documentRoot.append(new FakeElement({
+    tagName: 'button',
+    text: '继续沟通',
+    selectors: ['a, button, span, div[role="button"]']
+  }));
+  continueDialog._onClick = () => {
+    dialogClicks += 1;
+  };
+  h.input._selectors.add('div#chat-input');
+  h.input._onDispatch = (event) => {
+    if (event.type === 'keydown' && event.key === 'Enter') {
+      h.input.textContent = '';
+      h.addMessage({
+        id: 'sent-with-residual-dialog',
+        direction: 'outgoing',
+        text: '您好，我对岗位很感兴趣'
+      });
+    }
+  };
+
+  const result = await h.dispatch({
+    type: 'SEND_ACTIVE',
+    image: '',
+    greeting: '您好，我对岗位很感兴趣',
+    expected: {
+      company: '杭州双一科技有限公司',
+      name: '跨境电商运营',
+      hrName: '罗榜伟'
+    }
+  });
+
+  assert.equal(result.success, true, JSON.stringify(result));
+  assert.equal(dialogClicks, 0);
 });
 
 test('OPEN repairs stale identity from canonical friend data before locating the conversation', async () => {

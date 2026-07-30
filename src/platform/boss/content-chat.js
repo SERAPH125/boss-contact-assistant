@@ -54,7 +54,9 @@
   async function dismissCommonDialogs() {
     const blocked = detectBlock();
     if (blocked) return blocked;
-    const preferExact = ['确定', '我知道了', '知道了', '确认', '好的', '继续沟通', '继续'];
+    // 通用清理只能关闭明确的提示类弹窗。确认、继续沟通等按钮可能产生
+    // 平台外部副作用，必须留给已绑定目标身份的专用写路径处理。
+    const preferExact = ['我知道了', '知道了'];
     const avoid = ['取消', '拒绝', '暂不', '下次再说'];
     for (let round = 0; round < 3; round++) {
       let hit = null;
@@ -189,7 +191,7 @@
     const deadline = Date.now() + Math.max(0, Number(timeoutMs) || 0);
     let text = activeConversationText();
     while (true) {
-      if (MessageSend.matchesExpectedConversation(text, target)) {
+      if (MessageSend.matchesExpectedConversationStrict(text, target)) {
         return { ok: true, target: target, text: text };
       }
       if (Date.now() >= deadline) {
@@ -1033,22 +1035,94 @@
         error: '当前会话无法与目标岗位/公司/HR 匹配，未发送简历或招呼语'
       };
     }
-    const target = matched.target;
+    const initial = validateManagedTarget(matched.target);
+    if (!initial.success) return initial;
+    const peer = await resolvePeerFromActive(initial);
+    if (!peer.success) return peer;
+    const resolvedIdentityText = [
+      peer.matchedName,
+      peer.matchedCompany,
+      peer.matchedPosition
+    ].filter(Boolean).join(' ');
+    if (!MessageSend.matchesExpectedConversationStrict(
+      resolvedIdentityText,
+      matched.target
+    )) {
+      return targetFailure('当前会话的稳定联系人身份与原目标不一致，未发送简历或招呼语');
+    }
+    const target = expectedFromResolvedPeerPreserving(matched.target, peer);
+    if (!MessageSend.matchesExpectedConversationStrict(
+      scopedConversationText(initial.scope),
+      target
+    )) {
+      return targetFailure('当前会话的稳定身份不足以确认目标，未发送简历或招呼语');
+    }
+    const lockedScope = initial.scope;
+    function revalidateInitialTarget() {
+      const latest = validateManagedTarget(target, peer.conversationRef);
+      if (!latest.success) return latest;
+      if (!sameOwnedScope(lockedScope, latest.scope)) {
+        return targetFailure('目标会话作用域在初次发送前发生变化');
+      }
+      if (!MessageSend.matchesExpectedConversationStrict(
+        scopedConversationText(latest.scope),
+        target
+      )) {
+        return targetFailure('目标会话身份在初次发送前发生变化');
+      }
+      return latest;
+    }
+
     if (typeof Humanize !== 'undefined') await Humanize.humanDelay(400, 1100);
+    let latest = revalidateInitialTarget();
+    if (!latest.success) return latest;
     const imgOk = await sendImage(image);
     await sleep(800);
-    if (typeof Humanize !== 'undefined') await Humanize.humanDelay(300, 900);
-    const tr = await sendText(greeting, target);
-    if (!tr.ok) {
-      return {
-        success: false,
-        error: tr.err,
-        targetUncertain: !!tr.targetUncertain,
-        selectorUnavailable: !!tr.selectorUnavailable
-      };
+    latest = revalidateInitialTarget();
+    if (!latest.success) {
+      if (image && imgOk) {
+        return {
+          success: false,
+          errorCode: 'SEND_RESULT_UNKNOWN',
+          unknown: true,
+          sendResultUnknown: true,
+          error: '简历图片操作后目标会话发生变化，请人工核对'
+        };
+      }
+      return latest;
     }
-    const metadata = await captureManagementMetadata(target);
-    return Object.assign({ success: true, imageOk: imgOk }, metadata || {});
+    if (typeof Humanize !== 'undefined') await Humanize.humanDelay(300, 900);
+    latest = revalidateInitialTarget();
+    if (!latest.success) {
+      return image && imgOk
+        ? {
+          success: false,
+          errorCode: 'SEND_RESULT_UNKNOWN',
+          unknown: true,
+          sendResultUnknown: true,
+          error: '简历图片操作后目标会话发生变化，请人工核对'
+        }
+        : latest;
+    }
+    const sent = await sendManagedReply({
+      allowVisible: true,
+      draft: greeting,
+      expected: target,
+      conversationRef: peer.conversationRef,
+      lockedScope: lockedScope
+    });
+    if (!sent.success) return sent;
+    return {
+      success: true,
+      imageOk: imgOk,
+      conversationRef: sent.conversationRef,
+      peerSource: peer.peerSource,
+      baselineIncomingFingerprint: sent.baselineIncomingFingerprint,
+      sentFingerprint: sent.sentFingerprint,
+      company: peer.matchedCompany || target.company || '',
+      position: peer.matchedPosition || target.name || '',
+      hrName: peer.matchedName || target.hrName || ''
+    };
   }
 
   async function getActiveConversationRef(msg) {
@@ -1405,6 +1479,18 @@
     };
   }
 
+  // 初次外发不能用“当前活动会话”的元数据覆盖原始目标；只有在已用
+  // canonical conversationRef 管理的后续托管路径中，才允许修复陈旧展示字段。
+  function expectedFromResolvedPeerPreserving(expected, resolved) {
+    const source = expected && typeof expected === 'object' ? expected : {};
+    return {
+      id: source.id,
+      company: source.company || resolved.matchedCompany || '',
+      name: source.name || source.position || resolved.matchedPosition || '',
+      hrName: source.hrName || resolved.matchedName || ''
+    };
+  }
+
   async function readActiveConversation(msg) {
     // 只读检查不点击列表、不切换会话、不写入任何页面状态，因此不要求独占后台标签；
     // `document.visibilityState` 是否可见与读取结果无关。独占与接管检测只属于发送路径。
@@ -1533,12 +1619,24 @@
     const expected = metadata.success
       ? expectedFromResolvedPeer(msg.expected, metadata)
       : msg.expected;
-    const active = await activateManagedConversation(
-      expected,
-      peer.conversationRef,
-      { allowVisible: allowVisible }
-    );
+    const lockedScope = msg && msg.lockedScope;
+    const active = lockedScope
+      ? validateManagedTarget(expected, peer.conversationRef)
+      : await activateManagedConversation(
+        expected,
+        peer.conversationRef,
+        { allowVisible: allowVisible }
+      );
     if (!active.success) return active;
+    if (lockedScope && !sameOwnedScope(lockedScope, active.scope)) {
+      return targetFailure('目标会话作用域在初次发送前发生变化');
+    }
+    if (lockedScope && !MessageSend.matchesExpectedConversationStrict(
+      scopedConversationText(active.scope),
+      expected
+    )) {
+      return targetFailure('目标会话身份在初次发送前发生变化');
+    }
 
     const draft = typeof msg.draft === 'string' ? msg.draft.trim() : '';
     if (!draft || Array.from(draft).length > 300) {

@@ -25,6 +25,17 @@
     if (platform === 'boss') {
       element = doc.querySelector('.job-detail-section .job-sec-text')
         || doc.querySelector('.job-sec-text');
+    } else if (platform === 'boss-search') {
+      var labels = typeof doc.querySelectorAll === 'function'
+        ? Array.prototype.slice.call(
+          doc.querySelectorAll('.job-detail-body .job-label-list li')
+        ).map(textOf).filter(Boolean)
+        : [];
+      var description = textOf(doc.querySelector('.job-detail-body .desc'));
+      return normalizeText(
+        [labels.join(' '), description].filter(Boolean).join('\n'),
+        maxChars
+      );
     } else if (platform === 'zhilian') {
       element = doc.querySelector('.describtion-card__detail-content')
         || doc.querySelector('.describtion-card .seo-card__content');
@@ -89,6 +100,156 @@
     return result;
   }
 
+  async function enrichJobsWithReader(jobs, options) {
+    options = options || {};
+    var source = Array.isArray(jobs) ? jobs : [];
+    if (typeof options.readDescription !== 'function') {
+      throw new Error('readDescription is required');
+    }
+    var result = [];
+    for (var index = 0; index < source.length; index++) {
+      var next = Object.assign({}, source[index]);
+      try {
+        var raw = await options.readDescription(source[index], index);
+        var description = normalizeText(raw, options.maxChars);
+        if (!description) throw new Error('职位描述节点为空');
+        next.description = description;
+        next.descriptionStatus = 'loaded';
+        next.descriptionError = '';
+        next.descriptionSource = options.source || 'page-reader';
+      } catch (error) {
+        if (typeof options.shouldRethrow === 'function' &&
+          options.shouldRethrow(error)) {
+          throw error;
+        }
+        next.description = '';
+        next.descriptionStatus = 'failed';
+        next.descriptionError = String(
+          error && error.message || error || '职位描述读取失败'
+        ).slice(0, 180);
+        next.descriptionSource = options.source || 'page-reader';
+      }
+      result.push(next);
+    }
+    return result;
+  }
+
+  function extractBossJobId(rawUrl) {
+    var match = String(rawUrl || '').match(
+      /\/job_detail\/([^/?#.]+?)(?:\.html)?(?:[?#]|$)/
+    );
+    return match && match[1] || '';
+  }
+
+  function normalizedBossName(raw) {
+    return String(raw || '').replace(/\s+/g, '').trim();
+  }
+
+  function bossDetailMatches(expected, current, previous) {
+    var target = expected && typeof expected === 'object' ? expected : {};
+    var actual = current && typeof current === 'object' ? current : {};
+    var before = previous && typeof previous === 'object' ? previous : null;
+    if (!String(actual.description || '').trim()) return false;
+
+    var expectedId = String(
+      target.encryptJobId || target.id || ''
+    ).trim();
+    var currentId = String(actual.encryptJobId || '').trim();
+    if (expectedId) return currentId === expectedId;
+
+    var expectedName = normalizedBossName(target.name);
+    var currentName = normalizedBossName(actual.name);
+    if (!expectedName || !currentName || currentName !== expectedName) {
+      return false;
+    }
+    if (!before) return true;
+    return currentName !== normalizedBossName(before.name) ||
+      String(actual.description || '') !== String(before.description || '');
+  }
+
+  function splitWords(raw) {
+    return String(raw || '')
+      .split(/[,，、\s]+/)
+      .map(function (word) { return word.trim().toLowerCase(); })
+      .filter(Boolean);
+  }
+
+  function keywordScreen(job, config) {
+    var cfg = config || {};
+    var blob = screeningText(job);
+    var excludes = splitWords(cfg.excludeKeywords);
+    for (var index = 0; index < excludes.length; index++) {
+      if (blob.indexOf(excludes[index]) >= 0) {
+        return {
+          match: false,
+          reviewRequired: false,
+          reason: '命中排除词：' + excludes[index],
+          score: 20
+        };
+      }
+    }
+    if (excludes.length && job && job.descriptionStatus === 'failed') {
+      return {
+        match: false,
+        reviewRequired: true,
+        reason: '职位描述暂时读取失败，待核对排除词',
+        score: 0
+      };
+    }
+
+    var includes = splitWords(cfg.includeKeywords);
+    if (includes.length) {
+      var hits = includes.filter(function (word) {
+        return blob.indexOf(word) >= 0;
+      });
+      if (hits.length) {
+        return {
+          match: true,
+          reviewRequired: false,
+          reason: '规则命中：' + hits.join('、'),
+          score: Math.min(95, 55 + hits.length * 15)
+        };
+      }
+      if (job && job.descriptionStatus === 'failed') {
+        return {
+          match: false,
+          reviewRequired: true,
+          reason: '职位描述暂时读取失败，待核对包含词',
+          score: 0
+        };
+      }
+      return {
+        match: false,
+        reviewRequired: false,
+        reason: '未命中包含词（已检查职位描述）',
+        score: 35
+      };
+    }
+    return {
+      match: true,
+      reviewRequired: false,
+      reason: '规则通过（无包含词过滤）',
+      score: 60
+    };
+  }
+
+  function requireDescriptionForAi(rule, job) {
+    var result = rule && typeof rule === 'object'
+      ? Object.assign({}, rule)
+      : { match: false, reviewRequired: true, reason: '', score: 0 };
+    if (!result.match) return result;
+    if (job && job.descriptionStatus === 'failed') {
+      return {
+        match: false,
+        reviewRequired: true,
+        reason: (result.reason ? result.reason + '｜' : '') +
+          'AI 所需职位描述暂时读取失败，待核对',
+        score: 0
+      };
+    }
+    return result;
+  }
+
   function screeningText(job) {
     return [
       job && job.name,
@@ -119,6 +280,11 @@
     normalizeText: normalizeText,
     extractFromDocument: extractFromDocument,
     enrichJobs: enrichJobs,
+    enrichJobsWithReader: enrichJobsWithReader,
+    extractBossJobId: extractBossJobId,
+    bossDetailMatches: bossDetailMatches,
+    keywordScreen: keywordScreen,
+    requireDescriptionForAi: requireDescriptionForAi,
     screeningText: screeningText,
     promptText: promptText
   };

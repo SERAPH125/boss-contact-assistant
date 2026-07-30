@@ -84,3 +84,29 @@ test('auto registration carries only the explicitly requested trusteeship state'
   assert.equal(contactOnly.enabled, false);
   assert.equal(contactAndTrusteeship.enabled, true);
 });
+
+test('trusteeship registration requires canonical conversation metadata after contact', () => {
+  assert.deepEqual(
+    Registration.checkReadiness({
+      success: true,
+      conversationRef: {
+        conversationId: 'peer~~stable-5',
+        url: 'https://www.zhipin.com/web/geek/chat?uid=peer~~stable-5'
+      },
+      baselineIncomingFingerprint: ''
+    }),
+    { ok: true }
+  );
+
+  assert.deepEqual(
+    Registration.checkReadiness({
+      success: true,
+      baselineIncomingFingerprint: 'id:baseline-6'
+    }),
+    {
+      ok: false,
+      code: 'TRUSTEESHIP_METADATA_UNAVAILABLE',
+      error: '联系成功，但无法取得可靠会话标识，AI 托管未开启'
+    }
+  );
+});
