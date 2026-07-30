@@ -9,6 +9,15 @@ const source = fs.readFileSync(
   path.join(root, 'src/platform/boss/content-search.js'),
   'utf8'
 );
+const selectorsSource = fs.readFileSync(
+  path.join(root, 'src/platform/boss/selectors.js'),
+  'utf8'
+);
+const selectorsContext = { globalThis: {} };
+vm.runInNewContext(selectorsSource, selectorsContext, {
+  filename: 'boss-selectors.js'
+});
+const BOSS_SELECTORS = selectorsContext.globalThis.SELECTORS;
 const JobDescription = require('../src/platform/job-description.js');
 
 function createVisibleButton(text, onClick, options = {}) {
@@ -22,6 +31,10 @@ function createVisibleButton(text, onClick, options = {}) {
       if (typeof onClick === 'function') onClick();
     },
     closest(selector) {
+      if (options.inGreetingResult &&
+          String(selector || '').indexOf('greet-boss-dialog') >= 0) {
+        return { className: 'greet-boss-dialog', isConnected: true };
+      }
       if (options.inDialog && /dialog/.test(selector)) return { role: 'dialog' };
       return null;
     }
@@ -35,7 +48,21 @@ function createHarness(options = {}) {
   let detailHrName = Object.prototype.hasOwnProperty.call(options, 'detailHrName')
     ? options.detailHrName
     : '张女士';
+  const detailHrNodes = Array.isArray(options.detailHrNodes)
+    ? options.detailHrNodes.map((node) => ({
+      selector: node.selector,
+      textContent: node.text
+    }))
+    : [{
+      selector: '.job-boss-info .name',
+      get textContent() {
+        return detailHrName;
+      }
+    }];
   let showContinue = options.showContinue === true;
+  let showGreetingResult =
+    showContinue ||
+    options.showGreetingDialogWithoutAction === true;
   let fakeNow = 0;
   let intervalSequence = 0;
   const activeIntervals = new Set();
@@ -49,10 +76,48 @@ function createHarness(options = {}) {
       });
     }
   }, { inDialog: true });
+  const continueTextNode = {
+    textContent: '继续沟通',
+    offsetParent: {},
+    tagName: 'SPAN',
+    closest(selector) {
+      if (/a,\s*button/.test(selector)) return continueButton;
+      if (/dialog/.test(selector)) return { role: 'dialog' };
+      return null;
+    }
+  };
+  const continueCloseButton = createVisibleButton('', () => {
+    showContinue = false;
+    showGreetingResult = false;
+  }, { inDialog: true, inGreetingResult: true });
+  const greetingResultDialog = {
+    // 现网容器常无 offsetParent；保护逻辑必须按 isConnected / 内部可见节点判定。
+    offsetParent: options.greetingDialogOffsetParentNull === true ? null : {},
+    isConnected: true,
+    textContent: options.showGreetingDialogWithoutAction
+      ? '已向BOSS发送消息'
+      : '已向BOSS发送消息继续沟通',
+    querySelector(selector) {
+      const sel = String(selector || '');
+      if (/\.sure-btn|greet-boss-footer|greet-boss-container/.test(sel)) {
+        return showContinue ? continueButton : null;
+      }
+      if (/\.icon-close/.test(sel)) {
+        return options.continueDialogHasClose ? continueCloseButton : null;
+      }
+      if (/\ba\b|\bbutton\b/.test(sel)) {
+        return showContinue ? continueButton : null;
+      }
+      return null;
+    }
+  };
   const contactButton = createVisibleButton('立即沟通', () => {
     showContinue = options.keepResidualContinueAfterContact === true
       ? true
       : options.showContinueAfterContact === true;
+    showGreetingResult =
+      showContinue ||
+      options.showGreetingDialogAfterContactWithoutAction === true;
     if (typeof options.onContactClick === 'function') {
       options.onContactClick({
         setDetailId(value) {
@@ -68,14 +133,46 @@ function createHarness(options = {}) {
       return detailName;
     }
   };
+  function matchesSelectorGroup(requested, owned) {
+    return String(requested || '')
+      .split(',')
+      .map((part) => part.trim())
+      .includes(owned);
+  }
+
+  function hrNodesForSelector(selector) {
+    return detailHrNodes.filter((node) =>
+      matchesSelectorGroup(selector, node.selector)
+    );
+  }
+
+  const detailCompanyAttrText = Object.prototype.hasOwnProperty.call(
+    options,
+    'detailCompanyAttr'
+  )
+    ? options.detailCompanyAttr
+    : '';
+  const detailCompanyAttrNode = detailCompanyAttrText
+    ? { textContent: detailCompanyAttrText, innerText: detailCompanyAttrText }
+    : null;
+
   const detailRoot = {
     offsetParent: {},
     querySelector(selector) {
       if (selector === '.job-detail-header .job-name') return heading;
       if (selector === '.job-detail-body .desc') return description;
-      if (selector === '.boss-name') {
-        return { textContent: detailHrName };
+      if (
+        detailCompanyAttrNode &&
+        (
+          selector === '.job-boss-info .boss-info-attr, .boss-info-attr' ||
+          selector === '.job-boss-info .boss-info-attr' ||
+          selector === '.boss-info-attr'
+        )
+      ) {
+        return detailCompanyAttrNode;
       }
+      const matchingHrNodes = hrNodesForSelector(selector);
+      if (matchingHrNodes.length) return matchingHrNodes[0];
       if (selector.includes('/job_detail/')) {
         return {
           get href() {
@@ -83,7 +180,7 @@ function createHarness(options = {}) {
           }
         };
       }
-      if (selector === '#contact-action') {
+      if (selector === BOSS_SELECTORS.jobs.immediateChatBtn) {
         if (options.hideContactAction) return null;
         if (options.switchOnContactLookup) {
           detailId = options.switchOnContactLookup;
@@ -94,6 +191,8 @@ function createHarness(options = {}) {
     },
     querySelectorAll(selector) {
       if (selector === '.job-detail-body .job-label-list li') return [];
+      const matchingHrNodes = hrNodesForSelector(selector);
+      if (matchingHrNodes.length) return matchingHrNodes;
       if (selector === 'a, button, span') {
         return options.hideContactAction ? [] : [contactButton];
       }
@@ -139,7 +238,7 @@ function createHarness(options = {}) {
         return options.includeStaleDetail ? staleDetailRoot : detailRoot;
       }
       if (selector === '.job-detail-body .desc') return description;
-      if (selector === '#contact-action') {
+      if (selector === BOSS_SELECTORS.jobs.immediateChatBtn) {
         if (options.foreignContactAction) return foreignContactButton;
         if (options.switchOnContactLookup) {
           detailId = options.switchOnContactLookup;
@@ -155,12 +254,24 @@ function createHarness(options = {}) {
           : [detailRoot];
       }
       if (selector === '.job-detail-body .job-label-list li') return [];
-      if (selector === '.job-card') return [];
+      if (selector === BOSS_SELECTORS.jobs.jobCard) return [];
+      if (selector === '.greet-boss-dialog') {
+        return showGreetingResult ? [greetingResultDialog] : [];
+      }
       if (selector === 'a, button, span, div[role="button"]') {
         return showContinue ? [continueButton] : [];
       }
+      if (selector === '.boss-dialog .close, .dialog-wrap .close, [class*="dialog"] .icon-close, .close-btn') {
+        return (showContinue || showGreetingResult) && options.continueDialogHasClose
+          ? [continueCloseButton]
+          : [];
+      }
       if (selector === 'a, button, span, div') {
-        return showContinue ? [continueButton] : [];
+        return showContinue
+          ? (options.nestedContinueText
+            ? [continueButton, continueTextNode]
+            : [continueButton])
+          : [];
       }
       if (selector === 'a, button, span') {
         if (options.foreignContactAction) {
@@ -179,17 +290,7 @@ function createHarness(options = {}) {
     console,
     URL,
     JobDescription,
-    SELECTORS: {
-      jobs: {
-        jobCard: '.job-card',
-        jobName: '.job-name',
-        jobSalary: '.job-salary',
-        tagList: '.tag',
-        bossName: '.boss-name',
-        bossActive: '.boss-active',
-        immediateChatBtn: '#contact-action'
-      }
-    },
+    SELECTORS: BOSS_SELECTORS,
     Humanize: {
       async humanClick(element, clickOptions) {
         const stages = ['mouseover', 'mousedown', 'mouseup', 'click'];
@@ -292,6 +393,7 @@ function createHarness(options = {}) {
     contactButton,
     foreignContactButton,
     continueButton,
+    continueCloseButton,
     setDetailId(value) {
       detailId = value;
     },
@@ -406,6 +508,127 @@ test('Boss contact requires the HR identity to be readable from the verified det
   assert.equal(harness.contactButton.clickCount, 0);
 });
 
+test('Boss contact reads the live job-boss-info recruiter from the verified detail panel', async () => {
+  let handoff = null;
+  const harness = createHarness({
+    detailId: 'target-job',
+    showContinueAfterContact: true,
+    detailHrNodes: [{
+      selector: '.job-boss-info h2.name',
+      text: '程女士 刚刚活跃'
+    }],
+    onSessionWrite(key, value) {
+      if (key === '__job_contact_expected__') handoff = JSON.parse(value);
+    }
+  });
+
+  const response = await harness.dispatch({
+    type: 'GO_CHAT',
+    job: {
+      id: 'target-job',
+      encryptJobId: 'target-job',
+      name: '目标岗位'
+    }
+  });
+
+  assert.equal(response.success, true, JSON.stringify(response));
+  assert.equal(harness.contactButton.clickCount, 1);
+  assert.equal(handoff.hrName, '程女士');
+});
+
+test('Boss contact refuses conflicting recruiter identities in the same verified detail panel', async () => {
+  let handoff = null;
+  const harness = createHarness({
+    detailId: 'target-job',
+    detailHrNodes: [
+      { selector: '.job-boss-info h2.name', text: '张女士' },
+      { selector: '.job-boss-info .name', text: '李女士' }
+    ],
+    onSessionWrite(key, value) {
+      if (key === '__job_contact_expected__') handoff = JSON.parse(value);
+    }
+  });
+
+  const response = await harness.dispatch({
+    type: 'GO_CHAT',
+    job: {
+      id: 'target-job',
+      encryptJobId: 'target-job',
+      name: '目标岗位'
+    }
+  });
+
+  assert.equal(response.success, false);
+  assert.equal(response.targetUncertain, true);
+  assert.equal(response.externalActionPossible, false);
+  assert.equal(harness.contactButton.clickCount, 0);
+  assert.equal(handoff, null);
+});
+
+test('Boss contact deduplicates equivalent recruiter nodes in the verified detail panel', async () => {
+  let handoff = null;
+  const harness = createHarness({
+    detailId: 'target-job',
+    showContinueAfterContact: true,
+    detailHrNodes: [
+      { selector: '.job-boss-info h2.name', text: '张女士 刚刚活跃' },
+      { selector: '.job-boss-info .name', text: '张女士' }
+    ],
+    onSessionWrite(key, value) {
+      if (key === '__job_contact_expected__') handoff = JSON.parse(value);
+    }
+  });
+
+  const response = await harness.dispatch({
+    type: 'GO_CHAT',
+    job: {
+      id: 'target-job',
+      encryptJobId: 'target-job',
+      name: '目标岗位'
+    }
+  });
+
+  assert.equal(response.success, true, JSON.stringify(response));
+  assert.equal(harness.contactButton.clickCount, 1);
+  assert.equal(handoff.hrName, '张女士');
+});
+
+test('Boss contact removes live recruiter activity suffix variants before handoff', async () => {
+  const activitySuffixes = [
+    '2月内活跃',
+    '2周内活跃',
+    '近半年活跃',
+    '4月前活跃'
+  ];
+  for (const suffix of activitySuffixes) {
+    let handoff = null;
+    const harness = createHarness({
+      detailId: 'target-job',
+      showContinueAfterContact: true,
+      detailHrNodes: [{
+        selector: '.job-boss-info h2.name',
+        text: '张女士 ' + suffix
+      }],
+      onSessionWrite(key, value) {
+        if (key === '__job_contact_expected__') handoff = JSON.parse(value);
+      }
+    });
+
+    const response = await harness.dispatch({
+      type: 'GO_CHAT',
+      job: {
+        id: 'target-job',
+        encryptJobId: 'target-job',
+        name: '目标岗位'
+      }
+    });
+
+    assert.equal(response.success, true, suffix + ': ' + JSON.stringify(response));
+    assert.equal(harness.contactButton.clickCount, 1, suffix);
+    assert.equal(handoff.hrName, '张女士', suffix);
+  }
+});
+
 test('Boss contact does not dispatch click when an unknown continue dialog appears during human delay', async () => {
   const harness = createHarness({
     detailId: 'target-job',
@@ -474,7 +697,8 @@ test('Boss contact never treats a residual continue-chat dialog as its primary a
   });
 
   assert.equal(response.success, false);
-  assert.equal(response.selectorUnavailable, true);
+  assert.equal(response.targetUncertain, true);
+  assert.equal(response.externalActionPossible, false);
   assert.equal(harness.continueButton.clickCount, 0);
 });
 
@@ -499,6 +723,129 @@ test('Boss contact never confirms a continue-chat dialog that was already visibl
   assert.equal(response.success, false);
   assert.equal(response.targetUncertain, true);
   assert.equal(response.externalActionPossible, false);
+});
+
+test('Boss contact never closes a residual greeting result dialog before ownership is proven', async () => {
+  const harness = createHarness({
+    detailId: 'target-job',
+    showContinue: true,
+    continueDialogHasClose: true
+  });
+
+  const response = await harness.dispatch({
+    type: 'GO_CHAT',
+    job: {
+      id: 'target-job',
+      encryptJobId: 'target-job',
+      name: '目标岗位'
+    }
+  });
+
+  assert.equal(response.success, false);
+  assert.equal(response.targetUncertain, true);
+  assert.equal(response.externalActionPossible, false);
+  assert.equal(harness.contactButton.clickCount, 0);
+  assert.equal(harness.continueButton.clickCount, 0);
+  assert.equal(harness.continueCloseButton.clickCount, 0);
+});
+
+test('Boss contact never closes or contacts behind a greeting result whose action is not mounted yet', async () => {
+  const harness = createHarness({
+    detailId: 'target-job',
+    showGreetingDialogWithoutAction: true,
+    continueDialogHasClose: true
+  });
+
+  const response = await harness.dispatch({
+    type: 'GO_CHAT',
+    job: {
+      id: 'target-job',
+      encryptJobId: 'target-job',
+      name: '目标岗位'
+    }
+  });
+
+  assert.equal(response.success, false);
+  assert.equal(response.targetUncertain, true);
+  assert.equal(response.externalActionPossible, false);
+  assert.equal(harness.contactButton.clickCount, 0);
+  assert.equal(harness.continueButton.clickCount, 0);
+  assert.equal(
+    harness.continueCloseButton.clickCount,
+    0,
+    '已发送结果弹窗即使尚无可读动作，也不能由通用弹窗清理关闭'
+  );
+});
+
+test('Boss contact protects greet-boss-dialog even when container offsetParent is null', async () => {
+  const harness = createHarness({
+    detailId: 'target-job',
+    showGreetingDialogWithoutAction: true,
+    continueDialogHasClose: true,
+    greetingDialogOffsetParentNull: true
+  });
+
+  const response = await harness.dispatch({
+    type: 'GO_CHAT',
+    job: {
+      id: 'target-job',
+      encryptJobId: 'target-job',
+      name: '目标岗位'
+    }
+  });
+
+  assert.equal(response.success, false);
+  assert.equal(response.targetUncertain, true);
+  assert.equal(harness.contactButton.clickCount, 0);
+  assert.equal(
+    harness.continueCloseButton.clickCount,
+    0,
+    '容器无 offsetParent 时也不能点掉成功回执的 ×'
+  );
+});
+
+test('Boss contact confirms the new greeting result instead of closing it generically', async () => {
+  const harness = createHarness({
+    detailId: 'target-job',
+    showContinueAfterContact: true,
+    continueDialogHasClose: true
+  });
+
+  const response = await harness.dispatch({
+    type: 'GO_CHAT',
+    job: {
+      id: 'target-job',
+      encryptJobId: 'target-job',
+      name: '目标岗位'
+    }
+  });
+
+  assert.equal(response.success, true, JSON.stringify(response));
+  assert.equal(response.navigated, true);
+  assert.equal(harness.contactButton.clickCount, 1);
+  assert.equal(harness.continueButton.clickCount, 1);
+  assert.equal(harness.continueCloseButton.clickCount, 0);
+});
+
+test('Boss contact treats nested continue text as one dialog action', async () => {
+  const harness = createHarness({
+    detailId: 'target-job',
+    showContinueAfterContact: true,
+    nestedContinueText: true
+  });
+
+  const response = await harness.dispatch({
+    type: 'GO_CHAT',
+    job: {
+      id: 'target-job',
+      encryptJobId: 'target-job',
+      name: '目标岗位'
+    }
+  });
+
+  assert.equal(response.success, true, JSON.stringify(response));
+  assert.equal(response.navigated, true);
+  assert.equal(harness.continueButton.clickCount, 1);
 });
 
 test('Boss contact revalidates the stable job id before confirming continue-chat', async () => {
@@ -549,6 +896,7 @@ test('Boss detail reads the visible target panel without mixing a hidden stale p
 test('Boss contact clicks only the action owned by the verified detail panel', async () => {
   const harness = createHarness({
     detailId: 'target-job',
+    showContinueAfterContact: true,
     foreignContactAction: true
   });
 
@@ -570,6 +918,7 @@ test('Boss contact carries the HR from the verified detail panel into chat hando
   let handoff = null;
   const harness = createHarness({
     detailId: 'target-job',
+    showContinueAfterContact: true,
     detailHrName: '张女士 刚刚活跃',
     onSessionWrite(key, value) {
       if (key === '__job_contact_expected__') handoff = JSON.parse(value);
@@ -589,4 +938,56 @@ test('Boss contact carries the HR from the verified detail panel into chat hando
 
   assert.equal(response.success, true, JSON.stringify(response));
   assert.equal(handoff.hrName, '张女士');
+});
+
+test('Boss contact reads company from boss-info-attr when the list card had no company', async () => {
+  let handoff = null;
+  const harness = createHarness({
+    detailId: 'target-job',
+    showContinueAfterContact: true,
+    detailHrNodes: [{
+      selector: '.job-boss-info h2.name',
+      text: '吕程 本月活跃'
+    }],
+    detailCompanyAttr: '吉林省萌敬商贸 · 人事',
+    onSessionWrite(key, value) {
+      if (key === '__job_contact_expected__') handoff = JSON.parse(value);
+    }
+  });
+
+  const response = await harness.dispatch({
+    type: 'GO_CHAT',
+    job: {
+      id: 'target-job',
+      encryptJobId: 'target-job',
+      name: '双休早10晚5跨境电商（欢迎小白）',
+      company: '',
+      hrName: ''
+    }
+  });
+
+  assert.equal(response.success, true, JSON.stringify(response));
+  assert.equal(handoff.hrName, '吕程');
+  assert.equal(handoff.company, '吉林省萌敬商贸');
+});
+
+test('Boss contact never reports success without a result receipt or chat navigation', async () => {
+  const harness = createHarness({
+    detailId: 'target-job'
+  });
+
+  const response = await harness.dispatch({
+    type: 'GO_CHAT',
+    job: {
+      id: 'target-job',
+      encryptJobId: 'target-job',
+      name: '目标岗位'
+    }
+  });
+
+  assert.equal(harness.contactButton.clickCount, 1);
+  assert.equal(response.success, false);
+  assert.equal(response.sendResultUnknown, true);
+  assert.equal(response.externalActionPossible, true);
+  assert.match(response.error, /AI 托管未登记/);
 });

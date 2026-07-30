@@ -205,6 +205,7 @@ Boss chat content script 失败关闭的消息契约：
 | --- | --- |
 | `GET_ACTIVE_CONVERSATION_REF` | 要求恰好一个可见活动会话节点（旧版 active link，或无锚点的 `.friend-content` / active item）和一个可见消息容器（`.chat-message-list` 或 `.chat-record`）。优先通过相同 `conversationId`/`uid` dataset、`aria-controls` 或 `aria-labelledby` 证明归属；缺少这些关系时只接受页面 `uid`，或最新且严格校验的同源 `historyMsg?bossId=` 软标识；身份文本只读取唯一 active item 和 owned pane 内 header |
 | `CAPTURE_ACTIVE_CONVERSATION` / `PROBE_PEER_IDENTITY` | 在 owned 活动会话上同时收集活动 DOM ID、页面 `uid` 和最新同源精确 `historyMsg bossId`，再请求 `getGeekFriendList.json`。候选 ID 冲突时，必须由活动会话 scoped identity 在结构化好友 `name / brandName / jobName` 中唯一命中；零命中或多命中均失败关闭。公司、岗位和 HR 优先使用最终唯一好友记录的结构化字段。CAPTURE 先绑定 canonical `encryptUid`、aliases 和数字 `peerUid`，再按该 peer 读取历史并建立 incoming 基线；任一失败不写 store |
+| `CAPTURE_CONTACTED_CONVERSATION` | BOSS「立即沟通」成功回执后的只读登记：先用会话期望与活动 DOM 做严格匹配，再唯一收敛 encryptUid；**不触碰输入框、不重发招呼**。身份二次佐证在 DOM 已匹配时要求好友侧至少 1 条稳定字段：HR 必须硬匹配，公司/岗位允许 `…` 截断或简称漂移（不计证据但不硬否决）。失败返回 `TARGET_UNCERTAIN`，上层保留联系成功、不自动重试 |
 | `READ_ACTIVE_CONVERSATION` | 不激活或依赖当前活动 DOM。要求调用对象自有的字符串 `lastFingerprint`，重新净化登记时已经通过好友列表唯一建立且由 store 严格保存的 canonical peerId/aliases，然后直接按 canonical peerId 从同源历史接口读取；周期检查不重复请求好友列表。返回给 engine 的 ref 始终使用 canonical peerId/URL。没有 incoming 时 GET 返回空串（绝不返回 `null`），可原样传给 READ；遗漏/非字符串返回 `BASELINE_REQUIRED`，非空基线必须命中 incoming，否则返回 `BASELINE_NOT_FOUND` |
 | `SEND_MANAGED_REPLY` | Enter 和 fallback button 每次动作前同步重验 ref、身份和同一个 owned scope，证据后再次重验；fallback 还要求输入框与按钮都是最初对象且输入内容精确等于冻结草稿，任一变化都不点击。发送前记录历史接口 outgoing 指纹，发送后只接受同目标历史接口中新增且文案等于草稿的唯一 outgoing |
 

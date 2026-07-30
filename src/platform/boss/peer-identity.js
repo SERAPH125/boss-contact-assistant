@@ -85,7 +85,10 @@
 
   function friendPosition(friend) {
     if (!friend || typeof friend !== 'object') return '';
-    var keys = ['jobName', 'positionName', 'position', 'jobTitle', 'title'];
+    // Boss 好友列表的 `title` 表示招聘者职务（如「招聘专员」
+    // 「人事培训」），不是候选人正在沟通的岗位。岗位只接受语义明确
+    // 的 job/position 字段，缺失时由已验证的聊天页标题回退。
+    var keys = ['jobName', 'positionName', 'position', 'jobTitle'];
     for (var i = 0; i < keys.length; i++) {
       var key = keys[i];
       if (!Object.prototype.hasOwnProperty.call(friend, key)) continue;
@@ -101,8 +104,6 @@
     if (!ids.length) return null;
     var encryptUid = asPeerId(friend.encryptUid);
     var position = friendPosition(friend);
-    // title 在 Boss 好友里常是「HR/招聘者」，不能当岗位名
-    if (position && /^(HR|hr|招聘者|人事|猎头)$/.test(position)) position = '';
     return {
       encryptUid: encryptUid,
       peerUid: asNumericUid(friend.uid),

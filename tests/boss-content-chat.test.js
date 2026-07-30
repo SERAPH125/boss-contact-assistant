@@ -772,6 +772,195 @@ test('CAPTURE registers the owned active conversation without expected identity'
   assert.ok(result.company || result.position || result.hrName);
 });
 
+test('CAPTURE_CONTACTED_CONVERSATION accepts ellipsis brandName after DOM already matched', async () => {
+  const h = createHarness({
+    activeText: '孙先生 颍泉区左岸服装商... 招聘者',
+    headerText: '孙先生 颍泉区左岸服装商... 跨境电商运营专员',
+    peerId: 'peer~~ellipsis',
+    friends: [{
+      encryptUid: 'peer~~ellipsis',
+      uid: 200,
+      conversationId: 'conv1',
+      name: '孙先生',
+      brandName: '颍泉区左岸服装商...',
+      title: '招聘者'
+    }],
+    messages: [{
+      id: 'sent-greeting',
+      direction: 'outgoing',
+      text: '我对跨境电商运营专员很感兴趣，希望可以深聊，谢谢！'
+    }]
+  });
+  h.input._selectors.add('div#chat-input');
+  h.input._onDispatch = () => {
+    h.externalActions += 1;
+  };
+
+  const result = await h.dispatch({
+    type: 'CAPTURE_CONTACTED_CONVERSATION',
+    expected: {
+      company: '颍泉区左岸服装商行',
+      name: '跨境电商运营专员',
+      hrName: '孙先生'
+    }
+  });
+
+  assert.equal(result.success, true, JSON.stringify(result));
+  assert.equal(result.conversationRef.conversationId, 'peer~~ellipsis');
+  assert.equal(result.hrName, '孙先生');
+  assert.equal(h.externalActions, 0);
+});
+
+test('CAPTURE_CONTACTED_CONVERSATION accepts short friend brand when DOM already matched', async () => {
+  const h = createHarness({
+    activeText: '康月月 花生企管 人事',
+    headerText: '康月月 花生企管 TK跨境电商',
+    peerId: 'peer~~short-brand',
+    friends: [{
+      encryptUid: 'peer~~short-brand',
+      uid: 100,
+      conversationId: 'conv1',
+      name: '康月月',
+      // 好友 brand 与详情/DOM 简称不对齐时，DOM 已匹配则不硬否决
+      brandName: '安徽花生企业管理咨询有限公司',
+      title: '人事'
+    }],
+    messages: [{
+      id: '337069469603401',
+      direction: 'outgoing',
+      text: '我对TK跨境电商很感兴趣，希望可以深聊，谢谢！'
+    }]
+  });
+  h.input._selectors.add('div#chat-input');
+  h.input._onDispatch = () => {
+    h.externalActions += 1;
+  };
+
+  const result = await h.dispatch({
+    type: 'CAPTURE_CONTACTED_CONVERSATION',
+    expected: {
+      company: '花生企管',
+      name: 'TK跨境电商',
+      hrName: '康月月'
+    }
+  });
+
+  assert.equal(result.success, true, JSON.stringify(result));
+  assert.equal(result.conversationRef.conversationId, 'peer~~short-brand');
+  assert.equal(result.hrName, '康月月');
+  assert.equal(h.externalActions, 0);
+});
+
+test('CAPTURE_CONTACTED_CONVERSATION still rejects wrong HR even when brand drifts', async () => {
+  const h = createHarness({
+    activeText: '康月月 花生企管 人事',
+    headerText: '康月月 花生企管 TK跨境电商',
+    peerId: 'peer~~wrong-hr-brand',
+    friends: [{
+      encryptUid: 'peer~~wrong-hr-brand',
+      uid: 100,
+      conversationId: 'conv1',
+      name: '张女士',
+      brandName: '花生企管',
+      title: '人事'
+    }],
+    messages: [{
+      id: '337069469603402',
+      direction: 'outgoing',
+      text: '我对TK跨境电商很感兴趣，希望可以深聊，谢谢！'
+    }]
+  });
+  h.input._selectors.add('div#chat-input');
+
+  const result = await h.dispatch({
+    type: 'CAPTURE_CONTACTED_CONVERSATION',
+    expected: {
+      company: '花生企管',
+      name: 'TK跨境电商',
+      hrName: '康月月'
+    }
+  });
+
+  assert.equal(result.success, false);
+  assert.equal(result.errorCode, 'TARGET_UNCERTAIN');
+  assert.match(String(result.error || ''), /稳定联系人身份与原目标不一致/);
+});
+
+test('CAPTURE_CONTACTED_CONVERSATION validates the visible target and accepts sparse friend metadata without writing', async () => {
+  const h = createHarness({
+    activeText: '朱女士 无锡优妮克塑业 招聘者',
+    headerText: '朱女士 无锡优妮克塑业 早九晚五 双休+跨境电商运营',
+    peerId: 'peer~~contacted',
+    friends: [{
+      encryptUid: 'peer~~contacted',
+      uid: 100,
+      conversationId: 'conv1',
+      name: '朱女士',
+      brandName: '无锡优妮克塑业',
+      title: '招聘者'
+    }],
+    messages: [{
+      id: 'sent-by-boss-contact',
+      direction: 'outgoing',
+      text: '我对早九晚五 双休+跨境电商运营很感兴趣，希望可以深聊，谢谢！'
+    }]
+  });
+  h.input._selectors.add('div#chat-input');
+  h.input._onDispatch = () => {
+    h.externalActions += 1;
+  };
+
+  const result = await h.dispatch({
+    type: 'CAPTURE_CONTACTED_CONVERSATION',
+    expected: {
+      company: '无锡优妮克塑业',
+      name: '早九晚五 双休+跨境电商运营',
+      hrName: '朱女士'
+    }
+  });
+
+  assert.equal(result.success, true, JSON.stringify(result));
+  assert.equal(result.conversationRef.conversationId, 'peer~~contacted');
+  assert.equal(result.conversationRef.peerUid, '100');
+  assert.equal(result.company, '无锡优妮克塑业');
+  assert.equal(result.position, '早九晚五 双休+跨境电商运营');
+  assert.equal(result.hrName, '朱女士');
+  assert.equal(h.externalActions, 0);
+});
+
+test('CAPTURE_CONTACTED_CONVERSATION rejects a different stable HR without writing', async () => {
+  const h = createHarness({
+    activeText: '张女士 无锡优妮克塑业 招聘者',
+    headerText: '张女士 无锡优妮克塑业 早九晚五 双休+跨境电商运营',
+    peerId: 'peer~~wrong-contact',
+    friends: [{
+      encryptUid: 'peer~~wrong-contact',
+      uid: 100,
+      conversationId: 'conv1',
+      name: '张女士',
+      brandName: '无锡优妮克塑业',
+      title: '招聘者'
+    }]
+  });
+  h.input._selectors.add('div#chat-input');
+  h.input._onDispatch = () => {
+    h.externalActions += 1;
+  };
+
+  const result = await h.dispatch({
+    type: 'CAPTURE_CONTACTED_CONVERSATION',
+    expected: {
+      company: '无锡优妮克塑业',
+      name: '早九晚五 双休+跨境电商运营',
+      hrName: '朱女士'
+    }
+  });
+
+  assert.equal(result.success, false);
+  assert.equal(result.errorCode, 'TARGET_UNCERTAIN');
+  assert.equal(h.externalActions, 0);
+});
+
 test('SEND_ACTIVE returns canonical friend-list identity for auto registration', async () => {
   const h = createHarness({
     activeText: '罗榜伟 杭州双一科技有限公司 跨境电商运营',

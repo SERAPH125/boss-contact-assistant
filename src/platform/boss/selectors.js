@@ -9,8 +9,16 @@
       jobName: '.job-name',
       jobSalary: '.job-salary',
       tagList: '.tag-list li',
-      company: '.company-name, .boss-info .company-name, [class*="company-name"]',
+      // 列表卡公司名：现网多为 a.boss-info > span.boss-name（不是招聘者）
+      company: '.company-name, .boss-info .company-name, a.boss-info .boss-name, .boss-info .boss-name, span.boss-name',
       bossName: '.boss-name, .boss-info .name, [class*="boss-name"]',
+      // 详情面板招聘者；避免回落到列表式 .boss-name（现网那是公司名）。
+      detailRecruiter: [
+        '.job-boss-info h2.name',
+        '.job-boss-info .name',
+        '.boss-info h2.name',
+        '.job-boss-info .boss-name'
+      ].join(', '),
       immediateChatBtn: 'a.op-btn-chat',
       bossActive: '.boss-online-tag, .boss-active-time, .company-tag, [class*="boss-online"], [class*="active-time"], .info-public'
     },

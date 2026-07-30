@@ -195,6 +195,7 @@ input[type=file] { width: 100%; font-size: 12px; }
 .review-head { display: flex; justify-content: space-between; align-items: center; gap: 8px; margin-bottom: 4px; }
 .review-actions { display: flex; gap: 6px; }
 .review-hint { margin: 0 0 8px; }
+.delivery-status { margin: 0 0 8px; color: #b42318; }
 .delivery-actions { display: grid; gap: 8px; margin-top: 10px; }
 .delivery-actions .btn-go, .delivery-actions .btn-ghost { margin-top: 0; }
 .review-list { max-height: calc(100vh - 220px); overflow-y: auto; background: #fff; border: 1px solid #e5e8eb; border-radius: 8px; }

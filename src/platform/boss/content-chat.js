@@ -715,6 +715,48 @@
     };
   }
 
+  function stablePeerMatchesExpected(peer, expected, options) {
+    const target = expected && typeof expected === 'object' ? expected : {};
+    const domMatched = !!(options && options.domMatched === true);
+    // HR 必须硬匹配；公司/岗位在 DOM 已证明后允许简称漂移（如「花生企管」
+    // vs 工商全称），只是不计为证据，不能因此否决唯一收敛的 peer。
+    const pairs = [
+      {
+        actual: peer && peer.matchedName,
+        wanted: target.hrName,
+        hard: true
+      },
+      {
+        actual: peer && peer.matchedCompany,
+        wanted: target.company,
+        hard: !domMatched
+      },
+      {
+        actual: peer && peer.matchedPosition,
+        wanted: target.name || target.position,
+        hard: !domMatched
+      }
+    ];
+    let evidenceCount = 0;
+    for (let i = 0; i < pairs.length; i++) {
+      const pair = pairs[i];
+      const actual = typeof pair.actual === 'string' ? pair.actual.trim() : '';
+      const wanted = typeof pair.wanted === 'string' ? pair.wanted.trim() : '';
+      if (!actual || !wanted) continue;
+      if (!MessageSend.matchesExpectedConversation(actual, {
+        company: wanted
+      })) {
+        if (pair.hard) return false;
+        continue;
+      }
+      evidenceCount += 1;
+    }
+    // 好友列表常缺岗位名；若活动 DOM 已与原目标严格匹配，且 peer 由该活动
+    // 会话唯一收敛，则 HR 或公司任一稳定字段即可完成二次佐证。
+    const minEvidence = domMatched ? 1 : 2;
+    return evidenceCount >= minEvidence;
+  }
+
   // 岗位卡与系统通知不属于对话正文，排除后不参与基线与游标。
   const HISTORY_SYSTEM_BODY_TYPES = new Set([8, 16]);
 
@@ -1039,15 +1081,7 @@
     if (!initial.success) return initial;
     const peer = await resolvePeerFromActive(initial);
     if (!peer.success) return peer;
-    const resolvedIdentityText = [
-      peer.matchedName,
-      peer.matchedCompany,
-      peer.matchedPosition
-    ].filter(Boolean).join(' ');
-    if (!MessageSend.matchesExpectedConversationStrict(
-      resolvedIdentityText,
-      matched.target
-    )) {
+    if (!stablePeerMatchesExpected(peer, matched.target, { domMatched: true })) {
       return targetFailure('当前会话的稳定联系人身份与原目标不一致，未发送简历或招呼语');
     }
     const target = expectedFromResolvedPeerPreserving(matched.target, peer);
@@ -1141,6 +1175,55 @@
       success: true,
       conversationRef: peer.conversationRef,
       baselineIncomingFingerprint: lastIncomingFingerprint(read.messages)
+    };
+  }
+
+  // BOSS「立即沟通」成功回执已经发送首条招呼。此路径只核验目标、
+  // 解析 canonical peer、读取消息基线并登记托管，绝不触碰输入框。
+  async function captureContactedConversation(msg) {
+    const preflight = managedPreflight();
+    if (preflight) return preflight;
+    const matched = await waitForExpectedConversation(msg.expected, 4500);
+    if (!matched.ok) {
+      return targetFailure('已联系，但当前会话无法与原岗位、公司和 HR 严格匹配');
+    }
+    const initial = validateManagedTarget(matched.target);
+    if (!initial.success) return initial;
+    const peer = await resolvePeerFromActive(initial);
+    if (!peer.success) return peer;
+    // DOM 已与原目标严格匹配，且 peer 由该活动会话唯一收敛；好友列表常缺岗位。
+    if (!stablePeerMatchesExpected(peer, matched.target, { domMatched: true })) {
+      return targetFailure('已联系，但稳定联系人身份与原目标不一致');
+    }
+    const target = expectedFromResolvedPeerPreserving(matched.target, peer);
+    if (!MessageSend.matchesExpectedConversationStrict(
+      scopedConversationText(initial.scope),
+      target
+    )) {
+      return targetFailure('已联系，但当前会话缺少足够的目标身份依据');
+    }
+    const read = await readHistoryMessages(
+      peer.conversationRef.conversationId,
+      peer.conversationRef.peerUid
+    );
+    if (!read.success) return read;
+    const latest = validateManagedTarget(target, peer.conversationRef);
+    if (!latest.success) return latest;
+    if (!sameOwnedScope(initial.scope, latest.scope) ||
+        !MessageSend.matchesExpectedConversationStrict(
+          scopedConversationText(latest.scope),
+          target
+        )) {
+      return targetFailure('登记托管前当前会话已发生切换');
+    }
+    return {
+      success: true,
+      conversationRef: peer.conversationRef,
+      peerSource: peer.peerSource,
+      baselineIncomingFingerprint: lastIncomingFingerprint(read.messages),
+      company: peer.matchedCompany || target.company || '',
+      position: peer.matchedPosition || target.name || '',
+      hrName: peer.matchedName || target.hrName || ''
     };
   }
 
@@ -1836,6 +1919,15 @@
         errorCode: 'MESSAGE_ORDER_UNCERTAIN',
         messageOrderUncertain: true,
         error: 'Boss 历史消息读取失败'
+      }));
+      return true;
+    }
+    if (msg.type === 'CAPTURE_CONTACTED_CONVERSATION') {
+      captureContactedConversation(msg).then((r) => sendResponse(r)).catch(() => sendResponse({
+        success: false,
+        errorCode: 'TARGET_UNCERTAIN',
+        targetUncertain: true,
+        error: '已联系，但登记目标会话失败'
       }));
       return true;
     }

@@ -5,7 +5,11 @@
   if (typeof module !== 'undefined' && module.exports) module.exports = api;
 })(typeof globalThis !== 'undefined' ? globalThis : self, function () {
   function normalize(value) {
-    return String(value || '').replace(/\s+/g, '').toLowerCase();
+    // 好友列表 brandName 常带「…」截断；与岗位卡全称比对前去掉省略号
+    return String(value || '')
+      .replace(/\s+/g, '')
+      .replace(/(?:\.{3}|…|⋯)+/g, '')
+      .toLowerCase();
   }
 
   function pushUnique(list, token) {
@@ -39,6 +43,23 @@
     return out;
   }
 
+  function tokenMatchesCurrent(current, token) {
+    if (!token || token.length < 2 || !current) return false;
+    if (current.indexOf(token) >= 0) return true;
+    // 仅当页面文案本身很短时做反向包含（例如只读到了公司简称）
+    if (current.length >= 2 && current.length <= 24 && token.indexOf(current) >= 0) {
+      return true;
+    }
+    // 好友列表 / 聊天头常截断公司名；省略号去掉后只剩前缀
+    if (token.length >= 6) {
+      var maxDrop = Math.min(4, token.length - 6);
+      for (var drop = 1; drop <= maxDrop; drop++) {
+        if (current.indexOf(token.slice(0, token.length - drop)) >= 0) return true;
+      }
+    }
+    return false;
+  }
+
   function matchesExpectedConversation(currentText, expected) {
     var current = normalize(currentText);
     if (!current) return false;
@@ -51,9 +72,7 @@
     });
     if (!tokens.length) return false;
     return tokens.some(function (token) {
-      if (current.indexOf(token) >= 0) return true;
-      // 仅当页面文案本身很短时做反向包含（例如只读到了公司简称）
-      return current.length >= 2 && current.length <= 24 && token.indexOf(current) >= 0;
+      return tokenMatchesCurrent(current, token);
     });
   }
 
@@ -66,20 +85,28 @@
     var current = normalize(currentText);
     if (!current) return false;
     var data = expected || {};
-    var fields = [
+    var rawFields = [
       data.hrName,
       data.company,
       data.name || data.position
     ].filter(function (value) {
       return identityCandidates(value).length > 0;
     });
+    var fields = [];
+    rawFields.forEach(function (value) {
+      var candidates = identityCandidates(value);
+      var duplicatesKnownField = fields.some(function (known) {
+        var knownCandidates = identityCandidates(known);
+        return candidates.some(function (candidate) {
+          return knownCandidates.indexOf(candidate) !== -1;
+        });
+      });
+      if (!duplicatesKnownField) fields.push(value);
+    });
     if (fields.length < 2) return false;
     return fields.every(function (value) {
       return identityCandidates(value).some(function (token) {
-        if (current.indexOf(token) >= 0) return true;
-        return current.length >= 2 &&
-          current.length <= 24 &&
-          token.indexOf(current) >= 0;
+        return tokenMatchesCurrent(current, token);
       });
     });
   }

@@ -39,11 +39,15 @@ test('matches Boss chat titles that omit parenthetical job suffixes', () => {
   }), false);
 });
 
-test('does not treat short fragments like 运营 as identity matches', () => {
-  assert.equal(matchesExpectedConversation('招聘运营实习生', {
-    name: '跨境电商运营 (TikTok 境外 + 国内店铺)',
-    company: '',
-    hrName: ''
+test('matches truncated friend-list brand names that use ellipsis', () => {
+  assert.equal(matchesExpectedConversation('颍泉区左岸服装商...', {
+    company: '颍泉区左岸服装商行'
+  }), true);
+  assert.equal(matchesExpectedConversation('沙市区开玉商贸行…', {
+    company: '荆州市沙市区开玉商贸行'
+  }), true);
+  assert.equal(matchesExpectedConversation('颍泉区左岸服装商...', {
+    company: '完全无关的公司'
   }), false);
 });
 
@@ -79,6 +83,16 @@ test('strict initial-send identity rejects the same company and job when HR diff
       name: '跨境电商运营',
       company: '杭州双一科技有限公司',
       hrName: '张女士'
+    }
+  ), false);
+});
+
+test('strict initial-send identity requires two genuinely independent fields', () => {
+  assert.equal(matchesExpectedConversationStrict(
+    '杭州双一科技有限公司',
+    {
+      company: '杭州双一科技有限公司',
+      name: '杭州双一科技'
     }
   ), false);
 });

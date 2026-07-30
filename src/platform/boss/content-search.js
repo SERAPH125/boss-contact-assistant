@@ -117,6 +117,24 @@
     const clicked = [];
 
     for (let round = 0; round < 3; round++) {
+      // BOSS 首次建联的成功回执使用 `.greet-boss-dialog`。该弹窗可能
+      // 先挂载容器与关闭图标，再异步挂载「继续沟通」按钮；因此不能
+      // 依赖按钮文案来识别，更不能在按钮尚未出现时把它当普通蒙层关闭。
+      if (visibleGreetingResultDialogs().length > 0) {
+        break;
+      }
+      // 任何带写操作的业务弹窗都必须交给对应事务处理。尤其不能把
+      // 「已向 BOSS 发送消息」结果弹窗的 × 当作普通广告关闭，否则会
+      // 丢失「继续沟通」导航以及后续 AI 托管所需的会话标识。
+      if (visibleDialogActions([
+        '立即沟通',
+        '继续沟通',
+        '确认',
+        '同意',
+        '继续'
+      ]).length > 0) {
+        break;
+      }
       let hit = null;
       const els = document.querySelectorAll('a, button, span, div[role="button"]');
       for (const el of els) {
@@ -130,7 +148,16 @@
       if (!hit) {
         const closes = document.querySelectorAll('.boss-dialog .close, .dialog-wrap .close, [class*="dialog"] .icon-close, .close-btn');
         for (const el of closes) {
-          if (el && el.offsetParent !== null) { hit = { el: el, tx: 'close' }; break; }
+          if (!el || el.offsetParent === null) continue;
+          // 现网 `.greet-boss-dialog` 容器本身常无 offsetParent，但其
+          // `.icon-close` 仍可见；绝不能当成广告关掉成功回执。
+          try {
+            if (typeof el.closest === 'function' && el.closest('.greet-boss-dialog')) {
+              continue;
+            }
+          } catch (e) {}
+          hit = { el: el, tx: 'close' };
+          break;
         }
       }
       if (!hit) break;
@@ -162,13 +189,20 @@
       lid = parsedLink.searchParams.get('lid') || '';
     } catch (e) {}
     const tags = Array.from(card.querySelectorAll(SELECTORS.jobs.tagList)).map(t => t.textContent.trim()).filter(Boolean);
+    // 现网职位卡：.boss-name 是公司名（见 browser-harness BOSS job card）；招聘者姓名只在详情面板。
     let company = '';
-    const compEl = card.querySelector('.company-name a, .company-name, [class*="company-name"], .boss-info .company-name, .company-info a, [class*="company"] a');
+    const compEl = card.querySelector(
+      '.company-name a, .company-name, .boss-info .company-name, .company-info a'
+    );
     if (compEl) company = compEl.textContent.trim();
-    const bossEl = card.querySelector(SELECTORS.jobs.bossName || '.boss-name');
-    const hrName = bossEl
-      ? normalizedBossName(bossEl.textContent || '')
-      : '';
+    if (!company) {
+      const brandEl = card.querySelector(
+        'a.boss-info .boss-name, .boss-info .boss-name, span.boss-name'
+      );
+      if (brandEl) company = brandEl.textContent.trim();
+    }
+    // 列表卡通常不暴露 HR；禁止把公司名误写入 hrName。
+    const hrName = '';
     let activeText = '';
     const activeEl = card.querySelector(SELECTORS.jobs.bossActive);
     if (activeEl) activeText = (activeEl.textContent || '').trim();
@@ -328,7 +362,7 @@
   function normalizedBossName(raw) {
     return String(raw || '')
       .replace(
-        /\s*(?:在线|刚刚活跃|今日活跃|今天活跃|\d+日内活跃|本周活跃|近两周活跃|两周内活跃|月内活跃|近期活跃).*$/u,
+        /\s*(?:在线|刚刚活跃|今日活跃|今天活跃|昨日活跃|本周活跃|本月活跃|本年活跃|近两周活跃|近半年活跃|两周内活跃|半年内活跃|半年前活跃|月内活跃|近期活跃|(?:\d+|[一二三四五六七八九十两]+)(?:分钟|小时|日|天|周|个?月|年)(?:内|前)?活跃).*$/u,
         ''
       )
       .trim();
@@ -344,6 +378,52 @@
     return String(element && (element.innerText || element.textContent) || '').trim();
   }
 
+  function detailRecruiterName(detailRoot) {
+    if (!detailRoot) return '';
+    const selector = SELECTORS.jobs.detailRecruiter ||
+      '.job-boss-info h2.name, .job-boss-info .name, ' +
+      '.boss-info h2.name, .job-boss-info .boss-name';
+    let nodes = [];
+    if (typeof detailRoot.querySelectorAll === 'function') {
+      nodes = Array.from(detailRoot.querySelectorAll(selector));
+    }
+    if (!nodes.length && typeof detailRoot.querySelector === 'function') {
+      const fallback = detailRoot.querySelector(selector);
+      if (fallback) nodes = [fallback];
+    }
+    const unique = new Map();
+    for (const node of nodes) {
+      const name = normalizedBossName(detailText(node));
+      const key = normalizedIdentityValue(name);
+      if (key && !unique.has(key)) unique.set(key, name);
+    }
+    return unique.size === 1 ? Array.from(unique.values())[0] : '';
+  }
+
+  function detailCompanyName(detailRoot) {
+    if (!detailRoot) return '';
+    // 现网详情：公司在「吉林省萌敬商贸 · 人事」，不是 .company-name。
+    const attr = detailRoot.querySelector(
+      '.job-boss-info .boss-info-attr, .boss-info-attr'
+    );
+    if (attr) {
+      const raw = detailText(attr);
+      const company = raw.split(/\s*[·|｜]\s*/)[0].trim();
+      if (company && !/查看更多|立即沟通|继续沟通/.test(company)) {
+        return company.slice(0, 80);
+      }
+    }
+    const companyEl = detailRoot.querySelector(
+      SELECTORS.jobs.company ||
+      '.company-name, .boss-info .company-name'
+    );
+    const text = detailText(companyEl);
+    if (text && !/查看更多|立即沟通|继续沟通/.test(text)) {
+      return text.slice(0, 80);
+    }
+    return '';
+  }
+
   function detailFromRoot(detailRoot) {
     if (!detailRoot) {
       return {
@@ -356,22 +436,14 @@
       };
     }
     const heading = detailRoot.querySelector('.job-detail-header .job-name');
-    const company = detailRoot.querySelector(
-      SELECTORS.jobs.company ||
-      '.company-name, .boss-info .company-name, [class*="company-name"]'
-    );
-    const boss = detailRoot.querySelector(
-      SELECTORS.jobs.bossName ||
-      '.boss-name, .boss-info .name, [class*="boss-name"]'
-    );
     const identityLink = detailRoot && (
       detailRoot.querySelector('.more-job-btn[href*="/job_detail/"]') ||
       detailRoot.querySelector('a[href*="/job_detail/"]')
     );
     return {
       name: normalizedHeading(heading && heading.textContent),
-      company: detailText(company),
-      hrName: normalizedBossName(detailText(boss)),
+      company: detailCompanyName(detailRoot),
+      hrName: detailRecruiterName(detailRoot),
       encryptJobId: JobDescription.extractBossJobId(
         identityLink && identityLink.href
       ),
@@ -508,18 +580,61 @@
     });
   }
 
+  function canonicalDialogAction(element, texts) {
+    if (!element) return null;
+    let action = element;
+    const tag = String(element.tagName || '').toLowerCase();
+    const role = typeof element.getAttribute === 'function'
+      ? String(element.getAttribute('role') || '').toLowerCase()
+      : '';
+    if (tag !== 'a' && tag !== 'button' && role !== 'button') {
+      try {
+        const owner = typeof element.closest === 'function'
+          ? element.closest('a, button, [role="button"]')
+          : null;
+        if (owner) action = owner;
+      } catch (e) {}
+    }
+    const actionText = (action.textContent || '').trim();
+    if (texts.indexOf(actionText) < 0 ||
+        action.offsetParent === null ||
+        !isDialogAction(action)) {
+      return null;
+    }
+    return action;
+  }
+
   function visibleDialogActions(texts) {
     const matches = [];
+    const seen = new Set();
     const els = document.querySelectorAll('a, button, span, div');
     for (const el of els) {
       const tx = (el.textContent || '').trim();
-      if (texts.indexOf(tx) >= 0 &&
-          el.offsetParent !== null &&
-          isDialogAction(el)) {
-        matches.push(el);
-      }
+      if (texts.indexOf(tx) < 0 || el.offsetParent === null) continue;
+      const action = canonicalDialogAction(el, texts);
+      if (!action || seen.has(action)) continue;
+      seen.add(action);
+      matches.push(action);
     }
     return matches;
+  }
+
+  function visibleGreetingResultDialogs() {
+    // 2026-07-30 ego 实号：`.greet-boss-dialog` 挂载后容器 offsetParent 可为
+    // null，但内部 `.sure-btn` / 文案仍可见。因此只要节点已连接 DOM 即保护，
+    // 不能依赖容器自身的 isVisibleAction。
+    const dialogs = document.querySelectorAll('.greet-boss-dialog');
+    return Array.from(dialogs).filter((dialog) => {
+      if (!dialog || dialog.isConnected === false) return false;
+      if (isVisibleAction(dialog)) return true;
+      try {
+        const inner = dialog.querySelector(
+          '.sure-btn, .greet-boss-footer, .greet-boss-container, .icon-close, a, button'
+        );
+        if (inner && isVisibleAction(inner)) return true;
+      } catch (e) {}
+      return true;
+    });
   }
 
   function waitForNewDialogText(texts, existing, timeout) {
@@ -654,6 +769,26 @@
   async function goChat(job) {
     const login = detectLoginIssue();
     if (login) return login;
+    // 先冻结已有业务弹窗，再做任何通用清理。若已有「继续沟通」，
+    // 无法证明它属于本次岗位，既不能确认，也不能点 × 关闭。
+    const continueDialogsBeforeContact = new Set(
+      visibleDialogActions(['继续沟通'])
+    );
+    const greetingResultsBeforeContact = new Set(
+      visibleGreetingResultDialogs()
+    );
+    if (greetingResultsBeforeContact.size > 0) {
+      return targetUncertainResult(
+        '联系前页面已有来源不明的“已向BOSS发送消息”结果弹窗，请先人工处理后重试',
+        false
+      );
+    }
+    if (continueDialogsBeforeContact.size > 0) {
+      return targetUncertainResult(
+        '联系前页面已有来源不明的继续沟通弹窗，请先人工处理后重试',
+        false
+      );
+    }
     const dlg0 = await dismissCommonDialogs();
     if (dlg0.blocked) return dlg0.blocked;
     const blocked0 = detectBlock();
@@ -713,15 +848,6 @@
       hrName: finalDetail.hrName || '',
       encryptJobId: finalDetail.encryptJobId || ''
     };
-    const continueDialogsBeforeContact = new Set(
-      visibleDialogActions(['继续沟通'])
-    );
-    if (continueDialogsBeforeContact.size > 0) {
-      return targetUncertainResult(
-        '联系前页面已有来源不明的继续沟通弹窗，请先人工处理后重试',
-        false
-      );
-    }
     const handoffHrName = lockedDetail.hrName;
     if (!handoffHrName) {
       return targetUncertainResult(
@@ -780,14 +906,15 @@
       };
     }
     await sleep(1500);
-    const dlg1 = await dismissCommonDialogs();
-    if (dlg1.blocked) return dlg1.blocked;
+    // 不在首次联系后运行通用弹窗清理。BOSS 的成功回执正是一个带
+    // `.icon-close` 的 `.greet-boss-dialog`，必须先读取并确认其
+    // 「继续沟通」动作，才能进入聊天页并登记 AI 托管。
     const blocked1 = detectBlock();
     if (blocked1) return blocked1;
     const goResult = await waitForNewDialogText(
       ['继续沟通'],
       continueDialogsBeforeContact,
-      2500
+      5000
     );
     if (goResult.ambiguous) {
       return {
@@ -827,16 +954,34 @@
         return {
           success: false,
           sendResultUnknown: true,
+          contactConfirmed: true,
           externalActionPossible: true,
           error: continueTargetStillSafe
-            ? '继续沟通确认按钮无法安全点击，请人工核对'
-            : '拟人点击等待期间目标岗位或继续沟通弹窗已切换，未确认弹窗，请人工核对'
+            ? '联系已成功，但继续沟通按钮无法安全点击，AI 托管尚未登记'
+            : '联系已成功，但目标岗位或继续沟通弹窗已切换，AI 托管尚未登记'
         };
       }
-      return { success: true, navigated: true };
+      return {
+        success: true,
+        navigated: true,
+        contactConfirmed: true
+      };
     }
-    // 无弹窗：有的账号点立即沟通已建联，不一定跳聊天页
-    return { success: true, navigated: false, dialogs: dlg1.clicked };
+    if (/\/web\/geek\/chat(?:[/?#]|$)/i.test(location.href || '')) {
+      return {
+        success: true,
+        navigated: true,
+        contactConfirmed: true
+      };
+    }
+    // 首次点击可能已产生外部副作用，但既没有成功回执，也没有聊天页
+    // 证据。不能伪报成功，更不能自动重试而造成重复联系。
+    return {
+      success: false,
+      sendResultUnknown: true,
+      externalActionPossible: true,
+      error: '首次联系动作已执行，但未取得发送成功回执或聊天页证据；AI 托管未登记，系统不会自动重试'
+    };
   }
 
   chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {

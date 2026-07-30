@@ -30,6 +30,7 @@ test('renders two mutually exclusive Boss batch actions and freezes their mode i
   assert.match(html, /id="deliveryActions"/);
   assert.match(html, /id="btnContact"[^>]*>请先勾选岗位/);
   assert.match(html, /id="btnContactAndTrusteeship"[^>]*>联系已选并开启 AI 托管/);
+  assert.match(html, /id="deliveryStatus"/);
   assert.match(script, /DeliveryGuard\.DELIVERY_MODES\.CONTACT_ONLY/);
   assert.match(script, /DeliveryGuard\.DELIVERY_MODES\.CONTACT_AND_TRUSTEESHIP/);
   assert.match(

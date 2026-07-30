@@ -313,6 +313,33 @@ test('Boss batch actions freeze one mode and stay mutually disabled until cancel
   assert.equal(h.ids.btnContactAndTrusteeship.disabled, false);
 });
 
+test('Boss contact-and-trusteeship prepare failures stay visible on the review page', async () => {
+  const h = await loadFullSidepanel({
+    activePlatform: 'boss',
+    riskAccepted: true,
+    selectedIds: ['job-1'],
+    prepareDelivery() {
+      return {
+        ok: false,
+        code: 'TRUSTEESHIP_NOT_RUNNING',
+        error: 'AI 托管尚未开启',
+        nextAction: '先在 AI 托管页开启并保存设置'
+      };
+    },
+    state: { settings: { enabled: false, paused: false }, managedConversations: {}, pendingApprovalCount: 0 },
+    approvals: []
+  });
+  h.context.updateContactBtn();
+  await h.ids.btnContactAndTrusteeship.trigger('click');
+  assert.match(h.ids.deliveryStatus.textContent, /AI 托管尚未开启/);
+  assert.match(h.ids.deliveryStatus.textContent, /先在 AI 托管页开启并保存设置/);
+  assert.equal(h.ids.deliveryStatus.classList.contains('hidden'), false);
+  assert.equal(
+    (h.ids.deliverySummary.innerHTML || '').includes('开启 AI 托管'),
+    false
+  );
+});
+
 test('review-required description failures stay manually selectable and are counted separately', async () => {
   const h = await loadFullSidepanel({
     activePlatform: 'boss',

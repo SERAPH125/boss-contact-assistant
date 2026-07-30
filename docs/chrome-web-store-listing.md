@@ -110,9 +110,9 @@
 
 公开隐私政策：
 
-`https://github.com/SERAPH125/boss-contact-assistant/blob/main/docs/privacy-policy.md`
+`https://raw.githubusercontent.com/SERAPH125/boss-contact-assistant/main/docs/privacy-policy.md`
 
-提交前必须在无登录/无 GitHub 会话的浏览器窗口中确认该 URL 可访问。
+说明：商店后台优先使用 raw URL，便于 Google 爬虫直接拉取纯文本；`blob` 页面也可访问，但偶发被判定不可达。提交前必须在无登录/无 GitHub 会话的浏览器窗口中确认该 URL 返回 HTTP 200。
 
 ## 审核测试步骤
 
@@ -169,18 +169,19 @@ Chrome Web Store 对代表用户发送消息的能力要求严格，这一行为
 
 ## 截图清单
 
-建议准备不含真实姓名、联系方式、API Key、Webhook 或聊天隐私的图片：
+已生成可直接上传的合成数据素材：
 
-1. 1280×800 或 640×400：配置页的平台/API/求职设置概览；
-2. 1280×800 或 640×400：岗位筛选列表，展示默认不选和“联系已选”；
-3. 1280×800 或 640×400：批次确认单；
-4. 1280×800 或 640×400：执行日志和安全停机提示；
-5. 1280×800 或 640×400：AI 托管的已登记岗位和控制项；
-6. 1280×800 或 640×400：待确认页，使用完全合成内容；
-7. 128×128 商店图标；
-8. 可选 440×280 小型宣传图。
+1. `docs/store-assets/01-job-screening.png`：岗位筛选，展示默认不选、AI 匹配理由和人工勾选；
+2. `docs/store-assets/02-contact-confirmation.png`：批次确认，展示联系范围、额度和招呼语；
+3. `docs/store-assets/03-ai-trusteeship.png`：AI 托管，展示检查间隔、静默时段和已登记会话；
+4. `docs/store-assets/04-human-confirmation.png`：待确认，展示重要问题、建议回复和人工处理；
+5. `docs/store-assets/05-execution-log.png`：执行记录，展示成功、等待、跳过和暂停；
+6. `docs/store-assets/promo-small-440x280.png`：小型宣传图块；
+7. `docs/store-assets/promo-marquee-1400x560.png`：顶部宣传图块。
 
-截图应使用脱敏测试账号或合成数据。不要直接提交真实 HR 会话截图。
+五张屏幕截图均为 1280×800。全部七张图片都是 24 位 PNG、无 Alpha 透明层，并通过 `npm run validate:store-assets` 校验。生成方式、隐私边界和人工检查清单见 `docs/store-assets/README.md`。
+
+商店图标继续使用 `icons/icon128.png`。不要用真实 HR 会话替换上述素材。
 
 ## 提交前检查
 

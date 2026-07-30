@@ -44,6 +44,32 @@ test('does not treat friend title HR as a job position', () => {
   assert.equal(resolved.matchedPosition, '');
 });
 
+test('does not treat recruiter role titles as job positions', () => {
+  [
+    '招聘专员',
+    '人事培训',
+    '人力资源专员',
+    '人事经理HRBP',
+    '前台人事'
+  ].forEach((title, index) => {
+    const resolved = Peer.resolvePeerIdentity({
+      domIds: ['dom-' + index],
+      origin: 'https://www.zhipin.com',
+      friends: [{
+        encryptUid: 'peer~~' + index,
+        uid: 'dom-' + index,
+        title
+      }]
+    });
+    assert.equal(resolved.ok, true);
+    assert.equal(
+      resolved.matchedPosition,
+      '',
+      title + ' 是招聘者职务，不是候选人正在沟通的岗位'
+    );
+  });
+});
+
 test('fails closed on missing unique friend alignment', () => {
   assert.equal(Peer.resolvePeerIdentity({
     domIds: ['dom-1'],

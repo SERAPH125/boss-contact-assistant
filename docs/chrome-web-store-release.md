@@ -73,7 +73,7 @@ dist/chrome-web-store/boss-contact-assistant-0.3.6.zip
 3. 上传 `dist/chrome-web-store/boss-contact-assistant-0.3.6.zip`；
 4. 填写 `docs/chrome-web-store-listing.md` 中准备的商店文案和权限理由；
 5. 填写无需登录即可访问的隐私政策 URL；
-6. 上传商店图标、截图和宣传图片；
+6. 按 `docs/store-assets/README.md` 上传 5 张截图和 2 张宣传图片；
 7. 按审核测试步骤准备 BOSS/智联页面和测试说明；
 8. 再次核对数据披露和 AI 自动外发说明；
 9. 提交审核。
@@ -81,10 +81,10 @@ dist/chrome-web-store/boss-contact-assistant-0.3.6.zip
 公开隐私政策建议填写：
 
 ```text
-https://github.com/SERAPH125/boss-contact-assistant/blob/main/docs/privacy-policy.md
+https://raw.githubusercontent.com/SERAPH125/boss-contact-assistant/main/docs/privacy-policy.md
 ```
 
-该文件推送到公开仓库后，必须使用无登录浏览器窗口验证可访问，再填写到 Chrome Web Store。完整商店文案、权限理由、数据披露和审核步骤见 `docs/chrome-web-store-listing.md`。
+该文件推送到公开仓库后，必须使用无登录浏览器窗口验证可访问（HTTP 200），再填写到 Chrome Web Store。完整商店文案、权限理由、数据披露和审核步骤见 `docs/chrome-web-store-listing.md`。
 
 ## 提交前清单
 
@@ -95,7 +95,8 @@ https://github.com/SERAPH125/boss-contact-assistant/blob/main/docs/privacy-polic
 - Manifest 只声明当前支持的 BOSS/智联招聘平台；
 - 隐私政策 URL 公开可访问；
 - 数据披露包括招聘网站消息、AI 服务商、飞书和自动发送；
-- 商店截图使用测试或合成数据，不包含真实 HR 信息和任何凭据；
+- `npm run validate:store-assets` 验证 7 张商店图片尺寸和无 Alpha 通道；
+- 商店截图使用 `docs/store-assets/` 中的合成数据素材，不包含真实 HR 信息和任何凭据；
 - 审核测试账号、AI Key 和飞书 Webhook 只通过私密审核说明提供；
 - 已在提交说明中披露自动外发审核风险。
 
@@ -132,3 +133,14 @@ Chrome 应用商店对代表用户发送消息的能力审查严格。提交材�
 - Manifest：根目录可读取，只声明 BOSS、智联、DeepSeek、OpenAI 和飞书固定主机访问；自定义兼容 API 继续按具体来源请求可选权限。
 
 自动外发托管保持启用且未改动。本轮没有修改 `src/conversation/trusteeship-policy.js`、`src/conversation/monitor-engine.js`、`src/conversation/trusteeship-runtime.js`、`src/conversation/reply-ai.js` 或发送协议；相关既有回归包含在上述 460 项通过结果中。
+
+## 2026-07-28 商店图片验证记录
+
+- 生成目录：`docs/store-assets/`；
+- 屏幕截图：5 张，均为 1280×800；
+- 小型宣传图块：440×280；
+- 顶部宣传图块：1400×560；
+- `npm run validate:store-assets`：7/7 通过，全部为 PNG 且无 Alpha；
+- 人工视觉检查：无裁切、重叠、浏览器外框或真实个人数据；
+- 数据来源：完全合成，不读取扩展存储和招聘网站会话；
+- 运行时影响：无。图片生成没有修改扩展代码、AI 托管策略或自动外发行为。

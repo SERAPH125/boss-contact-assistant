@@ -1703,6 +1703,11 @@ async function prepareSelectedDelivery(deliveryMode, sourceButton) {
   if (!ids.length) return;
   sourceButton.disabled = true;
   sourceButton.textContent = '正在生成确认单…';
+  const deliveryStatus = $('deliveryStatus');
+  if (deliveryStatus) {
+    deliveryStatus.textContent = '';
+    deliveryStatus.classList.add('hidden');
+  }
   try {
     const response = await sendRuntimeMessage({
       type: 'PREPARE_DELIVERY',
@@ -1710,12 +1715,34 @@ async function prepareSelectedDelivery(deliveryMode, sourceButton) {
       deliveryMode: deliveryMode
     });
     if (!response.ok) {
-      addLog((response.error || '无法生成确认单') + '；' + (response.nextAction || '请重新扫描'), 'error');
+      const labels = {
+        api: 'API 配置与测试',
+        replyEvidence: '简历要点或 HR 常用问答',
+        resumeText: '简历要点或 HR 常用问答',
+        feishuTest: '飞书测试通知',
+        riskAccepted: '平台风险确认'
+      };
+      const missing = Array.isArray(response.missing)
+        ? response.missing.map((key) => labels[key] || key).filter(Boolean)
+        : [];
+      let message = (response.error || '无法生成确认单');
+      if (missing.length) message += '（缺少：' + missing.join('、') + '）';
+      if (response.nextAction) message += '；' + response.nextAction;
+      addLog(message, 'error');
+      if (deliveryStatus) {
+        deliveryStatus.textContent = message;
+        deliveryStatus.classList.remove('hidden');
+      }
       return;
     }
     openDeliveryModal(response.intentId, response.plan);
   } catch (error) {
-    addLog('生成确认单失败：' + error.message, 'error');
+    const message = '生成确认单失败：' + error.message;
+    addLog(message, 'error');
+    if (deliveryStatus) {
+      deliveryStatus.textContent = message;
+      deliveryStatus.classList.remove('hidden');
+    }
   } finally {
     updateContactBtn();
   }

@@ -481,10 +481,12 @@ function sendToTab(tabId, msg) {
   return new Promise((resolve) => {
     chrome.tabs.sendMessage(tabId, msg, (resp) => {
       if (chrome.runtime.lastError) {
+        const error = chrome.runtime.lastError.message;
         resolve({
           success: false,
-          error: chrome.runtime.lastError.message,
-          channelClosed: isChannelClosedError(chrome.runtime.lastError.message)
+          error: error,
+          noReceiver: isNoReceiverError(error),
+          channelClosed: isChannelClosedError(error)
         });
       } else {
         resolve(resp || { success: false, error: 'no response' });
@@ -493,8 +495,13 @@ function sendToTab(tabId, msg) {
   });
 }
 
+function isNoReceiverError(err) {
+  return /Receiving end does not exist|Could not establish connection|Extension context invalidated/i.test(err || '');
+}
+
 function isChannelClosedError(err) {
-  return /back\/forward cache|message channel is closed|Receiving end does not exist|Extension context invalidated|The message port closed/i.test(err || '');
+  if (isNoReceiverError(err)) return false;
+  return /back\/forward cache|message channel is closed|The message port closed|message port closed|port closed before a response/i.test(err || '');
 }
 
 async function waitForUrlMatch(tabId, hint, timeoutMs) {
@@ -1086,12 +1093,44 @@ async function runDeliver(jobIds, options) {
       }
       log('  发起沟通（' + meta.actionWord + '）…');
       checkpoint();
-      const chatR = await sendToTab(tab.id, { type: 'GO_CHAT', job: job });
+      let chatR = await sendToTab(tab.id, { type: 'GO_CHAT', job: job });
       checkpoint();
+      let channelNavigationConfirmed = false;
+      if (chatR && chatR.channelClosed) {
+        // 消息通道关闭只说明响应丢失，不足以证明 GO_CHAT 已执行。
+        // 先以标签页 URL 作为正证据；若仍未进入聊天页，则按外部动作
+        // 结果未知处理，绝不能伪报建联成功或登记 AI 托管。
+        const navigationEvidence = await waitForUrlMatch(
+          tab.id,
+          meta.chatPathHint,
+          5000
+        );
+        checkpoint();
+        channelNavigationConfirmed = navigationEvidence.ok === true;
+        if (!channelNavigationConfirmed) {
+          chatR = Object.assign({}, chatR, {
+            success: false,
+            sendResultUnknown: true,
+            externalActionPossible: true,
+            error: '发起沟通后消息通道关闭，但未取得聊天页导航证据；联系结果未知，系统不会自动重试'
+          });
+        }
+      }
       // 点「继续沟通」会跳转聊天页，旧页进 bfcache 时通道关闭属预期，不算失败
-      const goChatOk = (chatR && chatR.success !== false && !chatR.needLogin && !chatR.blocked)
-        || (chatR && chatR.channelClosed)
-        || (chatR && isChannelClosedError(chatR.error));
+      // 仅有 `success:true` 不足以证明建联链路完成：必须同时拿到
+      // 聊天页导航、页内聊天或平台投递成功的明确证据。否则不能提前
+      // 计入日限/去重，更不能声称 AI 托管已开启。
+      const goChatOk = (chatR &&
+        chatR.success === true &&
+        !chatR.needLogin &&
+        !chatR.blocked &&
+        (
+          chatR.navigated === true ||
+          chatR.inPageChat === true ||
+          chatR.skipChat === true ||
+          chatR.applied === true
+        ))
+        || channelNavigationConfirmed;
       if (chatR && chatR.needLogin) {
         notifyNeedLogin(chatR.error || meta.loginHint);
         blockRun(chatR.error || meta.loginHint, 'LOGIN_REQUIRED');
@@ -1179,47 +1218,93 @@ async function runDeliver(jobIds, options) {
           progress(k + 1, ids.length, '联系');
           break;
         }
-        log('  发送招呼语…');
         const expected = { id: job.id, name: job.name, company: job.company, hrName: job.hrName || '' };
+        const bossContactAlreadySent = runPlatformId === 'boss' &&
+          (
+            (chatR && chatR.contactConfirmed === true) ||
+            channelNavigationConfirmed
+          );
         checkpoint();
-        let r = await sendToTab(tab.id, { type: 'SEND_ACTIVE', image: cfg.resumeImage || '', greeting: greeting, expected: expected });
+        let r;
+        if (bossContactAlreadySent) {
+          log(enableTrusteeship
+            ? '  BOSS 已发送首条招呼，只读登记会话并开启后续托管…'
+            : '  BOSS 已发送首条招呼，只读登记会话…');
+          r = await sendToTab(tab.id, {
+            type: 'CAPTURE_CONTACTED_CONVERSATION',
+            expected: expected
+          });
+        } else {
+          log('  发送招呼语…');
+          r = await sendToTab(tab.id, {
+            type: 'SEND_ACTIVE',
+            image: cfg.resumeImage || '',
+            greeting: greeting,
+            expected: expected
+          });
+        }
         checkpoint();
         if (r && (r.channelClosed || isChannelClosedError(r.error))) {
           await ensureInjected(tab.id, meta.chatScript, meta.selectorsFile);
           checkpoint();
           await humanWait(700, 900);
           checkpoint();
-          // 发送结果未知时禁止自动重放，避免重复招呼。
-          r = { success: false, unknown: true, error: '发送结果未知，已停止自动重试' };
+          if (bossContactAlreadySent) {
+            // 纯读取证可安全重试；这里不会触碰输入框或产生第二条消息。
+            r = await sendToTab(tab.id, {
+              type: 'CAPTURE_CONTACTED_CONVERSATION',
+              expected: expected
+            });
+            checkpoint();
+          } else {
+            // 发送结果未知时禁止自动重放，避免重复招呼。
+            r = { success: false, unknown: true, error: '发送结果未知，已停止自动重试' };
+          }
         }
-        if (r && r.needLogin) {
+        const contactedCaptureFailed = bossContactAlreadySent &&
+          (!r || r.success !== true);
+        if (contactedCaptureFailed) {
+          const registrationWarning = '已联系，但会话登记失败：' +
+            ((r && r.error) || '未取得可靠会话标识');
+          const resultDetails = {
+            warning: registrationWarning
+          };
+          if (enableTrusteeship) resultDetails.trusteeshipOk = false;
+          recordOk(job, resultDetails);
+          log('  ' + registrationWarning + '；不会重复发送招呼语', 'warn');
+          progress(k + 1, ids.length, '联系');
+          if (r && r.needLogin) {
+            notifyNeedLogin(r.error || meta.loginHint);
+            blockRun(r.error || meta.loginHint, 'LOGIN_REQUIRED');
+            break;
+          }
+          if (r && r.blocked) {
+            blockRun(r.reason || '登记会话时触发风控', r.code || 'RUN_BLOCKED');
+            break;
+          }
+        } else if (r && r.needLogin) {
           notifyNeedLogin(r.error || meta.loginHint);
           blockRun(r.error || meta.loginHint, 'LOGIN_REQUIRED');
           break;
-        }
-        if (r && r.blocked) {
+        } else if (r && r.blocked) {
           blockRun(r.reason || '发送时触发风控', r.code || 'RUN_BLOCKED');
           break;
-        }
-        if (r && (r.unknown || r.sendResultUnknown)) {
+        } else if (r && (r.unknown || r.sendResultUnknown)) {
           recordFail(job, '已建联；' + r.error);
           blockRun(r.error, 'SEND_RESULT_UNKNOWN');
           progress(k + 1, ids.length, '联系');
           break;
-        }
-        if (r && r.targetUncertain) {
+        } else if (r && r.targetUncertain) {
           recordFail(job, '已建联；' + r.error);
           blockRun(r.error, 'TARGET_UNCERTAIN');
           progress(k + 1, ids.length, '联系');
           break;
-        }
-        if (r && r.selectorUnavailable) {
+        } else if (r && r.selectorUnavailable) {
           recordFail(job, '已建联；' + r.error);
           blockRun(r.error, 'SELECTOR_UNAVAILABLE');
           progress(k + 1, ids.length, '联系');
           break;
-        }
-        if (r && r.success) {
+        } else if (r && r.success) {
           const resultDetails = {};
           const registrationReadiness = ConversationRegistration.checkReadiness(r);
           if (registrationReadiness.ok) {
