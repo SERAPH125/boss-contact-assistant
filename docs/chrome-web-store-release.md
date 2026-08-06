@@ -1,7 +1,7 @@
 # Chrome 应用商店发布操作说明
 
-适用版本：0.3.6  
-更新日期：2026-07-28
+适用版本：0.3.7
+更新日期：2026-08-06
 
 ## 发布边界
 
@@ -39,7 +39,7 @@ npm run package:chrome
 当前版本输出：
 
 ```text
-dist/chrome-web-store/boss-contact-assistant-0.3.6.zip
+dist/chrome-web-store/boss-contact-assistant-0.3.7.zip
 ```
 
 脚本会先创建全新暂存目录，校验每个白名单文件是普通文件且不是符号链接，复制后把成员权限固定为 `0644`、时间固定为 ZIP 最早支持的 `1980-01-01 00:00:00 UTC`，再按白名单顺序生成 ZIP，并读取 ZIP 清单逐项比较。这样相同输入跨时间构建会得到相同二进制和 SHA-256。任一阶段失败都会删除该次不可信产物。
@@ -49,19 +49,19 @@ dist/chrome-web-store/boss-contact-assistant-0.3.6.zip
 查看文件清单：
 
 ```bash
-/usr/bin/unzip -Z1 dist/chrome-web-store/boss-contact-assistant-0.3.6.zip
+/usr/bin/unzip -Z1 dist/chrome-web-store/boss-contact-assistant-0.3.7.zip
 ```
 
 验证 ZIP 完整性：
 
 ```bash
-/usr/bin/unzip -t dist/chrome-web-store/boss-contact-assistant-0.3.6.zip
+/usr/bin/unzip -t dist/chrome-web-store/boss-contact-assistant-0.3.7.zip
 ```
 
 检查根目录 Manifest：
 
 ```bash
-/usr/bin/unzip -p dist/chrome-web-store/boss-contact-assistant-0.3.6.zip manifest.json
+/usr/bin/unzip -p dist/chrome-web-store/boss-contact-assistant-0.3.7.zip manifest.json
 ```
 
 也可以把 ZIP 解压到一个新的临时目录，再在 `chrome://extensions` 中使用“加载已解压的扩展程序”选择该目录进行安装检查。
@@ -70,7 +70,7 @@ dist/chrome-web-store/boss-contact-assistant-0.3.6.zip
 
 1. 登录 Chrome Web Store 开发者后台；
 2. 创建新项目；
-3. 上传 `dist/chrome-web-store/boss-contact-assistant-0.3.6.zip`；
+3. 上传 `dist/chrome-web-store/boss-contact-assistant-0.3.7.zip`；
 4. 填写 `docs/chrome-web-store-listing.md` 中准备的商店文案和权限理由；
 5. 填写无需登录即可访问的隐私政策 URL；
 6. 按 `docs/store-assets/README.md` 上传 5 张截图和 2 张宣传图片；
@@ -113,6 +113,17 @@ Chrome 应用商店对代表用户发送消息的能力审查严格。提交材�
 - 重要或不确定问题进入待确认。
 
 隐瞒该行为会增加拒审和后续下架风险。若审核方不接受，应由产品负责人决定是否另建商店合规发行通道，不能在本发布脚本中偷偷改写运行逻辑。
+
+## 2026-08-06 v0.3.7 更新验证记录
+
+- 发布来源：`main` / `0de85d7`，包含 v0.3.6 商店包之后的 Boss 筛选、建联登记与 AI 托管交接修复；
+- `npm test`：556/556 通过；
+- `node --check`：`background.js`、`sidepanel.js`、`humanize.js` 全部通过；
+- `npm run validate:store-assets`：7/7 通过；
+- ZIP：`boss-contact-assistant-0.3.7.zip`，38 个白名单文件；
+- 两次独立构建 SHA-256 均为 `82aee9f95f66b4d0506afdf3236dd77e49364903bc24cab23cf61111293880ae`；
+- `/usr/bin/unzip -t`：全部文件通过，根目录 Manifest 版本为 `0.3.7`；
+- 商店发布前版本：`0.3.6`，满足 Chrome Web Store 更新包版本必须递增的要求。
 
 ## 2026-07-28 发布验证记录
 

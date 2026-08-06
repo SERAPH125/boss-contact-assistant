@@ -1,7 +1,7 @@
 {
   "manifest_version": 3,
   "name": "求职联系助手",
-  "version": "0.3.6",
+  "version": "0.3.7",
   "description": "半自动双平台：Boss / 智联。扫描 → 勾选 → 仅联系已选。拟人化降风险，BYOK。",
   "icons": { "16": "icons/icon16.png", "48": "icons/icon48.png", "128": "icons/icon128.png" },
   "action": { "default_title": "求职联系助手" },
